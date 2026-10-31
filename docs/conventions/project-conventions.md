@@ -65,7 +65,7 @@
 - 数据最小化：只采集提供服务必需的字段。
 - 支持注销：注销后用户令牌全部失效，按策略清理/匿名化数据。
 - 指标事件必须鉴权、字段白名单、用户同意后上报且可撤回；未登录或无同意不上报。
-- 事件字段白名单（M2）：`search_requested`（耗时、topK、命中数、是否空召回）、`citation_clicked`（segmentId）、`player_started`（起播耗时、是否自动播放被拒）。**不含** query 原文、回答内容、完整播放地址。
+- 事件字段白名单（M2）：`search_requested`（耗时、topK、命中数、是否空召回）、`citation_clicked`（segmentId）、`player_started`（起播耗时、是否自动播放被拒）、`feedback_submitted`（评分 up/down）。**不含** query 原文、回答内容、完整播放地址、反馈分类与备注。
 - 敏感字段脱敏后再入库或入日志。
 
 ## 6. 数据与索引

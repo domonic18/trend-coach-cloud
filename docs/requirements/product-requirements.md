@@ -63,7 +63,7 @@
 ### C5 指标事件（M2，P1，待冻结）
 
 - 端点建议 `POST /v1/events`，必须鉴权、字段白名单、用户同意后可上报且可撤回。
-- 一期字段：`search_requested`（耗时、topK、命中数、是否空召回）、`citation_clicked`（segmentId）、`player_started`（起播耗时、是否自动播放被拒）。
+- 一期字段：`search_requested`（耗时、topK、命中数、是否空召回）、`citation_clicked`（segmentId）、`player_started`（起播耗时、是否自动播放被拒）、`feedback_submitted`（评分 up/down）。
 - 不采集 query 原文、回答内容、完整播放地址；未登录或无 consent 不上报。
 
 ### C6 内容与索引管线（M1 起，P0）

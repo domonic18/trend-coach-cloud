@@ -12,6 +12,7 @@ const ALLOWED_FIELDS: Record<string, ReadonlySet<string>> = {
   search_requested: new Set(['durationMs', 'topK', 'hits', 'empty']),
   citation_clicked: new Set(['segmentId']),
   player_started: new Set(['startupMs', 'autoplayBlocked']),
+  feedback_submitted: new Set(['rating']),
 }
 
 export interface EventInput {
@@ -61,6 +62,11 @@ function normalizeProps(name: string, props: Record<string, unknown>): Record<st
         startupMs: intProp(props, 'startupMs', 0, 60_000),
         autoplayBlocked: boolProp(props, 'autoplayBlocked'),
       }
+    case 'feedback_submitted': {
+      const rating = props.rating
+      if (rating !== 'up' && rating !== 'down') throw badRequest('props.rating must be up or down')
+      return { rating }
+    }
     default:
       throw badRequest('event name not allowed')
   }

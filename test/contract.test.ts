@@ -683,11 +683,21 @@ test('事件：同意读写、门禁、白名单与幂等', async () => {
   )
   assert.equal(rows[0]?.count, 1)
 
+  const feedback = await app.inject({
+    method: 'POST',
+    url: '/v1/events',
+    headers: authHeaders(grant),
+    payload: { eventId: 'evt-contract-feedback-0001', name: 'feedback_submitted', props: { rating: 'up' } },
+  })
+  assert.equal(feedback.statusCode, 202)
+
   const cases: Record<string, unknown>[] = [
     { eventId: 'evt-contract-0002', name: 'answer_generated', props: {} },
     { ...event, eventId: 'evt-contract-0003', props: { ...event.props, query: '均线' } },
     { eventId: 'evt-contract-0004', name: 'citation_clicked', props: { segmentId: 'bad' } },
     { ...event, eventId: 'evt-contract-0005', occurredAt: Date.now() - 31 * 24 * 60 * 60 * 1000 },
+    { eventId: 'evt-contract-0006', name: 'feedback_submitted', props: { rating: 'neutral' } },
+    { eventId: 'evt-contract-0007', name: 'feedback_submitted', props: { rating: 'up', note: '泄漏' } },
   ]
   for (const payload of cases) {
     const invalid = await app.inject({

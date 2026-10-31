@@ -145,7 +145,7 @@ Content-Type: application/json
 - 业务接口只读；按用户/设备限流与配额告警；视频并发限制。
 - 用户数据最小化采集；支持注销；敏感字段脱敏。
 - 指标事件必须鉴权、字段白名单、同意后可上报且可撤回；未登录或无 consent 不上报。
-- 事件白名单（M2）：`search_requested`（耗时、topK、命中数、是否空召回）、`citation_clicked`（segmentId）、`player_started`（起播耗时、是否自动播放被拒）；不含 query 原文、回答内容、完整播放地址。
+- 事件白名单（M2）：`search_requested`（耗时、topK、命中数、是否空召回）、`citation_clicked`（segmentId）、`player_started`（起播耗时、是否自动播放被拒）、`feedback_submitted`（评分 up/down，仅来自用过课程检索的会话）；不含 query 原文、回答内容、完整播放地址、反馈分类与备注。
 - 事件接收端点路径待定（建议 `POST /v1/events`），需先冻结字段与同意模型。
 
 ## 6. 对接验收清单
