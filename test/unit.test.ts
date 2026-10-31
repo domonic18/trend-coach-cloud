@@ -36,8 +36,10 @@ test('staging/production 强制 HTTPS；production 拒绝本机地址', () => {
     APP_ENV: 'production',
     PUBLIC_BASE_URL: 'https://api.example.com',
     MEDIA_BASE_URL: 'https://media.example.com',
+    ASR_API_KEY: 'test-asr-key',
   })
   assert.equal(config.env, 'production')
+  assert.equal(config.asr?.apiKey, 'test-asr-key')
 })
 
 test('staging/production 拒绝本地默认密钥', () => {

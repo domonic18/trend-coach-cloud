@@ -6,12 +6,14 @@ import { after, before, test } from 'node:test'
 import type { FastifyInstance } from 'fastify'
 import { parse as parseYaml } from 'yaml'
 import { buildApp } from '../src/app.js'
+import { AsrError, type AsrProvider } from '../src/asr/provider.js'
 import type { Grant } from '../src/auth/service.js'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { runMigrations } from '../src/migrate.js'
 import { signPlaybackToken } from '../src/playback/sign.js'
 import { seedDatabase } from '../src/seed.js'
+import { wavBase64 } from './asr-fixtures.js'
 
 const DATABASE_URL = process.env.TEST_DATABASE_URL
   ?? 'postgres://trend_coach:trend_coach@127.0.0.1:5432/trend_coach_test'
@@ -55,8 +57,20 @@ function env(overrides: Record<string, string> = {}): Record<string, string> {
     RATE_LIMIT_LOGIN_PER_MINUTE: '1000',
     RATE_LIMIT_INVITE_PER_MINUTE: '1000',
     RATE_LIMIT_DEVICE_APPROVE_PER_MINUTE: '1000',
+    RATE_LIMIT_ASR_PER_MINUTE: '1000',
+    ASR_API_KEY: 'test-asr-key',
     ...overrides,
   }
+}
+
+const fakeAsr: AsrProvider = {
+  async transcribe(_wav, durationMs) {
+    if (durationMs === 1500) return ` ${String.fromCharCode(7)} `
+    if (durationMs === 2000) throw new AsrError('rate_limited')
+    if (durationMs === 2500) throw new AsrError('unavailable')
+    if (durationMs === 3000) throw new AsrError('invalid_response')
+    return '趋势反转的初步信号有哪些？'
+  },
 }
 
 function adminHeaders(): Record<string, string> {
@@ -155,6 +169,7 @@ before(async () => {
   app = await buildApp({
     config,
     pool,
+    asr: fakeAsr,
     onRoute: (method, url) => routes.push(`${method} ${url}`),
   })
   await app.ready()
@@ -1782,6 +1797,111 @@ test('检索限流：单设备超出配额返回 429', async () => {
       url: '/v1/kb/search',
       headers: authHeaders(mainGrant),
       payload: { query: '均线' },
+    })
+    assert.equal(second.statusCode, 429)
+  } finally {
+    await limited.close()
+  }
+})
+
+test('语音转写：鉴权、音频校验、空结果与上游错误映射', async () => {
+  const payload = (durationMs = 1000) => ({
+    audio: wavBase64({ durationMs }),
+    format: 'wav',
+    durationMs,
+  })
+
+  const denied = await app.inject({
+    method: 'POST',
+    url: '/v1/asr/transcribe',
+    payload: payload(),
+  })
+  assert.equal(denied.statusCode, 401)
+
+  const mismatch = await app.inject({
+    method: 'POST',
+    url: '/v1/asr/transcribe',
+    headers: { authorization: `Bearer ${mainGrant.accessToken}`, 'x-device-id': 'device-other-0001' },
+    payload: payload(),
+  })
+  assert.equal(mismatch.statusCode, 403)
+
+  const invalidBodies: unknown[] = [
+    {},
+    { audio: wavBase64(), format: 'webm', durationMs: 1000 },
+    { audio: '', format: 'wav', durationMs: 1000 },
+    { audio: 'not base64!!', format: 'wav', durationMs: 1000 },
+    { audio: wavBase64({ sampleRate: 44_100 }), format: 'wav', durationMs: 1000 },
+    { audio: wavBase64({ durationMs: 10_000 }), format: 'wav', durationMs: 13_000 },
+    { audio: wavBase64(), format: 'wav', durationMs: 0 },
+    { audio: wavBase64(), format: 'wav', durationMs: 1.5 },
+  ]
+  for (const body of invalidBodies) {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/asr/transcribe',
+      headers: authHeaders(mainGrant),
+      payload: body as Record<string, unknown>,
+    })
+    assert.equal(response.statusCode, 400, JSON.stringify(body))
+  }
+
+  const oversized = await app.inject({
+    method: 'POST',
+    url: '/v1/asr/transcribe',
+    headers: authHeaders(mainGrant),
+    payload: { audio: 'A'.repeat(3 * 1024 * 1024), format: 'wav', durationMs: 1000 },
+  })
+  assert.equal(oversized.statusCode, 413)
+
+  const empty = await app.inject({
+    method: 'POST',
+    url: '/v1/asr/transcribe',
+    headers: authHeaders(mainGrant),
+    payload: payload(1500),
+  })
+  assert.equal(empty.statusCode, 422)
+
+  const upstreamFailures: [number, number][] = [[2000, 429], [2500, 503], [3000, 502]]
+  for (const [durationMs, statusCode] of upstreamFailures) {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/asr/transcribe',
+      headers: authHeaders(mainGrant),
+      payload: payload(durationMs),
+    })
+    assert.equal(response.statusCode, statusCode, String(durationMs))
+  }
+
+  const ok = await app.inject({
+    method: 'POST',
+    url: '/v1/asr/transcribe',
+    headers: authHeaders(mainGrant),
+    payload: payload(12_000),
+  })
+  assert.equal(ok.statusCode, 200, ok.body)
+  assert.deepEqual(ok.json(), { text: '趋势反转的初步信号有哪些？', durationMs: 12_000 })
+})
+
+test('语音转写限流：单设备超出配额返回 429', async () => {
+  const limited = await buildApp({
+    config: loadConfig(env({ RATE_LIMIT_ASR_PER_MINUTE: '1' })),
+    pool,
+    asr: fakeAsr,
+  })
+  try {
+    const first = await limited.inject({
+      method: 'POST',
+      url: '/v1/asr/transcribe',
+      headers: authHeaders(mainGrant),
+      payload: { audio: wavBase64(), format: 'wav', durationMs: 1000 },
+    })
+    assert.equal(first.statusCode, 200)
+    const second = await limited.inject({
+      method: 'POST',
+      url: '/v1/asr/transcribe',
+      headers: authHeaders(mainGrant),
+      payload: { audio: wavBase64(), format: 'wav', durationMs: 1000 },
     })
     assert.equal(second.statusCode, 429)
   } finally {
