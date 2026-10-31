@@ -544,6 +544,58 @@ test('刷新：设备绑定、轮换与重放吊销', async () => {
   assert.equal(revoked.statusCode, 401)
 })
 
+test('注销：吊销本设备令牌且不影响其它设备', async () => {
+  const target = await grantFor('revoke-device-0001')
+  const other = await grantFor('revoke-device-0002')
+
+  const mismatch = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/revoke',
+    headers: { authorization: `Bearer ${other.accessToken}`, 'x-device-id': target.deviceId },
+  })
+  assert.equal(mismatch.statusCode, 403)
+
+  const revoked = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/revoke',
+    headers: authHeaders(target),
+  })
+  assert.equal(revoked.statusCode, 200)
+  assert.deepEqual(revoked.json(), { revoked: true })
+
+  const afterRevoke = await app.inject({
+    method: 'POST',
+    url: '/v1/kb/search',
+    headers: authHeaders(target),
+    payload: { query: '均线' },
+  })
+  assert.equal(afterRevoke.statusCode, 401)
+
+  const refreshAfterRevoke = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/refresh',
+    payload: { refreshToken: target.refreshToken, deviceId: target.deviceId },
+  })
+  assert.equal(refreshAfterRevoke.statusCode, 401)
+
+  const otherStillWorks = await app.inject({
+    method: 'POST',
+    url: '/v1/kb/search',
+    headers: authHeaders(other),
+    payload: { query: '均线' },
+  })
+  assert.equal(otherStillWorks.statusCode, 200)
+
+  const again = await grantFor('revoke-device-0001')
+  const restored = await app.inject({
+    method: 'POST',
+    url: '/v1/kb/search',
+    headers: authHeaders(again),
+    payload: { query: '均线' },
+  })
+  assert.equal(restored.statusCode, 200)
+})
+
 test('事件：同意读写、门禁、白名单与幂等', async () => {
   const grant = await grantFor('events-device-0001')
   const userId = await userIdFor(grant.deviceId)
