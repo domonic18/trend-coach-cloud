@@ -157,6 +157,13 @@ export async function buildApp({ config, pool, onRoute }: BuildAppOptions): Prom
       prefix: '/admin/',
       index: ['index.html'],
       cacheControl: false,
+      // 入口页每次回源，避免发布后仍用旧 bundle；哈希资源可长缓存。
+      setHeaders: (reply, filePath) => {
+        reply.header(
+          'cache-control',
+          filePath.endsWith('index.html') ? 'no-store' : 'public, max-age=31536000, immutable',
+        )
+      },
     })
     app.get('/admin', async (_request, reply) => reply.redirect('/admin/'))
   }
