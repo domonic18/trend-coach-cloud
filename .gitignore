@@ -5,6 +5,11 @@ coverage/
 .env
 .env.*
 !.env.example
+!.env.prod.example
 *.log
 .DS_Store
 *.tgz
+backups/
+media/*
+!media/.gitkeep
+deploy/monitoring/console_token

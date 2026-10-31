@@ -1,0 +1,15 @@
+# 由 docker-compose.prod.yml 挂载；DOMAIN 来自 .env.prod。
+# 公网域名自动签发 Let's Encrypt 证书；localhost 自动使用本地 CA。
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:3939
+
+	header {
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

@@ -1,0 +1,49 @@
+groups:
+  - name: trend-coach-availability
+    interval: 30s
+    rules:
+      - alert: TrendCoachDown
+        expr: up{job="trend-coach"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 趋势课程云端不可达
+          description: Prometheus 连续 2 分钟无法抓取 /metrics，检查容器与数据库连通性。
+
+      - alert: TrendCoachHigh5xxRate
+        expr: |
+          sum(rate(trend_coach_http_requests_total{status=~"5.."}[5m]))
+          / clamp_min(sum(rate(trend_coach_http_requests_total[5m])), 1e-9) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 云端 5xx 比例超过 1%
+          description: 近 5 分钟 5xx 占比 {{ $value | humanizePercentage }}，检查日志与数据库。
+
+      - alert: TrendCoachSearchLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(trend_coach_http_request_duration_seconds_bucket{route="/v1/kb/search",status=~"2.."}[10m])
+            )
+          ) > 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 课程检索 P95 超过 300ms
+          description: 近 10 分钟 /v1/kb/search P95 为 {{ $value | humanizeDuration }}，检查数据库索引与 embedding 依赖。
+
+      - alert: TrendCoachRateLimitSpike
+        expr: |
+          sum(rate(trend_coach_http_requests_total{status="429"}[5m]))
+          / clamp_min(sum(rate(trend_coach_http_requests_total[5m])), 1e-9) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 429 比例超过 5%
+          description: 近 5 分钟 429 占比 {{ $value | humanizePercentage }}，检查是否存在异常客户端或限流阈值过低。

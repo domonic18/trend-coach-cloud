@@ -1,0 +1,67 @@
+# 用法见 docs/operations/deployment-runbook.md：
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
+# 不内置监控服务；/metrics 保留，接入外部 Prometheus 时参考 deploy/monitoring/。
+name: trend-coach
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?在 .env.prod 设置 POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?在 .env.prod 设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?在 .env.prod 设置 POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  app:
+    build:
+      context: .
+    image: trend-coach-cloud:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3939"
+      # 密码含特殊字符时需先 URL 编码。
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # 仅本地 staging 验证需要；生产媒体走 CDN，不挂载。
+      - ${MEDIA_HOST_DIR:-./media}:/media:ro
+    networks: [edge, backend]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?在 .env.prod 设置 DOMAIN}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+
+networks:
+  edge:
+  backend:
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

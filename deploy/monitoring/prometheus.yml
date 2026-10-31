@@ -1,0 +1,18 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: trend-coach
+    metrics_path: /metrics
+    scheme: https
+    authorization:
+      type: Bearer
+      # 由部署方写入 CONSOLE_TOKEN，权限 600；文件不入库。
+      credentials_file: /etc/prometheus/console_token
+    static_configs:
+      # 换成实际域名；内网直连时可改为 app:3939 并调整 scheme。
+      - targets: ["api.example.com"]
