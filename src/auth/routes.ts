@@ -1,23 +1,25 @@
 import type { FastifyInstance } from 'fastify'
+import type { AccountService } from '../accounts/service.js'
 import type { AppConfig } from '../config.js'
-import { badRequest, tooManyRequests, unauthorized } from '../errors.js'
-import { clientIp, requirePrincipal } from '../http/principal.js'
+import { badRequest, tooManyRequests } from '../errors.js'
+import { clientIp, requirePrincipal, requireSession } from '../http/principal.js'
 import { asObject, stringField } from '../http/validation.js'
 import { RateLimiter } from '../rate-limit.js'
 import type { AuthService } from './service.js'
-import { safeEqual } from './tokens.js'
 
 const DEVICE_ID = /^[A-Za-z0-9._:-]{8,128}$/
 const USER_CODE = /^[A-Z0-9]{4}-[A-Z0-9]{4}$/
+const USERNAME = /^[a-z][a-z0-9._-]{2,31}$/
 
 export interface AuthRouteDeps {
   auth: AuthService
+  accounts: AccountService
   config: AppConfig
   limiter: RateLimiter
 }
 
 export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): void {
-  const { auth, config, limiter } = deps
+  const { auth, accounts, config, limiter } = deps
 
   app.post('/v1/auth/device/code', async (request, reply) => {
     if (!limiter.take(`device-code:${clientIp(request)}`, config.rateLimitDeviceCodePerMinute)) {
@@ -49,21 +51,29 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
   })
 
   app.post('/v1/auth/device/approve', async request => {
-    const header = request.headers['x-console-token']
-    const provided = Array.isArray(header) ? header[0] : header
-    if (provided === undefined || !safeEqual(provided, config.consoleToken)) throw unauthorized('console token required')
+    if (!limiter.take(`device-approve:${clientIp(request)}`, config.rateLimitDeviceApprovePerMinute)) {
+      throw tooManyRequests()
+    }
     const body = asObject(request.body)
     const userCode = stringField(body, 'userCode', { max: 16 }).trim().toUpperCase()
     if (!USER_CODE.test(userCode)) throw badRequest('userCode invalid')
-    const userId = body.userId === undefined ? undefined : stringField(body, 'userId', { max: 64 })
-    const displayName = body.displayName === undefined
-      ? undefined
-      : stringField(body, 'displayName', { max: 200 })
-    await auth.approveDeviceCode({
-      userCode,
-      ...(userId === undefined ? {} : { userId }),
-      ...(displayName === undefined ? {} : { displayName }),
-    })
+    // 先确认设备码有效，避免错误凭据或无效设备码白耗一次邀请码。
+    await auth.assertDeviceCode(userCode)
+
+    let userId: string
+    if (typeof request.headers.authorization === 'string') {
+      const principal = await requireSession(request, accounts, ['operator', 'admin'])
+      userId = body.userId === undefined ? principal.userId : stringField(body, 'userId', { max: 64 })
+    } else if (body.inviteCode !== undefined) {
+      const inviteCode = stringField(body, 'inviteCode', { max: 32 })
+      const password = stringField(body, 'password', { min: 10, max: 128 })
+      userId = await accounts.redeemInvite(inviteCode, password)
+    } else {
+      const username = stringField(body, 'username', { min: 3, max: 32, pattern: USERNAME })
+      const password = stringField(body, 'password', { max: 128 })
+      userId = await accounts.verifyCredentials(username, password)
+    }
+    await auth.approveDeviceCode({ userCode, userId })
     return { approved: true }
   })
 
@@ -86,26 +96,43 @@ function escapeHtml(value: string): string {
 function devicePage(userCode: string): string {
   return `<!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>趋势伴学设备授权</title>
 <h1>趋势伴学设备授权</h1>
 <p>设备码：<code>${escapeHtml(userCode)}</code></p>
-<p>账号体系上线前，授权仅限运营人员通过控制台令牌完成。</p>
-<label>控制台令牌 <input id="token" type="password" autocomplete="off"></label>
-<button id="approve">批准授权</button>
+<p>使用管理员创建的账号登录；首次登录请填写邀请码并设置密码。</p>
+<form id="form">
+  <label>用户名 <input id="username" autocomplete="username"></label>
+  <p><label>密码 <input id="password" type="password" autocomplete="current-password"></label></p>
+  <details>
+    <summary>首次登录（使用邀请码）</summary>
+    <p><label>邀请码 <input id="invite" autocomplete="off" placeholder="XXXX-XXXX-XXXX-XXXX"></label></p>
+    <p>填写邀请码时，密码栏用于设置新密码（至少 10 个字符）。</p>
+  </details>
+  <p><button id="approve">批准授权</button></p>
+</form>
 <p id="msg"></p>
 <script>
-document.getElementById('approve').addEventListener('click', async () => {
+document.getElementById('approve').addEventListener('click', async event => {
+  event.preventDefault()
+  const message = document.getElementById('msg')
+  const username = document.getElementById('username').value.trim()
+  const password = document.getElementById('password').value
+  const inviteCode = document.getElementById('invite').value.trim()
+  const payload = inviteCode === ''
+    ? { userCode: ${JSON.stringify(userCode)}, username, password }
+    : { userCode: ${JSON.stringify(userCode)}, inviteCode, password }
+  message.textContent = '正在授权…'
   const response = await fetch('/v1/auth/device/approve', {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-console-token': document.getElementById('token').value,
-    },
-    body: JSON.stringify({ userCode: ${JSON.stringify(userCode)} }),
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
   })
-  document.getElementById('msg').textContent = response.ok
+  message.textContent = response.ok
     ? '已授权，请回到客户端等待生效。'
-    : '授权失败：设备码无效、已过期或控制台令牌不正确。'
+    : response.status === 404
+      ? '设备码无效或已过期，请回到客户端重新发起授权。'
+      : '授权失败：账号、密码或邀请码不正确，或账号已被禁用。'
 })
 </script>`
 }

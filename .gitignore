@@ -12,4 +12,4 @@ coverage/
 backups/
 media/*
 !media/.gitkeep
-deploy/monitoring/console_token
+deploy/monitoring/metrics_token

@@ -4,8 +4,9 @@ export type AppEnv = (typeof APP_ENVS)[number]
 export const LOG_LEVELS = ['silent', 'error', 'warn', 'info', 'debug', 'trace'] as const
 export type LogLevel = (typeof LOG_LEVELS)[number]
 
-const LOCAL_CONSOLE_TOKEN = 'local-console-token'
+const LOCAL_METRICS_TOKEN = 'local-metrics-token'
 const LOCAL_MEDIA_SECRET = 'local-media-signing-secret'
+const USERNAME = /^[a-z][a-z0-9._-]{2,31}$/
 
 export interface EmbeddingConfig {
   baseUrl: string
@@ -29,7 +30,10 @@ export interface AppConfig {
   mediaBaseUrl: string
   mediaSigningSecret: string
   mediaLocalDir?: string
-  consoleToken: string
+  metricsToken: string
+  sessionTtlSec: number
+  inviteTtlSec: number
+  bootstrapAdmin?: { username: string; password: string }
   embedding?: EmbeddingConfig
   searchMinSimilarity: number
   searchMinConfidence: number
@@ -37,6 +41,10 @@ export interface AppConfig {
   rateLimitSearchPerMinute: number
   rateLimitDeviceCodePerMinute: number
   rateLimitEventsPerMinute: number
+  rateLimitProgressPerMinute: number
+  rateLimitLoginPerMinute: number
+  rateLimitInvitePerMinute: number
+  rateLimitDeviceApprovePerMinute: number
 }
 
 type Env = Record<string, string | undefined>
@@ -113,9 +121,21 @@ export function loadConfig(env: Env = process.env): AppConfig {
     : publicBaseUrl.origin
   const mediaBaseUrl = parseUrl('MEDIA_BASE_URL', text(env, 'MEDIA_BASE_URL') ?? defaultMediaBase, appEnv)
 
-  const consoleToken = text(env, 'CONSOLE_TOKEN') ?? (appEnv === 'local' ? LOCAL_CONSOLE_TOKEN : fail('CONSOLE_TOKEN 必填'))
-  if (consoleToken.length < 16) fail('CONSOLE_TOKEN 至少 16 个字符')
-  if (appEnv !== 'local' && consoleToken === LOCAL_CONSOLE_TOKEN) fail('CONSOLE_TOKEN 不得使用本地默认值')
+  const metricsToken = text(env, 'METRICS_TOKEN') ?? (appEnv === 'local' ? LOCAL_METRICS_TOKEN : fail('METRICS_TOKEN 必填'))
+  if (metricsToken.length < 16) fail('METRICS_TOKEN 至少 16 个字符')
+  if (appEnv !== 'local' && metricsToken === LOCAL_METRICS_TOKEN) fail('METRICS_TOKEN 不得使用本地默认值')
+
+  const bootstrapUsername = text(env, 'BOOTSTRAP_ADMIN_USERNAME')
+  const bootstrapPassword = text(env, 'BOOTSTRAP_ADMIN_PASSWORD')
+  if ((bootstrapUsername === undefined) !== (bootstrapPassword === undefined)) {
+    fail('BOOTSTRAP_ADMIN_USERNAME 与 BOOTSTRAP_ADMIN_PASSWORD 必须同时配置')
+  }
+  let bootstrapAdmin: { username: string; password: string } | undefined
+  if (bootstrapUsername !== undefined && bootstrapPassword !== undefined) {
+    if (!USERNAME.test(bootstrapUsername)) fail('BOOTSTRAP_ADMIN_USERNAME 必须匹配 [a-z][a-z0-9._-]{2,31}')
+    if (bootstrapPassword.length < 12) fail('BOOTSTRAP_ADMIN_PASSWORD 至少 12 个字符')
+    bootstrapAdmin = { username: bootstrapUsername, password: bootstrapPassword }
+  }
 
   const mediaSigningSecret = text(env, 'MEDIA_SIGNING_SECRET') ?? (appEnv === 'local' ? LOCAL_MEDIA_SECRET : fail('MEDIA_SIGNING_SECRET 必填'))
   if (mediaSigningSecret.length < 16) fail('MEDIA_SIGNING_SECRET 至少 16 个字符')
@@ -159,7 +179,10 @@ export function loadConfig(env: Env = process.env): AppConfig {
     mediaBaseUrl: mediaBaseUrl.toString().replace(/\/+$/, ''),
     mediaSigningSecret,
     ...(mediaLocalDir === undefined ? {} : { mediaLocalDir }),
-    consoleToken,
+    metricsToken,
+    sessionTtlSec: int(env, 'SESSION_TTL_SECONDS', 12 * 60 * 60, { min: 300 }),
+    inviteTtlSec: int(env, 'INVITE_TTL_SECONDS', 7 * 24 * 60 * 60, { min: 3600 }),
+    ...(bootstrapAdmin === undefined ? {} : { bootstrapAdmin }),
     ...(embedding === undefined ? {} : { embedding }),
     searchMinSimilarity,
     searchMinConfidence,
@@ -167,5 +190,9 @@ export function loadConfig(env: Env = process.env): AppConfig {
     rateLimitSearchPerMinute: int(env, 'RATE_LIMIT_SEARCH_PER_MINUTE', 120),
     rateLimitDeviceCodePerMinute: int(env, 'RATE_LIMIT_DEVICE_CODE_PER_MINUTE', 10),
     rateLimitEventsPerMinute: int(env, 'RATE_LIMIT_EVENTS_PER_MINUTE', 120),
+    rateLimitProgressPerMinute: int(env, 'RATE_LIMIT_PROGRESS_PER_MINUTE', 120),
+    rateLimitLoginPerMinute: int(env, 'RATE_LIMIT_LOGIN_PER_MINUTE', 10),
+    rateLimitInvitePerMinute: int(env, 'RATE_LIMIT_INVITE_PER_MINUTE', 10),
+    rateLimitDeviceApprovePerMinute: int(env, 'RATE_LIMIT_DEVICE_APPROVE_PER_MINUTE', 10),
   }
 }

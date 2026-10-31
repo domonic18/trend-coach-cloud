@@ -83,7 +83,19 @@ export class AuthService {
     throw new Error('could not allocate a device code')
   }
 
-  async approveDeviceCode(input: { userCode: string; userId?: string; displayName?: string }): Promise<void> {
+  async assertDeviceCode(userCode: string): Promise<void> {
+    const { rows } = await this.pool.query<{ expires_at: Date; consumed_at: Date | null }>(
+      'SELECT expires_at, consumed_at FROM device_codes WHERE user_code = $1',
+      [userCode.trim().toUpperCase()],
+    )
+    const row = rows[0]
+    if (row === undefined || row.consumed_at !== null || row.expires_at.getTime() <= Date.now()) {
+      throw notFound('device code invalid or expired')
+    }
+  }
+
+  /** 只允许绑定已存在且启用的账号；账号由管理员创建，设备批准不再自动建号。 */
+  async approveDeviceCode(input: { userCode: string; userId: string }): Promise<void> {
     const userCode = input.userCode.trim().toUpperCase()
     await withTransaction(this.pool, async client => {
       const { rows } = await client.query<DeviceCodeRow>(
@@ -95,44 +107,21 @@ export class AuthService {
       if (code === undefined || code.consumed_at !== null || code.expires_at.getTime() <= Date.now()) {
         throw notFound('device code invalid or expired')
       }
-      const userId = await this.resolveUser(client, code, input)
-      await client.query(
-        `INSERT INTO devices (device_id, user_id) VALUES ($1, $2)
-         ON CONFLICT (device_id) DO UPDATE SET user_id = EXCLUDED.user_id, status = 'active'`,
-        [code.device_id, userId],
-      )
-      await client.query(
-        'UPDATE device_codes SET user_id = $2, approved_at = now() WHERE device_code_hash = $1',
-        [code.device_code_hash, userId],
-      )
-    })
-  }
-
-  private async resolveUser(
-    client: PoolClient,
-    code: DeviceCodeRow,
-    input: { userId?: string; displayName?: string },
-  ): Promise<string> {
-    if (input.userId !== undefined) {
-      const { rowCount } = await client.query(
+      const account = await client.query(
         "SELECT 1 FROM users WHERE user_id = $1 AND status = 'active'",
         [input.userId],
       )
-      if (rowCount === 0) throw badRequest('userId unknown or disabled')
-      return input.userId
-    }
-    if (code.user_id !== null) return code.user_id
-    const existing = await client.query<{ user_id: string }>(
-      'SELECT user_id FROM devices WHERE device_id = $1',
-      [code.device_id],
-    )
-    if (existing.rows[0] !== undefined) return existing.rows[0].user_id
-    const userId = `usr_${randomToken(8)}`
-    await client.query(
-      'INSERT INTO users (user_id, display_name) VALUES ($1, $2)',
-      [userId, input.displayName ?? null],
-    )
-    return userId
+      if ((account.rowCount ?? 0) === 0) throw badRequest('userId unknown or disabled')
+      await client.query(
+        `INSERT INTO devices (device_id, user_id) VALUES ($1, $2)
+         ON CONFLICT (device_id) DO UPDATE SET user_id = EXCLUDED.user_id, status = 'active'`,
+        [code.device_id, input.userId],
+      )
+      await client.query(
+        'UPDATE device_codes SET user_id = $2, approved_at = now() WHERE device_code_hash = $1',
+        [code.device_code_hash, input.userId],
+      )
+    })
   }
 
   async pollDeviceToken(deviceCode: string): Promise<DevicePoll> {

@@ -1,6 +1,7 @@
 import type { FastifyRequest } from 'fastify'
+import type { AccountService, SessionPrincipal, UserRole } from '../accounts/service.js'
 import type { AuthService, Principal } from '../auth/service.js'
-import { unauthorized } from '../errors.js'
+import { forbidden, unauthorized } from '../errors.js'
 
 export function bearerToken(request: FastifyRequest): string {
   const header = request.headers.authorization
@@ -17,6 +18,16 @@ export function deviceIdHeader(request: FastifyRequest): string | undefined {
 
 export function requirePrincipal(request: FastifyRequest, auth: AuthService): Promise<Principal> {
   return auth.authenticate(bearerToken(request), deviceIdHeader(request))
+}
+
+export async function requireSession(
+  request: FastifyRequest,
+  accounts: AccountService,
+  roles?: readonly UserRole[],
+): Promise<SessionPrincipal> {
+  const principal = await accounts.authenticateSession(bearerToken(request))
+  if (roles !== undefined && !roles.includes(principal.role)) throw forbidden('role not allowed')
+  return principal
 }
 
 export function clientIp(request: FastifyRequest): string {
