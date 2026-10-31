@@ -544,7 +544,7 @@ test('刷新：设备绑定、轮换与重放吊销', async () => {
   assert.equal(revoked.statusCode, 401)
 })
 
-test('事件：同意门禁、白名单与幂等', async () => {
+test('事件：同意读写、门禁、白名单与幂等', async () => {
   const grant = await grantFor('events-device-0001')
   const userId = await userIdFor(grant.deviceId)
   const event = {
@@ -552,6 +552,14 @@ test('事件：同意门禁、白名单与幂等', async () => {
     name: 'search_requested',
     props: { durationMs: 120, topK: 5, hits: 3, empty: false },
   }
+
+  const initial = await app.inject({
+    method: 'GET',
+    url: '/v1/events/consent',
+    headers: authHeaders(grant),
+  })
+  assert.equal(initial.statusCode, 200)
+  assert.deepEqual(initial.json(), { consent: false })
 
   const denied = await app.inject({
     method: 'POST',
@@ -561,7 +569,28 @@ test('事件：同意门禁、白名单与幂等', async () => {
   })
   assert.equal(denied.statusCode, 403)
 
-  await pool.query('UPDATE users SET events_consent = true WHERE user_id = $1', [userId])
+  const invalidConsent = await app.inject({
+    method: 'PUT',
+    url: '/v1/events/consent',
+    headers: authHeaders(grant),
+    payload: { consent: 'yes' },
+  })
+  assert.equal(invalidConsent.statusCode, 400)
+
+  const granted = await app.inject({
+    method: 'PUT',
+    url: '/v1/events/consent',
+    headers: authHeaders(grant),
+    payload: { consent: true },
+  })
+  assert.equal(granted.statusCode, 200)
+  assert.deepEqual(granted.json(), { consent: true })
+
+  const { rows: consentRows } = await pool.query<{ events_consent: boolean }>(
+    'SELECT events_consent FROM users WHERE user_id = $1',
+    [userId],
+  )
+  assert.equal(consentRows[0]?.events_consent, true)
 
   const accepted = await app.inject({
     method: 'POST',
@@ -601,6 +630,23 @@ test('事件：同意门禁、白名单与幂等', async () => {
     })
     assert.equal(invalid.statusCode, 400, JSON.stringify(payload))
   }
+
+  const revoked = await app.inject({
+    method: 'PUT',
+    url: '/v1/events/consent',
+    headers: authHeaders(grant),
+    payload: { consent: false },
+  })
+  assert.equal(revoked.statusCode, 200)
+  assert.deepEqual(revoked.json(), { consent: false })
+
+  const deniedAfterRevoke = await app.inject({
+    method: 'POST',
+    url: '/v1/events',
+    headers: authHeaders(grant),
+    payload: { ...event, eventId: 'evt-contract-0006' },
+  })
+  assert.equal(deniedAfterRevoke.statusCode, 403)
 })
 
 test('检索限流：单设备超出配额返回 429', async () => {
