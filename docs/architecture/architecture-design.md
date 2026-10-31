@@ -180,7 +180,7 @@ sequenceDiagram
 1. **向量召回**：`halfvec` 余弦距离，取 `topN = max(topK × 4, 20)`。
 2. **词法召回**：`pg_trgm` 相似度 + 关键词命中，取 `topN`。
 3. **融合**：RRF（`k` 为可调参数，默认 60）；同片段去重。
-4. **阈值与回退**：最高分低于阈值或空召回时填充 `relatedKnowledgePoints`（≤5，仅 `knowledgePointId/title`，**不带起止秒与正文**）。
+4. **阈值与回退**：召回阈值（`SEARCH_MIN_SIMILARITY`，默认 0.05）只负责捞候选；引用置信阈值（`SEARCH_MIN_CONFIDENCE`，默认 0.15）过滤单个 trigram 级别的偶然命中（如短 query 与标题补位字符重合）。过滤后为空即按未覆盖处理，填充 `relatedKnowledgePoints`（同一置信阈值、≤5、仅 `knowledgePointId/title`，**不带起止秒与正文**）。两个阈值都需在评估集上校准。
 5. **裁剪**：输出 Top-K；`score` 归一化到 `[0,1]`；字段与长度按契约校验；整体超出 512KiB 报错而非截断。
 
 **质量门槛**：自建评估集 ≥100 条真实学员问题，Top-5 命中率 ≥90%；每次索引或排序变更都必须跑回归。
