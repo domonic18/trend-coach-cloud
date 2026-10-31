@@ -306,6 +306,27 @@ test('检索：空召回时回退到相关知识点', async () => {
   }
 })
 
+test('检索：低置信命中按未覆盖处理', async () => {
+  const weak = await app.inject({
+    method: 'POST',
+    url: '/v1/kb/search',
+    headers: authHeaders(mainGrant),
+    payload: { query: '量子纠缠与超导' },
+  })
+  assert.equal(weak.statusCode, 200, weak.body)
+  assert.deepEqual(weak.json(), { segments: [], relatedKnowledgePoints: [] })
+
+  const exact = await app.inject({
+    method: 'POST',
+    url: '/v1/kb/search',
+    headers: authHeaders(mainGrant),
+    payload: { query: '均线的方向与排列' },
+  })
+  assert.equal(exact.statusCode, 200, exact.body)
+  const body = exact.json() as { segments: { segmentId: string }[] }
+  assert.deepEqual(body.segments.map(segment => segment.segmentId), ['seg-tc101-m2-kp2-1'])
+})
+
 test('片段详情：权威起止秒、非法与下架', async () => {
   const response = await app.inject({
     method: 'GET',

@@ -70,6 +70,16 @@ test('非法枚举、TTL 与 URL 被拒绝', () => {
   assert.throws(() => loadConfig({ ...baseEnv, PUBLIC_BASE_URL: 'https://api.example.com?x=1' }), /查询串/)
 })
 
+test('检索阈值必须在 0–1 且置信阈值不低于召回阈值', () => {
+  assert.equal(loadConfig(baseEnv).searchMinConfidence, 0.15)
+  assert.throws(() => loadConfig({ ...baseEnv, SEARCH_MIN_SIMILARITY: '-0.1' }), /SEARCH_MIN_SIMILARITY/)
+  assert.throws(() => loadConfig({ ...baseEnv, SEARCH_MIN_CONFIDENCE: '1.2' }), /SEARCH_MIN_CONFIDENCE/)
+  assert.throws(
+    () => loadConfig({ ...baseEnv, SEARCH_MIN_SIMILARITY: '0.3', SEARCH_MIN_CONFIDENCE: '0.2' }),
+    /不能低于/,
+  )
+})
+
 test('embedding 必须成对配置', () => {
   assert.throws(() => loadConfig({ ...baseEnv, EMBEDDING_BASE_URL: 'https://embed.example.com/v1' }), /同时配置/)
   const config = loadConfig({
