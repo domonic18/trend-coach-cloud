@@ -1,11 +1,20 @@
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import cors from '@fastify/cors'
+import fastifyStatic from '@fastify/static'
 import Fastify, { LogController, type FastifyError, type FastifyInstance } from 'fastify'
 import type { Pool } from 'pg'
+import { AccountService } from './accounts/service.js'
+import { registerAccountRoutes } from './accounts/routes.js'
 import { AuthService } from './auth/service.js'
 import { registerAuthRoutes } from './auth/routes.js'
 import { safeEqual } from './auth/tokens.js'
+import { CatalogService } from './catalog/service.js'
+import { registerCatalogRoutes } from './catalog/routes.js'
 import type { AppConfig } from './config.js'
+import { ContentService } from './content/service.js'
+import { registerContentRoutes } from './content/routes.js'
 import { EventService } from './events/service.js'
 import { registerEventRoutes } from './events/routes.js'
 import { HttpError } from './errors.js'
@@ -17,6 +26,8 @@ import { registerKbRoutes } from './kb/routes.js'
 import { registerMediaRoutes } from './media/routes.js'
 import { PlaybackService } from './playback/service.js'
 import { registerPlaybackRoutes } from './playback/routes.js'
+import { ProgressService } from './progress/service.js'
+import { registerProgressRoutes } from './progress/routes.js'
 
 export interface BuildAppOptions {
   config: AppConfig
@@ -29,9 +40,9 @@ export async function buildApp({ config, pool, onRoute }: BuildAppOptions): Prom
   const app = Fastify({
     logger: {
       level: config.logLevel,
-      redact: ['req.headers.authorization', 'req.headers["x-device-id"]', 'req.headers["x-console-token"]'],
+      redact: ['req.headers.authorization', 'req.headers["x-device-id"]'],
     },
-    bodyLimit: 64 * 1024,
+    bodyLimit: 128 * 1024,
     genReqId: () => randomUUID(),
     logController: new LogController({ disableRequestLogging: true }),
   })
@@ -45,7 +56,7 @@ export async function buildApp({ config, pool, onRoute }: BuildAppOptions): Prom
 
   await app.register(cors, {
     origin: '*',
-    methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['content-type', 'authorization', 'x-device-id'],
   })
 
@@ -106,7 +117,7 @@ export async function buildApp({ config, pool, onRoute }: BuildAppOptions): Prom
 
   app.get('/metrics', async (request, reply) => {
     const authorization = request.headers.authorization
-    if (authorization === undefined || !safeEqual(authorization, `Bearer ${config.consoleToken}`)) {
+    if (authorization === undefined || !safeEqual(authorization, `Bearer ${config.metricsToken}`)) {
       return reply.code(401).send({ error: 'unauthorized', requestId: request.id })
     }
     return reply.type(metrics.registry.contentType).send(await metrics.registry.metrics())
@@ -118,16 +129,37 @@ export async function buildApp({ config, pool, onRoute }: BuildAppOptions): Prom
   app.addHook('onClose', async () => clearInterval(timer))
 
   const auth = new AuthService(pool, config)
+  const accounts = new AccountService(pool, config)
+  const bootstrap = await accounts.bootstrapAdmin()
+  if (bootstrap.created) app.log.info('bootstrap admin created')
   const embed = config.embedding === undefined ? undefined : createEmbeddingProvider(config.embedding)
   const kb = new KnowledgeService(pool, config, embed)
   const playback = new PlaybackService(pool, config, auth)
   const events = new EventService(pool)
+  const catalog = new CatalogService(pool)
+  const progress = new ProgressService(pool)
+  const content = new ContentService(pool, embed)
 
-  registerAuthRoutes(app, { auth, config, limiter })
+  registerAuthRoutes(app, { auth, accounts, config, limiter })
+  registerAccountRoutes(app, { accounts, config, limiter })
   registerKbRoutes(app, { kb, auth, config, limiter })
   registerPlaybackRoutes(app, { playback, auth })
   registerEventRoutes(app, { events, auth, config, limiter })
+  registerCatalogRoutes(app, { catalog, auth })
+  registerProgressRoutes(app, { progress, auth, config, limiter })
+  registerContentRoutes(app, { content, accounts })
   if (config.mediaLocalDir !== undefined) registerMediaRoutes(app, { config, pool })
+
+  const adminDir = join(process.cwd(), 'dist', 'admin')
+  if (existsSync(join(adminDir, 'index.html'))) {
+    await app.register(fastifyStatic, {
+      root: adminDir,
+      prefix: '/admin/',
+      index: ['index.html'],
+      cacheControl: false,
+    })
+    app.get('/admin', async (_request, reply) => reply.redirect('/admin/'))
+  }
 
   return app
 }
