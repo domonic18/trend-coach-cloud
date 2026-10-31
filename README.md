@@ -26,7 +26,9 @@
 | `POST /v1/kb/search` | Top-K 片段检索 |
 | `GET /v1/kb/segments/{segmentId}` | 片段详情 |
 | `POST /v1/playback/sessions` | 换取签名播放地址 |
-| `POST /v1/events` | 接收白名单指标事件 |
+| `GET /v1/events/consent` | 读取指标上报同意状态 |
+| `PUT /v1/events/consent` | 修改指标上报同意状态（可撤回） |
+| `POST /v1/events` | 接收白名单指标事件（需同意） |
 
 本地还提供 `GET /device` 授权页与 `GET /media/*` 媒体代理，仅开发使用，不进入对外契约。
 
