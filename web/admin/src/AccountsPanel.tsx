@@ -62,13 +62,14 @@ export function AccountsPanel({ onUnauthorized }: { onUnauthorized: () => void }
         <h2>账号</h2>
         <form
           className="row"
+          autoComplete="off"
           onSubmit={event => {
             event.preventDefault()
             void load(filters)
           }}
         >
           <Field label="搜索">
-            <input value={filters.query} onChange={event => setFilters({ ...filters, query: event.target.value })} />
+            <input autoComplete="off" value={filters.query} onChange={event => setFilters({ ...filters, query: event.target.value })} />
           </Field>
           <Field label="角色">
             <select
@@ -94,6 +95,7 @@ export function AccountsPanel({ onUnauthorized }: { onUnauthorized: () => void }
           <Field label="条数">
             <input
               className="narrow"
+              autoComplete="off"
               value={filters.limit}
               onChange={event => setFilters({ ...filters, limit: event.target.value })}
             />
@@ -257,12 +259,20 @@ function CreateUserCard({
   return (
     <section className="card">
       <h2>新建账号</h2>
-      <form className="row" onSubmit={event => void submit(event)}>
+      <form className="row" autoComplete="off" onSubmit={event => void submit(event)}>
         <Field label="用户名（3–32，小写）">
-          <input value={form.username} onChange={event => setForm({ ...form, username: event.target.value })} />
+          <input
+            autoComplete="off"
+            value={form.username}
+            onChange={event => setForm({ ...form, username: event.target.value })}
+          />
         </Field>
         <Field label="显示名">
-          <input value={form.displayName} onChange={event => setForm({ ...form, displayName: event.target.value })} />
+          <input
+            autoComplete="off"
+            value={form.displayName}
+            onChange={event => setForm({ ...form, displayName: event.target.value })}
+          />
         </Field>
         <Field label="角色">
           <select

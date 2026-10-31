@@ -58,16 +58,22 @@ export function SegmentsPanel({ onUnauthorized }: { onUnauthorized: () => void }
         <h2>片段检索</h2>
         <form
           className="row"
+          autoComplete="off"
           onSubmit={event => {
             event.preventDefault()
             void load(filters)
           }}
         >
           <Field label="课程 ID">
-            <input value={filters.courseId} onChange={event => setFilters({ ...filters, courseId: event.target.value })} />
+            <input
+              autoComplete="off"
+              value={filters.courseId}
+              onChange={event => setFilters({ ...filters, courseId: event.target.value })}
+            />
           </Field>
           <Field label="知识点 ID">
             <input
+              autoComplete="off"
               value={filters.knowledgePointId}
               onChange={event => setFilters({ ...filters, knowledgePointId: event.target.value })}
             />
@@ -84,11 +90,16 @@ export function SegmentsPanel({ onUnauthorized }: { onUnauthorized: () => void }
             </select>
           </Field>
           <Field label="关键字">
-            <input value={filters.query} onChange={event => setFilters({ ...filters, query: event.target.value })} />
+            <input
+              autoComplete="off"
+              value={filters.query}
+              onChange={event => setFilters({ ...filters, query: event.target.value })}
+            />
           </Field>
           <Field label="条数">
             <input
               className="narrow"
+              autoComplete="off"
               value={filters.limit}
               onChange={event => setFilters({ ...filters, limit: event.target.value })}
             />
@@ -196,13 +207,23 @@ function SegmentRow({
             <div className="stack">
               <div className="row">
                 <Field label="标题">
-                  <input value={title} onChange={event => setTitle(event.target.value)} />
+                  <input autoComplete="off" value={title} onChange={event => setTitle(event.target.value)} />
                 </Field>
                 <Field label="开始秒">
-                  <input className="narrow" value={startSec} onChange={event => setStartSec(event.target.value)} />
+                  <input
+                    className="narrow"
+                    autoComplete="off"
+                    value={startSec}
+                    onChange={event => setStartSec(event.target.value)}
+                  />
                 </Field>
                 <Field label="结束秒">
-                  <input className="narrow" value={endSec} onChange={event => setEndSec(event.target.value)} />
+                  <input
+                    className="narrow"
+                    autoComplete="off"
+                    value={endSec}
+                    onChange={event => setEndSec(event.target.value)}
+                  />
                 </Field>
                 <Field label="状态">
                   <StatusSelect value={status} onChange={setStatus} />
@@ -278,30 +299,49 @@ function CreateSegmentCard({
   return (
     <section className="card">
       <h2>新建片段</h2>
-      <form className="stack" onSubmit={event => void submit(event)}>
+      <form className="stack" autoComplete="off" onSubmit={event => void submit(event)}>
         <div className="row">
           <Field label="片段 ID">
-            <input value={form.segmentId} onChange={event => update('segmentId', event.target.value)} placeholder="seg-..." />
+            <input
+              autoComplete="off"
+              value={form.segmentId}
+              onChange={event => update('segmentId', event.target.value)}
+              placeholder="seg-..."
+            />
           </Field>
           <Field label="课程 ID">
-            <input value={form.courseId} onChange={event => update('courseId', event.target.value)} />
+            <input autoComplete="off" value={form.courseId} onChange={event => update('courseId', event.target.value)} />
           </Field>
           <Field label="章节 ID">
-            <input value={form.chapterId} onChange={event => update('chapterId', event.target.value)} />
+            <input autoComplete="off" value={form.chapterId} onChange={event => update('chapterId', event.target.value)} />
           </Field>
           <Field label="知识点 ID">
-            <input value={form.knowledgePointId} onChange={event => update('knowledgePointId', event.target.value)} />
+            <input
+              autoComplete="off"
+              value={form.knowledgePointId}
+              onChange={event => update('knowledgePointId', event.target.value)}
+            />
           </Field>
         </div>
         <div className="row">
           <Field label="标题">
-            <input value={form.title} onChange={event => update('title', event.target.value)} />
+            <input autoComplete="off" value={form.title} onChange={event => update('title', event.target.value)} />
           </Field>
           <Field label="开始秒">
-            <input className="narrow" value={form.startSec} onChange={event => update('startSec', event.target.value)} />
+            <input
+              className="narrow"
+              autoComplete="off"
+              value={form.startSec}
+              onChange={event => update('startSec', event.target.value)}
+            />
           </Field>
           <Field label="结束秒">
-            <input className="narrow" value={form.endSec} onChange={event => update('endSec', event.target.value)} />
+            <input
+              className="narrow"
+              autoComplete="off"
+              value={form.endSec}
+              onChange={event => update('endSec', event.target.value)}
+            />
           </Field>
           <Field label="状态">
             <StatusSelect value={form.status} onChange={value => setForm({ ...form, status: value })} />

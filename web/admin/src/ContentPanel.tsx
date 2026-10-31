@@ -173,12 +173,12 @@ function CreateCourseForm({ onCreate }: { onCreate: (input: { courseId: string; 
   }
 
   return (
-    <form className="row" onSubmit={event => void submit(event)}>
+    <form className="row" autoComplete="off" onSubmit={event => void submit(event)}>
       <Field label="课程 ID">
-        <input value={courseId} onChange={event => setCourseId(event.target.value)} placeholder="TC-101" />
+        <input autoComplete="off" value={courseId} onChange={event => setCourseId(event.target.value)} placeholder="TC-101" />
       </Field>
       <Field label="标题">
-        <input value={title} onChange={event => setTitle(event.target.value)} />
+        <input autoComplete="off" value={title} onChange={event => setTitle(event.target.value)} />
       </Field>
       <button type="submit" disabled={busy || courseId.trim() === '' || title.trim() === ''}>新建课程</button>
     </form>
@@ -233,7 +233,7 @@ function CourseEditor({
       </div>
       <div className="row">
         <Field label="标题">
-          <input value={title} onChange={event => setTitle(event.target.value)} />
+          <input autoComplete="off" value={title} onChange={event => setTitle(event.target.value)} />
         </Field>
         <Field label="状态">
           <StatusSelect value={status} onChange={setStatus} />
@@ -296,10 +296,10 @@ function ChapterCard({
       <div className="row">
         <strong>{chapter.chapterId}</strong>
         <Field label="标题">
-          <input value={title} onChange={event => setTitle(event.target.value)} />
+          <input autoComplete="off" value={title} onChange={event => setTitle(event.target.value)} />
         </Field>
         <Field label="排序">
-          <input className="narrow" value={position} onChange={event => setPosition(event.target.value)} />
+          <input className="narrow" autoComplete="off" value={position} onChange={event => setPosition(event.target.value)} />
         </Field>
         <button onClick={() => void save()} disabled={title.trim() === ''}>保存章节</button>
       </div>
@@ -360,8 +360,8 @@ function PointRow({
   return (
     <div className="point">
       <code>{point.knowledgePointId}</code>
-      <input value={title} onChange={event => setTitle(event.target.value)} />
-      <input className="narrow" value={position} onChange={event => setPosition(event.target.value)} />
+      <input autoComplete="off" value={title} onChange={event => setTitle(event.target.value)} />
+      <input className="narrow" autoComplete="off" value={position} onChange={event => setPosition(event.target.value)} />
       <button onClick={() => void save()} disabled={title.trim() === ''}>保存</button>
       <button className="ghost" onClick={() => onEditArticle(point.knowledgePointId)}>
         文章{point.article === null ? '（无）' : ` v${point.article.version}`}
@@ -411,15 +411,15 @@ function AddChapterForm({
   }
 
   return (
-    <form className="row" onSubmit={event => void submit(event)}>
+    <form className="row" autoComplete="off" onSubmit={event => void submit(event)}>
       <Field label="章节 ID">
-        <input value={chapterId} onChange={event => setChapterId(event.target.value)} />
+        <input autoComplete="off" value={chapterId} onChange={event => setChapterId(event.target.value)} />
       </Field>
       <Field label="标题">
-        <input value={title} onChange={event => setTitle(event.target.value)} />
+        <input autoComplete="off" value={title} onChange={event => setTitle(event.target.value)} />
       </Field>
       <Field label="排序">
-        <input className="narrow" value={position} onChange={event => setPosition(event.target.value)} />
+        <input className="narrow" autoComplete="off" value={position} onChange={event => setPosition(event.target.value)} />
       </Field>
       <button type="submit" disabled={chapterId.trim() === '' || title.trim() === ''}>新增章节</button>
     </form>
@@ -467,15 +467,15 @@ function AddPointForm({
   }
 
   return (
-    <form className="row" onSubmit={event => void submit(event)}>
+    <form className="row" autoComplete="off" onSubmit={event => void submit(event)}>
       <Field label="知识点 ID">
-        <input value={knowledgePointId} onChange={event => setKnowledgePointId(event.target.value)} />
+        <input autoComplete="off" value={knowledgePointId} onChange={event => setKnowledgePointId(event.target.value)} />
       </Field>
       <Field label="标题">
-        <input value={title} onChange={event => setTitle(event.target.value)} />
+        <input autoComplete="off" value={title} onChange={event => setTitle(event.target.value)} />
       </Field>
       <Field label="排序">
-        <input className="narrow" value={position} onChange={event => setPosition(event.target.value)} />
+        <input className="narrow" autoComplete="off" value={position} onChange={event => setPosition(event.target.value)} />
       </Field>
       <button type="submit" disabled={knowledgePointId.trim() === '' || title.trim() === ''}>新增知识点</button>
     </form>
