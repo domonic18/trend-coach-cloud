@@ -10,7 +10,7 @@
 | 片段元数据与权威起止秒 | 全库正文下发 |
 | 签名 HLS 播放会话 | 直链 / 可下载源站地址 |
 | 设备码授权与令牌轮换 | 写接口（一期只读） |
-| 鉴权指标事件接收（M2） | 第三方分析 SDK |
+| 鉴权指标事件接收 | 第三方分析 SDK |
 
 不耦合 `ai-invest`：独立实现，只借鉴 PostgreSQL halfvec + pg_trgm + RRF 的技术选型。
 
@@ -18,12 +18,17 @@
 
 | 方法与路径 | 用途 |
 |---|---|
+| `GET /health` | 健康检查（含数据库连通性） |
 | `POST /v1/auth/device/code` | 发起设备码授权 |
 | `POST /v1/auth/device/token` | 轮询授权结果 |
+| `POST /v1/auth/device/approve` | 控制台批准设备码（临时入口） |
 | `POST /v1/auth/refresh` | 轮换 access/refresh |
 | `POST /v1/kb/search` | Top-K 片段检索 |
 | `GET /v1/kb/segments/{segmentId}` | 片段详情 |
 | `POST /v1/playback/sessions` | 换取签名播放地址 |
+| `POST /v1/events` | 接收白名单指标事件 |
+
+本地还提供 `GET /device` 授权页与 `GET /media/*` 媒体代理，仅开发使用，不进入对外契约。
 
 契约、边界、验收用例与待冻结事项见 [对接清单](docs/architecture/cloud-service-integration-checklist.md)。冲突时以插件仓库 PRD v1.3 §6 与架构 §6 为准。
 
@@ -45,13 +50,39 @@
 - 插件仓库：`../dsh-plugin-trend-coach`
 - 插件侧 mock：`../dsh-plugin-trend-coach/spike/mock-kb-server.mjs`（可作为契约夹具参考）
 
+## 本地运行
+
+需要 Node.js ≥22 与 Docker。
+
+```bash
+cp .env.example .env
+npm install
+npm run db:up          # PostgreSQL 17 + pgvector
+npm run migrate        # 建表与索引
+npm run seed           # 种子课程与片段
+npm run dev            # http://127.0.0.1:3939
+```
+
+授权与联调：
+
+```bash
+npm run approve -- ABCD-EFGH   # 控制台批准设备码（需 CONSOLE_TOKEN）
+npm test                       # 单元 + 契约测试（自动重置测试库）
+```
+
+本地媒体需在 `.env` 设置 `MEDIA_LOCAL_DIR` 指向含 `hls/index.m3u8` 的目录；生产媒体走 CDN，不设该项。配置项与默认值见 `.env.example`，TTL 等临时取值待账号体系定稿后同步文档。
+
 ## 目录
 
 ```
-docs/requirements/   # 云端需求
-docs/architecture/   # 架构设计与对接清单
-docs/conventions/    # 项目规范
-docs/ai-context/     # 项目结构与文档索引
+src/            # Fastify 服务：auth/kb/playback/events/media/http
+migrations/     # SQL 迁移（启动时自动执行）
+data/seed.json  # 本地种子数据（与插件 mock 对齐）
+openapi/        # OpenAPI 3.1 契约
+test/           # 单元与契约测试
+docs/           # 需求、架构、规范与项目结构
+docker/         # 本地数据库初始化
+scripts/        # migrate/seed/approve 入口
 ```
 
-当前为文档阶段。服务骨架、数据库 schema、OpenAPI 文档与部署配置待 M2 按 [项目结构](docs/ai-context/project-structure.md) 补充。
+当前为 M2 实现阶段：六个业务接口、设备码授权、签名 HLS、事件接收与契约测试已落地；后台管理、账号体系与内容管线待 M3。

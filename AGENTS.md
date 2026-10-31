@@ -2,7 +2,7 @@
 
 趋势交易课程云端服务仓库，为 `dsh-plugin-trend-coach` 插件提供课程知识检索、片段元数据、签名 HLS 播放会话、设备码授权与指标事件接收。
 
-当前阶段：**文档阶段**，服务骨架、数据库 schema、OpenAPI 与部署配置尚未落地。不要凭空假设已有实现或命令。
+当前阶段：**M2 实现阶段**。六个业务接口、设备码授权、签名 HLS、事件接收、OpenAPI 与契约测试已落地；内容管线与后台管理待 M3。
 
 ## 先读这些
 
@@ -29,20 +29,35 @@
 11. **密钥**：不提交 `.env`、证书、密钥、测试视频大文件；部署配置只放注入说明。
 12. **契约先行**：任何字段/边界/错误码变更，同步需求 → 架构 → 对接清单 → OpenAPI → 实现 → 契约测试。
 
+## 常用命令
+
+```bash
+npm run typecheck
+npm test                 # 单元 + 契约测试（重置 trend_coach_test）
+npm run build
+npm run db:up            # 本地 PostgreSQL + pgvector
+npm run migrate          # 启动时也会自动执行
+npm run seed
+npm run dev              # 127.0.0.1:3939
+npm run approve -- <USER-CODE>
+```
+
 ## 目录
 
 ```
-docs/requirements/     需求
-docs/architecture/     架构与对接清单
-docs/conventions/      项目规范
-docs/ai-context/       结构说明与文档索引
-src/ db/ openapi/ test/ deploy/   # M2 落地后按 project-structure.md 建立
+src/                 服务实现（auth/kb/playback/events/media/http）
+migrations/          SQL 迁移
+data/seed.json       本地种子数据
+openapi/             对外契约
+test/                单元与契约测试
+scripts/             migrate/seed/approve 入口
+docs/                需求、架构、规范、结构说明
 ```
 
 ## 改动规则
 
 - 新增接口或字段：先改文档与 OpenAPI，再实现；契约测试覆盖对接清单 §6 对应用例。
-- 数据库变更走 `db/migrations/`，可重复执行、可回滚；staging 先演练。
+- 数据库变更走 `migrations/`，可重复执行、可回滚；staging 先演练。
 - 内容发布与索引分离；未审核内容不进入检索；下架用状态位，`segmentId` 不复用。
 - 检索或排序变更必须跑自建评估集（≥100 条，Top-5 ≥90%）。
 - 注释只写“为什么”；不写多段注释。
