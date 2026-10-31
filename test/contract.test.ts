@@ -128,6 +128,21 @@ test('GET /health 报告数据库可用', async () => {
   assert.deepEqual(response.json(), { ok: true })
 })
 
+test('GET /metrics 需要控制台令牌', async () => {
+  const denied = await app.inject({ method: 'GET', url: '/metrics' })
+  assert.equal(denied.statusCode, 401)
+
+  const response = await app.inject({
+    method: 'GET',
+    url: '/metrics',
+    headers: { authorization: `Bearer ${CONSOLE_TOKEN}` },
+  })
+  assert.equal(response.statusCode, 200)
+  assert.match(response.headers['content-type'] ?? '', /text\/plain/)
+  assert.match(response.body, /trend_coach_http_requests_total/)
+  assert.match(response.body, /trend_coach_http_request_duration_seconds/)
+})
+
 test('OpenAPI 与注册路由双向一致', async () => {
   const document = parseYaml(
     await readFile(new URL('../openapi/openapi.yaml', import.meta.url), 'utf8'),
@@ -139,11 +154,12 @@ test('OpenAPI 与注册路由双向一致', async () => {
   const registered = new Set(
     routes
       .map(route => route.replace(/:([A-Za-z0-9_]+)/g, '{$1}'))
-      // HEAD 由 GET 自动注册；/device 与 /media/* 是本地运维入口，不对外发布契约。
+      // HEAD 由 GET 自动注册；/device、/media/* 与 /metrics 是运维入口，不对外发布契约。
       .filter(route => !route.startsWith('HEAD '))
       .filter(route => route !== 'OPTIONS *')
       .filter(route => !route.endsWith(' /device'))
-      .filter(route => !route.includes(' /media/')),
+      .filter(route => !route.includes(' /media/'))
+      .filter(route => route !== 'GET /metrics'),
   )
   assert.deepEqual([...registered].sort(), [...documented].sort())
 })

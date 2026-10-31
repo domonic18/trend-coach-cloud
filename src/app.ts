@@ -4,10 +4,12 @@ import Fastify, { LogController, type FastifyError, type FastifyInstance } from 
 import type { Pool } from 'pg'
 import { AuthService } from './auth/service.js'
 import { registerAuthRoutes } from './auth/routes.js'
+import { safeEqual } from './auth/tokens.js'
 import type { AppConfig } from './config.js'
 import { EventService } from './events/service.js'
 import { registerEventRoutes } from './events/routes.js'
 import { HttpError } from './errors.js'
+import { createMetrics } from './metrics.js'
 import { RateLimiter } from './rate-limit.js'
 import { createEmbeddingProvider } from './kb/embedding.js'
 import { KnowledgeService } from './kb/service.js'
@@ -53,7 +55,16 @@ export async function buildApp({ config, pool, onRoute }: BuildAppOptions): Prom
     return payload
   })
 
+  const metrics = createMetrics()
+
   app.addHook('onResponse', async (request, reply) => {
+    const labels = {
+      method: request.method,
+      route: request.routeOptions.url ?? 'unmatched',
+      status: String(reply.statusCode),
+    }
+    metrics.httpRequests.inc(labels)
+    metrics.httpDuration.observe(labels, reply.elapsedTime / 1000)
     request.log.info({
       requestId: request.id,
       method: request.method,
@@ -91,6 +102,14 @@ export async function buildApp({ config, pool, onRoute }: BuildAppOptions): Prom
     } catch {
       return reply.code(503).send({ ok: false })
     }
+  })
+
+  app.get('/metrics', async (request, reply) => {
+    const authorization = request.headers.authorization
+    if (authorization === undefined || !safeEqual(authorization, `Bearer ${config.consoleToken}`)) {
+      return reply.code(401).send({ error: 'unauthorized', requestId: request.id })
+    }
+    return reply.type(metrics.registry.contentType).send(await metrics.registry.metrics())
   })
 
   const limiter = new RateLimiter()
