@@ -10,5 +10,7 @@ export const unauthorized = (message = 'unauthorized'): HttpError => new HttpErr
 export const forbidden = (message = 'forbidden'): HttpError => new HttpError(403, message)
 export const notFound = (message = 'not found'): HttpError => new HttpError(404, message)
 export const conflict = (message = 'conflict'): HttpError => new HttpError(409, message)
+export const unprocessable = (message = 'unprocessable entity'): HttpError => new HttpError(422, message)
 export const tooManyRequests = (message = 'too many requests'): HttpError => new HttpError(429, message)
+export const badGateway = (message = 'bad gateway'): HttpError => new HttpError(502, message)
 export const serviceUnavailable = (message = 'service unavailable'): HttpError => new HttpError(503, message)

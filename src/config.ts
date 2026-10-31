@@ -14,6 +14,13 @@ export interface EmbeddingConfig {
   apiKey?: string
 }
 
+export interface AsrConfig {
+  baseUrl: string
+  apiKey: string
+  model: string
+  timeoutMs: number
+}
+
 export interface AppConfig {
   env: AppEnv
   host: string
@@ -35,6 +42,7 @@ export interface AppConfig {
   inviteTtlSec: number
   bootstrapAdmin?: { username: string; password: string }
   embedding?: EmbeddingConfig
+  asr?: AsrConfig
   searchMinSimilarity: number
   searchMinConfidence: number
   rrfK: number
@@ -45,6 +53,7 @@ export interface AppConfig {
   rateLimitLoginPerMinute: number
   rateLimitInvitePerMinute: number
   rateLimitDeviceApprovePerMinute: number
+  rateLimitAsrPerMinute: number
 }
 
 type Env = Record<string, string | undefined>
@@ -157,6 +166,23 @@ export function loadConfig(env: Env = process.env): AppConfig {
           : { baseUrl: embeddingUrl.replace(/\/+$/, ''), model: embeddingModel, apiKey }
       })()
 
+  const asrBaseRaw = text(env, 'ASR_BASE_URL')
+  const asrApiKey = text(env, 'ASR_API_KEY')
+  if (asrBaseRaw !== undefined && asrApiKey === undefined) {
+    fail('ASR_BASE_URL 显式设置时必须配置 ASR_API_KEY')
+  }
+  if (appEnv !== 'local' && asrApiKey === undefined) fail(`ASR_API_KEY 在 ${appEnv} 必填`)
+  const asr: AsrConfig | undefined = asrApiKey === undefined
+    ? undefined
+    : {
+        baseUrl: (asrBaseRaw === undefined
+          ? 'https://api.minimaxi.com'
+          : parseUrl('ASR_BASE_URL', asrBaseRaw, appEnv).toString()).replace(/\/+$/, ''),
+        apiKey: asrApiKey,
+        model: text(env, 'ASR_MODEL') ?? 'asr-1.0',
+        timeoutMs: int(env, 'ASR_TIMEOUT_MS', 30_000),
+      }
+
   const searchMinSimilarity = float(env, 'SEARCH_MIN_SIMILARITY', 0.05)
   const searchMinConfidence = float(env, 'SEARCH_MIN_CONFIDENCE', 0.15)
   if (searchMinSimilarity < 0 || searchMinSimilarity > 1) fail('SEARCH_MIN_SIMILARITY 必须在 0–1 之间')
@@ -184,6 +210,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
     inviteTtlSec: int(env, 'INVITE_TTL_SECONDS', 7 * 24 * 60 * 60, { min: 3600 }),
     ...(bootstrapAdmin === undefined ? {} : { bootstrapAdmin }),
     ...(embedding === undefined ? {} : { embedding }),
+    ...(asr === undefined ? {} : { asr }),
     searchMinSimilarity,
     searchMinConfidence,
     rrfK: int(env, 'RRF_K', 60),
@@ -194,5 +221,6 @@ export function loadConfig(env: Env = process.env): AppConfig {
     rateLimitLoginPerMinute: int(env, 'RATE_LIMIT_LOGIN_PER_MINUTE', 10),
     rateLimitInvitePerMinute: int(env, 'RATE_LIMIT_INVITE_PER_MINUTE', 10),
     rateLimitDeviceApprovePerMinute: int(env, 'RATE_LIMIT_DEVICE_APPROVE_PER_MINUTE', 10),
+    rateLimitAsrPerMinute: int(env, 'RATE_LIMIT_ASR_PER_MINUTE', 20),
   }
 }

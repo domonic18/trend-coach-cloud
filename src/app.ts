@@ -7,6 +7,8 @@ import Fastify, { LogController, type FastifyError, type FastifyInstance } from 
 import type { Pool } from 'pg'
 import { AccountService } from './accounts/service.js'
 import { registerAccountRoutes } from './accounts/routes.js'
+import { createMiniMaxProvider, type AsrProvider } from './asr/provider.js'
+import { registerAsrRoutes } from './asr/routes.js'
 import { AuthService } from './auth/service.js'
 import { registerAuthRoutes } from './auth/routes.js'
 import { safeEqual } from './auth/tokens.js'
@@ -32,11 +34,13 @@ import { registerProgressRoutes } from './progress/routes.js'
 export interface BuildAppOptions {
   config: AppConfig
   pool: Pool
+  /** 测试用：注入 fake provider，不访问真实 MiniMax。 */
+  asr?: AsrProvider
   /** 测试用：收集已注册路由，与 OpenAPI 做一致性校验。 */
   onRoute?: (method: string, url: string) => void
 }
 
-export async function buildApp({ config, pool, onRoute }: BuildAppOptions): Promise<FastifyInstance> {
+export async function buildApp({ config, pool, onRoute, asr: injectedAsr }: BuildAppOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
       level: config.logLevel,
@@ -139,6 +143,7 @@ export async function buildApp({ config, pool, onRoute }: BuildAppOptions): Prom
   const catalog = new CatalogService(pool)
   const progress = new ProgressService(pool)
   const content = new ContentService(pool, embed)
+  const asr = injectedAsr ?? (config.asr === undefined ? undefined : createMiniMaxProvider(config.asr))
 
   registerAuthRoutes(app, { auth, accounts, config, limiter })
   registerAccountRoutes(app, { accounts, config, limiter })
@@ -147,6 +152,12 @@ export async function buildApp({ config, pool, onRoute }: BuildAppOptions): Prom
   registerEventRoutes(app, { events, auth, config, limiter })
   registerCatalogRoutes(app, { catalog, auth })
   registerProgressRoutes(app, { progress, auth, config, limiter })
+  registerAsrRoutes(app, {
+    ...(asr === undefined ? {} : { asr }),
+    auth,
+    config,
+    limiter,
+  })
   registerContentRoutes(app, { content, accounts })
   if (config.mediaLocalDir !== undefined) registerMediaRoutes(app, { config, pool })
 

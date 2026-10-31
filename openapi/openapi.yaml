@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: 趋势课程云端服务
-  version: 0.1.0
+  version: 0.2.0
   description: |
     仅供 dsh-plugin-trend-coach 使用。学员业务接口只读知识内容（进度与事件同意除外），凭据只出现在插件 Host 侧。
     接口口径以 docs/architecture/cloud-service-integration-checklist.md 为准。
@@ -889,6 +889,38 @@ components:
           type: string
           pattern: '^[A-Za-z0-9._-]{1,64}$'
 
+    AsrRequest:
+      type: object
+      additionalProperties: false
+      required: [audio, format, durationMs]
+      properties:
+        audio:
+          type: string
+          minLength: 1
+          maxLength: 2560064
+          description: 完整 WAV 的 base64；16kHz、单声道、PCM16，解码后 ≤1920044B。
+        format:
+          type: string
+          enum: [wav]
+        durationMs:
+          type: integer
+          minimum: 1
+          maximum: 60000
+
+    AsrResponse:
+      type: object
+      additionalProperties: false
+      required: [text, durationMs]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        durationMs:
+          type: integer
+          minimum: 1
+          maximum: 60000
+
   responses:
     BadRequest:
       description: 入参或结构不合法
@@ -922,6 +954,30 @@ components:
             $ref: '#/components/schemas/Error'
     Conflict:
       description: 资源已存在或当前状态不允许该操作
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    PayloadTooLarge:
+      description: 请求体或音频超过上限
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnprocessableEntity:
+      description: 未识别到语音
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BadGateway:
+      description: 上游协议异常
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: 上游不可用或未配置
       content:
         application/json:
           schema:
@@ -1431,6 +1487,43 @@ paths:
                 $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+
+  /v1/asr/transcribe:
+    post:
+      summary: 语音转写（MiniMax ASR）
+      description: 音频仅在内存中转发给上游，不落盘、不落日志；文本清洗后返回，空结果 422。请求体上限 3MiB。
+      security:
+        - bearerAuth: []
+          deviceId: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AsrRequest'
+      responses:
+        '200':
+          description: 转写成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsrResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /v1/auth/invite/redeem:
     post:
