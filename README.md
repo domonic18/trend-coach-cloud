@@ -31,7 +31,7 @@
 | `PUT /v1/events/consent` | 修改指标上报同意状态（可撤回） |
 | `POST /v1/events` | 接收白名单指标事件（需同意） |
 
-本地还提供 `GET /device` 授权页与 `GET /media/*` 媒体代理，仅开发使用，不进入对外契约。
+本地还提供 `GET /device` 授权页与 `GET /media/*` 媒体代理，仅开发使用，不进入对外契约。`GET /metrics` 为 Prometheus 指标，需 `Authorization: Bearer $CONSOLE_TOKEN`，同样不进入对外契约。
 
 契约、边界、验收用例与待冻结事项见 [对接清单](docs/architecture/cloud-service-integration-checklist.md)。冲突时以插件仓库 PRD v1.3 §6 与架构 §6 为准。
 
@@ -45,6 +45,8 @@
 | [项目规范](docs/conventions/project-conventions.md) | API、安全、测试、文档与提交约定 |
 | [文档总览](docs/ai-context/docs-overview.md) | 阅读顺序与文档索引 |
 | [项目结构](docs/ai-context/project-structure.md) | 现状与目标目录、放置规则 |
+| [部署 Runbook](docs/operations/deployment-runbook.md) | Compose、TLS、迁移、备份恢复、媒体 CDN |
+| [监控与告警](docs/operations/monitoring.md) | 指标接口、外部 Prometheus 接入、排障 |
 
 协作与 Agent 约束见 [AGENTS.md](AGENTS.md)。
 
@@ -75,6 +77,18 @@ npm test                       # 单元 + 契约测试（自动重置测试库�
 
 本地媒体需在 `.env` 设置 `MEDIA_LOCAL_DIR` 指向含 `hls/index.m3u8` 的目录；生产媒体走 CDN，不设该项。配置项与默认值见 `.env.example`，TTL 等临时取值待账号体系定稿后同步文档。
 
+## 部署
+
+生产使用 Docker Compose + Caddy（自动 TLS），数据库为 pgvector；迁移在应用启动时执行。
+
+```bash
+cp .env.prod.example .env.prod   # 填域名、数据库与两个密钥
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
+scripts/backup.sh                # 备份（可配 cron）
+```
+
+完整步骤、TLS、迁移、备份恢复、媒体 CDN 的 CORS/Range 要求与本地 staging 验证见 [部署 Runbook](docs/operations/deployment-runbook.md)。`/metrics` 保留供外部监控接入，默认不内置 Prometheus/Grafana 服务；接入方式见 [监控与告警](docs/operations/monitoring.md)。
+
 ## 目录
 
 ```
@@ -83,9 +97,10 @@ migrations/     # SQL 迁移（启动时自动执行）
 data/seed.json  # 本地种子数据（与插件 mock 对齐）
 openapi/        # OpenAPI 3.1 契约
 test/           # 单元与契约测试
-docs/           # 需求、架构、规范与项目结构
+docs/           # 需求、架构、规范、部署与监控
 docker/         # 本地数据库初始化
-scripts/        # migrate/seed/approve 入口
+deploy/         # Caddy 与可选监控模板（不随 Compose 启动）
+scripts/        # migrate/seed/approve 与备份恢复入口
 ```
 
 当前为 M2 实现阶段：六个业务接口、设备码授权、签名 HLS、事件接收与契约测试已落地；后台管理、账号体系与内容管线待 M3。

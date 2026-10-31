@@ -14,6 +14,8 @@
 | 4 | 对接方 | [对接清单](../architecture/cloud-service-integration-checklist.md)：逐接口字段与边界 |
 | 5 | 开发 | [项目规范](../conventions/project-conventions.md)：API、安全、测试、提交 |
 | 6 | Agent / 新人 | [项目结构](./project-structure.md)：目录与放置规则 |
+| 7 | 运维 | [部署 Runbook](../operations/deployment-runbook.md)：Compose、TLS、迁移、备份、媒体 |
+| 8 | 运维 | [监控与告警](../operations/monitoring.md)：指标接口、外部 Prometheus 接入、排障 |
 
 ## 2. 文档职责
 
@@ -24,6 +26,8 @@
 | 对接清单 | 每个接口的请求/响应、边界、错误、验收用例 | 插件与云端的接口约定 |
 | 项目规范 | 变更流程、API/安全/测试/文档/提交约定 | 团队执行标准 |
 | 项目结构 | 现状与目标目录、放置规则、边界 | 代码组织 |
+| 部署 Runbook | 拓扑、配置、TLS、迁移、备份恢复、媒体 CDN | 如何上线与恢复 |
+| 监控与告警 | 指标口径、外部抓取、告警模板、排障入口 | 如何观测与响应 |
 | 本文 | 文档索引、阅读顺序、维护规则 | 文档导航 |
 
 插件仓库文档（`../dsh-plugin-trend-coach/docs/`）是接口消费方口径的最终来源；冲突时先改插件 PRD/架构，再同步本仓库。
