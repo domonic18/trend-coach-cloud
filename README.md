@@ -1,6 +1,6 @@
 # trend-coach-cloud
 
-`dsh-plugin-trend-coach` 的云端服务仓库：提供课程知识检索、片段元数据、签名 HLS 播放会话、设备码授权、后台账号与内容管理，以及指标事件接收。
+`dsh-plugin-trend-coach` 的云端服务仓库：提供课程知识检索、片段元数据、签名 HLS 播放会话、设备码授权、后台账号与内容管理、指标事件接收，以及语音转写（M4.2，MiniMax ASR）。
 
 ## 边界
 
@@ -13,6 +13,7 @@
 | 后台账号管理（operator/admin 会话） | 第三方分析 SDK |
 | 内容管理 API 与 React 控制台（课程/章节/知识点/文章/片段） | 媒体上传、召回评估看板、插件版本与灰度 |
 | 鉴权指标事件接收 | 明文令牌落盘 |
+| 语音转写（仅语音→文字，密钥在云端） | 生成式推理 / 内容生成 |
 
 不耦合 `ai-invest`：独立实现，只借鉴 PostgreSQL halfvec + pg_trgm + RRF 的技术选型。
 
@@ -53,16 +54,17 @@
 | `GET /v1/events/consent` | 读取指标上报同意状态 |
 | `PUT /v1/events/consent` | 修改指标上报同意状态（可撤回） |
 | `POST /v1/events` | 接收白名单指标事件（需同意） |
+| `POST /v1/asr/transcribe` | 语音转写（WAV ≤60s，转发 MiniMax；音频不落盘） |
 
 本地还提供 `GET /device` 授权页与 `GET /media/*` 媒体代理，仅开发使用，不进入对外契约。`GET /metrics` 为 Prometheus 指标，需 `Authorization: Bearer $METRICS_TOKEN`，同样不进入对外契约。
 
-契约、边界、验收用例与待冻结事项见 [对接清单](docs/architecture/cloud-service-integration-checklist.md)。冲突时以插件仓库 PRD v1.3 §6 与架构 §6 为准。
+契约、边界、验收用例与待冻结事项见 [对接清单](docs/architecture/cloud-service-integration-checklist.md)。冲突时以插件仓库 PRD v1.6 §6 与架构 v1.6 §6 为准。
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [需求文档](docs/requirements/product-requirements.md) | 范围、功能 C1–C7、NFR、验收、里程碑 |
+| [需求文档](docs/requirements/product-requirements.md) | 范围、功能 C1–C10、NFR、验收、里程碑 |
 | [架构设计](docs/architecture/architecture-design.md) | 组件、数据模型、检索、鉴权、媒体、安全、ADR |
 | [对接清单](docs/architecture/cloud-service-integration-checklist.md) | 逐接口字段、边界与验收用例 |
 | [项目规范](docs/conventions/project-conventions.md) | API、安全、测试、文档与提交约定 |

@@ -2,22 +2,22 @@
 
 趋势交易课程云端服务仓库，为 `dsh-plugin-trend-coach` 插件提供课程知识检索、片段元数据、签名 HLS 播放会话、设备码授权、后台账号与内容管理，以及指标事件接收。
 
-当前阶段：**M3 实现阶段**。业务接口、设备码授权、签名 HLS、事件接收、体系与进度接口、账号与后台登录、内容管理 API 与 React 管理端已落地；媒体上传与召回评估待实现。
+当前阶段：**M4.2 实现阶段**。业务接口、设备码授权、签名 HLS、事件接收、体系与进度接口、账号与后台登录、内容管理 API 与 React 管理端已落地；媒体上传与召回评估待实现。
 
 ## 先读这些
 
 1. [需求文档](docs/requirements/product-requirements.md) — 范围、功能、验收、里程碑
-2. [架构设计](docs/architecture/architecture-design.md) — 组件、数据模型、检索、媒体、安全
+2. [架构设计](docs/architecture/architecture-design.md) — 组件、数据模型、检索、媒体、语音、安全
 3. [对接清单](docs/architecture/cloud-service-integration-checklist.md) — 逐接口契约
 4. [项目规范](docs/conventions/project-conventions.md) — API、安全、测试、提交
 5. [项目结构](docs/ai-context/project-structure.md) 与 [文档总览](docs/ai-context/docs-overview.md)
 
-冲突时以插件仓库 PRD v1.3 §6 与插件架构 §6/§9/§10/§12 为准；接口字段先改那两份文档，再同步本仓库。
+冲突时以插件仓库 PRD v1.6 §6 与插件架构 v1.6 §6/§9/§10/§12 为准；接口字段先改那两份文档，再同步本仓库。
 
 ## 硬约束（写代码前必须确认）
 
 1. **业务面边界**：学员只读知识内容，仅进度上报与事件同意是学员写操作。账号与内容管理只在 `/v1/admin/*`，学员设备令牌不可访问；新增写接口先更新需求与契约。
-2. **不做推理**：不托管模型 API Key、不代调大模型；查询 embedding 在云端计算，但对话推理在学员侧 BYOK。
+2. **不做生成式推理**：不代调对话/生成模型，对话推理在学员侧 BYOK；查询 embedding 在云端计算。唯一允许的模型能力是语音转写（ASR，MiniMax）：只做语音→文字，密钥仅存云端环境变量，音频与转写不落盘。
 3. **不下发全库**：只返回 Top-K 片段与元数据；不提供全库正文、源站直链或整片下载。
 4. **不复用 `ai-invest`**：独立仓库、独立数据库、独立鉴权；只借鉴 `halfvec` + `pg_trgm` + RRF 选型。
 5. **凭据边界**：Bearer 只在插件 Host 与云端；浏览器只拿短时效签名 `playlistUrl`。令牌只存哈希，不写日志、不进响应。

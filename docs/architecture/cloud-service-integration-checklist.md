@@ -1,6 +1,6 @@
 # 云端服务对接清单
 
-本文用于启动**独立的云端服务仓库**，供 `dsh-plugin-trend-coach` 插件对接。接口口径以 PRD v1.3 §6 与架构 §6、§9、§10、§12 为准；冲突时先改那两份文档，再同步本文。
+本文用于启动**独立的云端服务仓库**，供 `dsh-plugin-trend-coach` 插件对接。接口口径以 PRD v0.2 §6 与架构 v0.2 §6、§7.5、§9、§10、§12 为准；冲突时先改那两份文档，再同步本文。
 
 ## 1. 边界
 
@@ -13,6 +13,7 @@
 | 签名 HLS 播放会话 | 直链 / 可下载源站地址 |
 | 设备码授权与令牌轮换 | 写接口（一期只读） |
 | 鉴权指标事件接收（M2） | 第三方分析 SDK |
+| 语音转写（M4.2，MiniMax ASR，仅语音→文字） | 生成式推理 / 内容生成 |
 
 **不耦合 ai-invest**：不进其库、不调其服务、不共享代码与数据；只借鉴 PostgreSQL halfvec + pg_trgm + RRF 的技术选型（PRD D2）。
 
@@ -347,6 +348,45 @@ POST  /v1/admin/content/reindex
 - `POST /v1/admin/content/reindex` 未配置 embedding 返回 `409`；按课程重建时课程不存在返回 `404`。
 - 控制台 `/admin` 静态资源不属于 OpenAPI；会话令牌只存 `sessionStorage`，退出清除。
 
+
+### 3.8 语音转写（M4.2）
+
+```http
+POST /v1/asr/transcribe
+Authorization: Bearer <device accessToken>
+x-device-id: <deviceId>
+Content-Type: application/json
+```
+
+```jsonc
+// 请求
+{ "audio": "<base64 WAV>", "format": "wav", "durationMs": 12000 }
+// 成功
+{ "text": "趋势反转的初步信号是什么？", "durationMs": 12000 }
+```
+
+- 路由级 `bodyLimit: 3 * 1024 * 1024`；body 严格校验、`additionalProperties: false`；`format` 仅 `wav`。
+- 音频：RIFF/WAVE、PCM（format=1）、单声道、16000Hz、16bit；解码后 ≤1,920,044B；`durationMs` 整数 1–60,000；`data` 字节换算时长与 `durationMs` 误差 ≤1s。
+- 文本：去控制字符、折叠空白、trim 后 1–2000 字符；空结果 `422`。
+- 上游：MiniMax `POST {base}/v1/speech_to_text`（Bearer；multipart `file=audio/wav` + `model` + `response_format=json`）；`base_resp.status_code != 0` 视为协议错误。
+- 未配置 `ASR_API_KEY`：local 鉴权后 `503`；staging/production 启动失败。
+- 限流：按设备 `RATE_LIMIT_ASR_PER_MINUTE`（默认 20）；不自动重试上游。
+- 错误：`400` 入参/音频非法；`401/403` 鉴权；`413` 过大；`422` 未识别；`429` 限流；`502` 上游协议异常；`503` 上游不可用/未配置。
+
+**验收用例**
+
+| 用例 | 期望 |
+|---|---|
+| 合法 WAV（16k/mono/PCM16，≤60s） | `200`，`text` 清洗后非空，`durationMs` 回显 |
+| 未鉴权 / 设备不匹配 | `401` / `403` |
+| 非法 base64、非 WAV、立体声、44.1k、8bit、data 长度或时长不符 | `400` |
+| 请求体 >3MiB 或音频 >1,920,044B | `413` |
+| 上游返回空文本 / `base_resp.status_code != 0` | `422` / `502` |
+| 上游 429 / 5xx / 超时 | `429` / `503`，插件提示重试，云端不自动重试 |
+| 超过按设备限流 | `429` |
+| 未配置 `ASR_API_KEY`（local） | `503` |
+| 日志抽查 | 无 base64、无转写正文、无完整 deviceId |
+
 ## 4. 数据与内容前置
 
 - 需要 M1 内容管线产出：带时间戳转写、章节/知识点切分、`segmentId` 分配、课程/章节/知识点标题。
@@ -397,14 +437,19 @@ POST  /v1/admin/content/reindex
 | 内容管理 | 片段时间轴或知识点归属非法 | `400`，不写入 |
 | 内容管理 | 修改片段文本后重建向量 | 旧向量清空；reindex 成功；未配置 embedding `409` |
 | 内容管理 | `/admin` 控制台 | 未登录不可操作；退出清除 `sessionStorage` 令牌 |
+| 语音 | 合法 WAV 转写 | `200`，文本清洗、`durationMs` 回显 |
+| 语音 | 鉴权 / 设备不匹配 | `401` / `403` |
+| 语音 | 非法音频 / 超长 / 空文本 | `400` / `413` / `422` |
+| 语音 | 上游 429 / 5xx / 超时 | `429` / `503`，不自动重试 |
+| 语音 | 未配置 ASR（local） | `503`；staging/production 启动失败 |
 
 ## 7. 交付物
 
 1. 服务骨架与部署说明（staging / production），有效 TLS 证书。
 2. OpenAPI 3 文档，字段与本文一致；契约变更先改 PRD §6 与架构 §6。
 3. 数据库 schema 与迁移（课程、章节、知识点、片段、文章、进度、账号/会话/邀请码、用户/设备、令牌、事件）。
-4. 学员接口（设备码、检索、片段、播放会话、体系/进度、事件）与后台接口（账号、内容管理）。
-5. 鉴权中间件（Bearer + `x-device-id`）、限流、错误码映射、日志脱敏。
+4. 学员接口（设备码、检索、片段、播放会话、体系/进度、事件、语音转写）与后台接口（账号、内容管理）。
+5. 鉴权中间件（Bearer + `x-device-id`）、限流（含 ASR 按设备限流）、错误码映射、日志脱敏。
 6. 签名 HLS 下发与 CORS/Range 配置。
 7. 最小联调数据集（真实课程 + 加密样片）与测试账号。
 8. 契约测试与 CI：覆盖第 6 节全部用例；至少一个与插件 mock 对齐的响应夹具。
@@ -420,3 +465,5 @@ POST  /v1/admin/content/reindex
 | 事件端点与同意模型 | 建议 `POST /v1/events`，本地默认关闭、可撤回 | 指标上报与隐私合规 |
 | 视频加密方案 | 云点播私有加密或 AES-128 | hls.js 解密配置 |
 | 相邻知识点阈值 | 空召回或最高分低于阈值（待定数值） | F1.4 召回质量 |
+| ASR 供应商与模型 | MiniMax `asr-1.0`；provider 接口保留 | 供应商抖动与成本 |
+| 语音成本上限 | 单次 ≤60s、每设备 20 次/分钟；不自动重试 | 滥用与账单 |

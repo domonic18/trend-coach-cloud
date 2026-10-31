@@ -1,7 +1,7 @@
-# 趋势课程云端服务 · 架构设计（v0.1）
+# 趋势课程云端服务 · 架构设计（v0.2）
 
-版本：v0.1（2026-10-31）
-状态：初稿。接口口径以插件 PRD v1.3 §6、插件架构 §6/§9/§10/§12 与 [对接清单](./cloud-service-integration-checklist.md) 为准；冲突时先改那两份文档，再同步本文。
+版本：v0.2（2026-11-01）
+状态：初稿。接口口径以插件 PRD v1.6 §6、插件架构 §6/§9/§10/§12 与 [对接清单](./cloud-service-integration-checklist.md) 为准；冲突时先改那两份文档，再同步本文。v0.2 新增 M4.2 语音转写（MiniMax ASR）。
 
 ## 1. 目标与范围
 
@@ -14,6 +14,7 @@
 | 短时效签名 HLS 播放会话 | 直链 / 可下载源站地址 |
 | 设备码授权与令牌轮换 | 写接口（一期只读） |
 | 鉴权指标事件接收（M2） | 第三方分析 SDK |
+| 语音转写（M4.2，MiniMax ASR，仅语音→文字） | 生成式推理 / 内容生成 |
 | 内容与索引管线（M1） | 后台管理（M3 预留） |
 
 **不耦合 `ai-invest`**：独立仓库、独立数据库、独立鉴权与用户体系；不复制其代码、数据或评估集，只借鉴 PostgreSQL `halfvec` + `pg_trgm` + RRF 的技术选型（PRD D2）。
@@ -92,6 +93,7 @@ API Gateway ── 鉴权（Bearer + x-device-id）── 限流 ── 请求�
    ├── auth   : device/code → device/token → refresh
    ├── kb     : search / segments/:id
    ├── playback: sessions（签名 playlistUrl）
+   ├── asr     : POST /v1/asr/transcribe → MiniMax speech_to_text（M4.2）
    └── events : GET/PUT /v1/events/consent + POST /v1/events（白名单）
    │
 PostgreSQL ── 课程 / 章节 / 知识点 / 片段 / 向量 / 用户 / 设备 / 令牌 / 事件
@@ -259,6 +261,45 @@ sequenceDiagram
 - 控制台为 `/admin` 单页应用（Vite + React），构建产物由 Fastify 静态托管；会话令牌存 `sessionStorage`，不使用 cookie，静态页不缓存；所有数据请求仍走 `/v1/auth/session` + 后台接口逐请求鉴权。
 - 账号管理页仅 admin 可见；operator 登录后仅显示内容管理，接口层同时校验角色，前端隐藏不作为安全边界。
 
+
+### 7.5 语音转写接口（M4.2）
+
+**组件**
+
+```
+POST /v1/asr/transcribe
+  ├── requirePrincipal（Bearer + x-device-id）
+  ├── 未配置 ASR → 503（staging/production 启动即失败）
+  ├── RateLimiter（deviceId，RATE_LIMIT_ASR_PER_MINUTE）
+  ├── parseAsrBody（JSON 严格校验，additionalProperties:false）
+  ├── decodeAsrWav（base64 / RIFF / PCM / 16k / mono / 16bit / 时长）
+  ├── AsrProvider.transcribe(wav, durationMs)
+  │     └── MiniMax POST {base}/v1/speech_to_text（multipart wav）
+  └── 文本清洗（控制字符、折叠空白、1–2000 字符）→ { text, durationMs }
+```
+
+- 路由级 `bodyLimit: 3 * 1024 * 1024`，覆盖全局 128KiB；请求体只接受 `{ audio, format: 'wav', durationMs }`。
+- 音频解码后 ≤1,920,044B；`data` 长度换算时长与 `durationMs` 误差 ≤1s；`format` 仅 `wav`。
+- 云端独立实现 WAV 校验（与插件 `voice-audio.ts` 同口径、不同代码），不信任 Host 的校验结果。
+- provider 接口为 `AsrProvider { transcribe(wav: Uint8Array, durationMs: number): Promise<string> }`；本期只实现 MiniMax，保留多供应商切换点。
+- MiniMax base 归一化：剥离 `/v1/speech_to_text`、`/speech_to_text`、`/v1` 后缀，再拼 `/v1/speech_to_text`；默认 `https://api.minimaxi.com`。
+- 上游响应：HTTP 200 且有 `text` 为成功；HTTP 200 + `base_resp.status_code != 0`、缺 `text`、非 JSON → `invalid_response`（`502`）；HTTP 429 → `rate_limited`（`429`）；5xx/网络/超时 → `unavailable`（`503`）。
+- 不自动重试：避免重复计费与放大上游 429。
+- 空文本（清洗后为空）→ `422`「未识别到语音」。
+- 日志只记 `kind`（如 `rate_limited` / `unavailable` / `invalid_response`）与耗时，不记 `status_msg`、转写正文、base64 或完整 deviceId。
+
+**配置**
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ASR_BASE_URL` | `https://api.minimaxi.com` | MiniMax 基址；显式设置但缺 `ASR_API_KEY` 时启动失败 |
+| `ASR_API_KEY` | 无 | 仅云端环境变量；staging/production 缺失时启动失败 |
+| `ASR_MODEL` | `asr-1.0` | 上游模型名 |
+| `ASR_TIMEOUT_MS` | `30000` | 上游超时；应小于插件 `voiceTimeoutMs`（40s） |
+| `RATE_LIMIT_ASR_PER_MINUTE` | `20` | 按设备限流 |
+
+**隐私**：音频只在请求生命周期内存在，转发 MiniMax 后丢弃；不落盘、不落数据库、不写对象存储、不进入指标；转写文本只回传插件，不持久化。
+
 ## 8. 播放与媒体
 
 - `POST /v1/playback/sessions` 校验片段可播与用户配额后，返回短时效签名 `playlistUrl`（绑定设备与会话）。
@@ -281,9 +322,9 @@ sequenceDiagram
 | 账号 | 管理员创建账号；角色最小权限；学员不可访问后台；禁用/改密吊销会话，禁用即时拒绝设备令牌 |
 | 内容 | 只下发 Top-K；播放地址短时效、设备绑定、并发限制；不提供下载直链 |
 | 内容管理 | `/v1/admin/content/*` 仅 operator/admin 会话；Markdown 拒绝可执行 HTML/脚本；发布状态即时影响学员可见性 |
-| 输入 | 白名单校验 + 长度/体积上限；拒绝非 JSON 与超大请求 |
+| 输入 | 白名单校验 + 长度/体积上限；拒绝非 JSON 与超大请求；ASR 路由单独 3MiB 上限并校验 WAV |
 | 日志 | 不记 token、完整 query、完整 deviceId；需要排障时用截断前缀或哈希 |
-| 隐私 | 数据最小化；事件需同意且可撤回；支持数据删除 |
+| 隐私 | 数据最小化；事件需同意且可撤回；支持数据删除；音频与转写不落盘、不落日志、不进指标 |
 | 依赖 | 定期审计；生产不使用第三方分析 SDK |
 
 ## 10. 可观测性
@@ -295,6 +336,7 @@ sequenceDiagram
 | 播放 | 会话签发量、签名失败率、并发、CDN 命中率、起播耗时（端上报） |
 | 系统 | 错误率按 `400/401/403/404/429/5xx` 分桶、限流命中、DB 连接/慢查询、索引任务耗时与失败 |
 | 事件 | 接收量、白名单拒绝量、同意/撤回状态 |
+| 语音 | 转写请求量、耗时 P50/P95、错误分桶（400/413/422/429/502/503）、上游错误类别、音频时长分布（仅聚合桶，不记内容） |
 
 - 日志结构化，带 `request_id`；响应返回 `request_id` 便于排障（不泄露内部细节）。
 - 告警：5xx/429 异常升高、检索 P95 超阈值、索引任务连续失败、证书到期、签名失败率异常。
@@ -315,6 +357,7 @@ sequenceDiagram
 | 单元/集成 | 入参校验、RRF 融合、阈值回退、签名 URL 构造与校验、令牌轮换 |
 | 检索质量 | 自建评估集 ≥100 条，Top-5 ≥90% |
 | 媒体 | 加密 HLS 可解密、seek、Range 206、CORS、token 过期提示 |
+| 语音 | WAV 校验边界、provider 成功/业务错误/429/5xx/非 JSON/超时、空文本 422、鉴权与限流、日志脱敏；真实 MiniMax 待 `ASR_API_KEY` |
 | 安全 | 越权/设备不匹配/过期令牌、日志脱敏抽查、限流 |
 | 压测 | 检索 P95 与并发目标；播放会话签发与 CDN 并发 |
 
@@ -327,9 +370,10 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 | M1 | 内容管线、课程/知识点/片段入库、索引 | 1 门真实课程结构化上线，可检索 |
 | M2 | 核心业务接口、设备码授权、签名 HLS、事件接口与同意管理、契约测试 | 对接清单验收通过，插件联调完成 |
 | M3 | 后台管理、账号体系、学习进度、索引重建/召回测试 | 内容可运营、用户可管理 |
+| M4.2 | 语音转写：`/v1/asr/transcribe`、MiniMax provider、配置与限流 | 契约测试通过；真实 MiniMax 需 `ASR_API_KEY` |
 | M6 | 限流、压测、备份、合规加固 | 公测放行 |
 
-实现状态（2026-10-31）：M2 服务侧已落地——核心业务接口、设备码授权与令牌轮换、`POST /v1/auth/revoke` 设备注销、签名 HLS 会话、事件白名单与幂等、`GET/PUT /v1/events/consent` 同意读写、OpenAPI 与契约测试；限流为单实例内存实现。M3.3 体系与进度接口（课程列表、课程树、知识点详情、进度上报）已落地；M3.1 账号与后台登录（管理员创建账号、邀请码、会话、角色、设备批准绑定）已落地；内容管线（M1）与 React 管理端（M3.2）、内容管理接口（M3.2）未实现，TTL 与并发上限仍为临时默认值。
+实现状态（2026-10-31）：M2 服务侧已落地——核心业务接口、设备码授权与令牌轮换、`POST /v1/auth/revoke` 设备注销、签名 HLS 会话、事件白名单与幂等、`GET/PUT /v1/events/consent` 同意读写、OpenAPI 与契约测试；限流为单实例内存实现。M3.3 体系与进度接口（课程列表、课程树、知识点详情、进度上报）已落地；M3.1 账号与后台登录（管理员创建账号、邀请码、会话、角色、设备批准绑定）已落地；M4.2 语音转写（`/v1/asr/transcribe` + MiniMax provider + 按设备限流）已落地，真实上游待 `ASR_API_KEY`（2026-11-01 单元/契约测试已通过：WAV 与时长校验、base URL 归一化、本地 stub 覆盖成功/`base_resp` 业务错误/429/500/非 JSON/超时，以及鉴权、设备不匹配、非法音频、413、空结果 422、上游错误映射、fake provider 成功与限流 429）；内容管线（M1）与 React 管理端（M3.2）、内容管理接口（M3.2）未实现，TTL 与并发上限仍为临时默认值。
 
 ## 14. 关键设计决策（ADR）
 
@@ -343,6 +387,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 | C6 | 媒体走 CDN，不经业务进程 | 带宽与成本可控；业务面保持轻量 | 需 CDN 签名/CORS/Range 配置一致性 |
 | C7 | 事件白名单 + 同意可撤回 | 隐私合规；避免第三方 SDK 与原始 query 外流 | 指标体系受限，需要同意管理 |
 | C8 | 模块化单体起步 | M1/M2 以交付速度优先；接口前缀已分层 | M3 后需按负载拆分服务 |
+| C9 | ASR 用 MiniMax，音频在云端转发，不落盘 | 上游不支持 webm，插件已在浏览器内编码 WAV；云端只做语音→文字，密钥仅存环境变量；不自动重试避免重复计费 | 依赖上游可用性；2.56MB base64 需路由级 bodyLimit |
 
 ## 15. 开放问题
 
@@ -353,6 +398,8 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 5. 相邻知识点阈值：空召回或最高分低于阈值的具体数值待评估集定标。
 6. 引用 host：`trend-coach.local` 是否长期保留；真实域名需插件同步支持。
 7. 部署区域与 CDN 供应商：影响签名算法、CORS 配置与延迟预算。
+8. 真实 MiniMax ASR 联调需 `ASR_API_KEY`；当前以 fake provider 与本地 stub 验证，真实链路作为待验项。
+9. 多供应商 ASR 切换本期不做；provider 接口保留。
 
 ## 16. 关联文档
 
