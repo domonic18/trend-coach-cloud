@@ -180,6 +180,14 @@ components:
             label:
               type: string
 
+    EventsConsent:
+      type: object
+      additionalProperties: false
+      required: [consent]
+      properties:
+        consent:
+          type: boolean
+
     EventRequest:
       type: object
       additionalProperties: false
@@ -497,6 +505,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /v1/events/consent:
+    get:
+      summary: 读取指标上报同意状态
+      description: 默认未同意；插件只在该用户明确同意后上报白名单事件。
+      security:
+        - bearerAuth: []
+          deviceId: []
+      responses:
+        '200':
+          description: 当前同意状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventsConsent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      summary: 修改指标上报同意状态
+      description: 撤销后立即停止接收事件；已上报数据不回溯删除。
+      security:
+        - bearerAuth: []
+          deviceId: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [consent]
+              properties:
+                consent:
+                  type: boolean
+      responses:
+        '200':
+          description: 修改后的同意状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventsConsent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   /v1/events:
     post:

@@ -252,4 +252,13 @@ export class AuthService {
     )
     return rows[0]?.events_consent ?? false
   }
+
+  async setEventsConsent(userId: string, consent: boolean): Promise<boolean> {
+    const { rows } = await this.pool.query<{ events_consent: boolean }>(
+      'UPDATE users SET events_consent = $2 WHERE user_id = $1 RETURNING events_consent',
+      [userId, consent],
+    )
+    if (rows[0] === undefined) throw unauthorized('user not found')
+    return rows[0].events_consent
+  }
 }

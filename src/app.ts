@@ -43,7 +43,7 @@ export async function buildApp({ config, pool, onRoute }: BuildAppOptions): Prom
 
   await app.register(cors, {
     origin: '*',
-    methods: ['GET', 'POST', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
     allowedHeaders: ['content-type', 'authorization', 'x-device-id'],
   })
 

@@ -4,6 +4,7 @@ import { hashToken } from '../auth/tokens.js'
 import type { AppConfig } from '../config.js'
 import { forbidden, tooManyRequests } from '../errors.js'
 import { requirePrincipal } from '../http/principal.js'
+import { asObject, booleanField } from '../http/validation.js'
 import { RateLimiter } from '../rate-limit.js'
 import { EventService, parseEventBody } from './service.js'
 
@@ -16,6 +17,17 @@ export interface EventRouteDeps {
 
 export function registerEventRoutes(app: FastifyInstance, deps: EventRouteDeps): void {
   const { events, auth, config, limiter } = deps
+
+  app.get('/v1/events/consent', async request => {
+    const principal = await requirePrincipal(request, auth)
+    return { consent: await auth.eventsConsent(principal.userId) }
+  })
+
+  app.put('/v1/events/consent', async request => {
+    const principal = await requirePrincipal(request, auth)
+    const consent = booleanField(asObject(request.body), 'consent')
+    return { consent: await auth.setEventsConsent(principal.userId, consent) }
+  })
 
   app.post('/v1/events', async (request, reply) => {
     const principal = await requirePrincipal(request, auth)
