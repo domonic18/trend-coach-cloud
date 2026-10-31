@@ -1,8 +1,8 @@
 # 项目结构
 
-版本：v0.2（2026-10-31）
+版本：v0.4（2026-10-31）
 
-本仓库已进入 M2 实现阶段：单进程模块化单体（Fastify + PostgreSQL/pgvector），业务接口、鉴权、媒体签名与契约测试已落地。本文件描述现状与已确定的目标结构，避免后续实现随意扩散。
+本仓库已进入 M3 实现阶段：单进程模块化单体（Fastify + PostgreSQL/pgvector），业务接口、鉴权、媒体签名、体系与进度、账号与后台登录、内容管理与 React 管理端、契约测试已落地。本文件描述现状与已确定的目标结构，避免后续实现随意扩散。
 
 ## 1. 当前结构
 
@@ -15,13 +15,14 @@ trend-coach-cloud/
 ├── docker-compose.yml                         # 本地 PostgreSQL 17 + pgvector
 ├── docker/initdb/01-test-db.sql               # 创建 trend_coach_test
 ├── migrations/
-│   └── 001_init.sql                           # 表、约束、trgm/HNSW 索引
+│   ├── 001_init.sql                           # 表、约束、trgm/HNSW 索引
+│   ├── 002_catalog_progress.sql               # 文章、学习进度
+│   └── 003_accounts.sql                       # 账号、后台会话、邀请码
 ├── data/
 │   └── seed.json                              # 本地/CI 种子数据（不含真实版权内容）
 ├── scripts/
 │   ├── migrate.ts                             # npm run migrate [-- --reset]
-│   ├── seed.ts                                # npm run seed
-│   └── approve.ts                             # npm run approve -- <USER-CODE>
+│   └── seed.ts                                # npm run seed
 ├── openapi/
 │   └── openapi.yaml                           # 唯一对外契约源
 ├── src/
@@ -30,12 +31,18 @@ trend-coach-cloud/
 │   ├── config.ts                              # 环境变量校验与默认值
 │   ├── db.ts / migrate.ts / seed.ts           # 连接、迁移、种子
 │   ├── errors.ts / rate-limit.ts
+│   ├── accounts/                              # 账号、角色、scrypt 密码、后台会话、邀请码
 │   ├── auth/                                  # 设备码、令牌签发/轮换/吊销、设备绑定
 │   ├── http/                                  # Bearer/设备头解析、入参校验
 │   ├── kb/                                    # 混合召回、RRF、片段详情、embedding
 │   ├── playback/                              # 播放会话与 HMAC 签名
 │   ├── media/                                 # 本地媒体代理：m3u8 改写、Range
+│   ├── catalog/                               # 已发布课程树、知识点详情、文章
+│   ├── progress/                              # 学习进度合并与查询
+│   ├── content/                               # 内容管理：课程/章节/知识点/文章/片段/重建索引
 │   └── events/                                # 事件鉴权、白名单、同意、幂等
+├── web/
+│   └── admin/                                 # React + Vite 管理端；npm run build 输出 dist/admin
 ├── test/
 │   ├── unit.test.ts                           # 配置、校验、RRF、Range、签名、事件白名单
 │   └── contract.test.ts                       # 逐接口契约 + OpenAPI 一致性
@@ -44,13 +51,13 @@ trend-coach-cloud/
 
 ## 2. 目标结构（M3 起）
 
-M3 新增内容管线与后台时，在现有结构上追加，不重排已落地模块：
+M3 在现有结构上追加，不重排已落地模块：
 
 ```
-src/content/      # 转写对齐、切分、索引任务（内部）
-src/admin/        # 后台管理、账号体系（M3）
 deploy/           # staging/production 部署与密钥注入说明（不含密钥）
 ```
+
+账号与后台登录已在 `src/accounts/` 落地；内容管理与 React 管理端已在 `src/content/` 与 `web/admin/` 落地。`dist/admin` 为构建产物，仅在存在 `index.html` 时由服务端静态托管于 `/admin/`。
 
 ## 3. 放置规则
 
@@ -65,7 +72,7 @@ deploy/           # staging/production 部署与密钥注入说明（不含密�
 
 ## 4. 边界规则
 
-- `content`（内部管线）与学员接口隔离：学员令牌无法访问；写操作只在内部。
+- `content`（内部管线）与学员接口隔离：学员设备令牌无法访问 `/v1/admin/*`；后台写操作只接受 operator/admin 会话。学员写操作仅限进度上报与事件同意。
 - `app.ts` 统一做鉴权、限流、错误映射与日志脱敏，业务模块不各自实现。
 - `http/` 只放纯校验与请求解析，不放业务状态；不得依赖具体存储。
 - 媒体流量不经业务进程：生产由 CDN 传输；`src/media/` 仅本地开发挂载。

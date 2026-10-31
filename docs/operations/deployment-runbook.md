@@ -1,6 +1,6 @@
 # 部署 Runbook
 
-版本：v0.1（2026-10-31）
+版本：v0.2（2026-10-31）
 
 面向运维与开发：把云端服务部署到一台 Linux 主机，覆盖 TLS、数据库迁移、备份恢复、媒体 CDN 与本地 staging 验证。监控见 [监控与告警](./monitoring.md)。
 
@@ -10,7 +10,7 @@
 Internet ── Caddy(80/443, 自动 TLS) ── app(Fastify, 3939)
                                           ├── db(PostgreSQL 17 + pgvector)
                                           └── 媒体：生产走 CDN；仅本地 staging 由 app 的 /media 提供
-Prometheus(可选) ── 抓取 app:/metrics（Bearer CONSOLE_TOKEN）
+Prometheus(可选) ── 抓取 app:/metrics（Bearer METRICS_TOKEN）
 Grafana(可选) ── 查询 Prometheus
 ```
 
@@ -27,10 +27,10 @@ cp .env.prod.example .env.prod
 chmod 600 .env.prod
 ```
 
-至少填写：`APP_ENV`、`PUBLIC_BASE_URL`、`MEDIA_BASE_URL`、`DOMAIN`、`POSTGRES_USER/PASSWORD/DB`、`CONSOLE_TOKEN`、`MEDIA_SIGNING_SECRET`。
+至少填写：`APP_ENV`、`PUBLIC_BASE_URL`、`MEDIA_BASE_URL`、`DOMAIN`、`POSTGRES_USER/PASSWORD/DB`、`METRICS_TOKEN`、`MEDIA_SIGNING_SECRET`；首次部署另填 `BOOTSTRAP_ADMIN_USERNAME` 与 `BOOTSTRAP_ADMIN_PASSWORD`。
 
 ```bash
-openssl rand -hex 32   # CONSOLE_TOKEN
+openssl rand -hex 32   # METRICS_TOKEN
 openssl rand -hex 32   # MEDIA_SIGNING_SECRET
 openssl rand -hex 24   # POSTGRES_PASSWORD
 ```
@@ -38,7 +38,8 @@ openssl rand -hex 24   # POSTGRES_PASSWORD
 规则由 `src/config.ts` 强制，配置错误会阻止启动：
 
 - 非 local 必须 HTTPS；production 的 `PUBLIC_BASE_URL`/`MEDIA_BASE_URL` 不允许本机地址。
-- `CONSOLE_TOKEN`、`MEDIA_SIGNING_SECRET` 至少 16 字符，且不能是本地默认值。
+- `METRICS_TOKEN`、`MEDIA_SIGNING_SECRET` 至少 16 字符，且不能是本地默认值。
+- `BOOTSTRAP_ADMIN_USERNAME` 与 `BOOTSTRAP_ADMIN_PASSWORD` 必须成对配置；用户名匹配 `[a-z][a-z0-9._-]{2,31}`，密码至少 12 字符。首个管理员只在库中无 active admin 时创建，创建成功后应移除这两个变量并重启。
 - `POSTGRES_PASSWORD` 含 `:/@?#[]%` 等字符时，`DATABASE_URL` 需要 URL 编码；建议直接用字母数字。
 
 ## 3. 首次部署
@@ -60,13 +61,27 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml exec -T app \
   node --input-type=module -e "const {loadConfig}=await import('./dist/config.js'); const {createPool}=await import('./dist/db.js'); const {seedDatabase}=await import('./dist/seed.js'); const pool=createPool(loadConfig().databaseUrl); const seed=await seedDatabase(pool); await pool.end(); console.log('seeded', seed.segments.length)"
 ```
 
-- 学员设备授权由运营人员完成：打开 `https://$DOMAIN/device?code=<USER-CODE>` 输入 `CONSOLE_TOKEN`，或：
+- 后台登录与账号创建（首个管理员来自 `BOOTSTRAP_ADMIN_*`）：
+
+```bash
+curl -fsS -X POST https://$DOMAIN/v1/auth/session \
+  -H "content-type: application/json" \
+  -d '{"username":"admin01","password":"<初始密码>"}'
+# 返回 token；用 admin 会话创建学员账号，role 为 student/operator/admin：
+curl -fsS -X POST https://$DOMAIN/v1/admin/users \
+  -H "content-type: application/json" -H "authorization: Bearer $SESSION_TOKEN" \
+  -d '{"username":"student01","displayName":"张三","role":"student","password":"<初始密码>"}'
+```
+
+- 学员设备授权：打开 `https://$DOMAIN/device?code=<USER-CODE>` 输入用户名与密码（首次可用邀请码设置密码）；运营人员也可用会话直接批准：
 
 ```bash
 curl -fsS -X POST https://$DOMAIN/v1/auth/device/approve \
-  -H "content-type: application/json" -H "x-console-token: $CONSOLE_TOKEN" \
+  -H "content-type: application/json" -H "authorization: Bearer $SESSION_TOKEN" \
   -d '{"userCode":"ABCD-EFGH"}'
 ```
+
+- 内容管理控制台：浏览器打开 `https://$DOMAIN/admin/`，用 operator/admin 账号登录，管理课程、章节、知识点、文章与片段。镜像构建已包含 `web/admin` 并输出到 `dist/admin`；服务端只在 `dist/admin/index.html` 存在时挂载 `/admin/`，缺失时该路径 404 而 API 不受影响。前端是纯静态 SPA，会话令牌存 `sessionStorage`，关标签即失效，不使用 Cookie，因此 `/admin/` 反向代理无需额外鉴权配置（接口本身仍校验 Bearer）。
 
 ## 4. TLS
 
@@ -131,7 +146,7 @@ curl -sI https://media.example.com/hls/seg0.ts -H 'Range: bytes=0-99' | grep -iE
 ## 8. 健康检查与观测
 
 - `GET /health`：检查数据库连通性；失败返回 503。Docker healthcheck 与负载均衡都用它。
-- `GET /metrics`：Prometheus 指标，需 `Authorization: Bearer $CONSOLE_TOKEN`。该端点不属于对外契约，不写入 OpenAPI。
+- `GET /metrics`：Prometheus 指标，需 `Authorization: Bearer $METRICS_TOKEN`。该端点不属于对外契约，不写入 OpenAPI。
 - 日志为 JSON 到 stdout，可由 `docker compose logs -f app` 或主机日志驱动采集；token、设备 ID 已脱敏。
 
 监控不随 Compose 部署；`/metrics` 保留，接入外部 Prometheus 见 [监控与告警](./monitoring.md)。
@@ -145,8 +160,8 @@ IMAGE_TAG=2026-10-31 docker compose --env-file .env.prod -f docker-compose.prod.
 IMAGE_TAG=2026-10-30 docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 ```
 
-- 发布前：`npm run typecheck && npm test`、备份、确认迁移可向前兼容。
-- 发布后：`/health`、一次设备授权/刷新、一次检索、一次播放会话、检查 5xx 与 P95。
+- 发布前：`npm run typecheck && npm test`、备份、确认迁移可向前兼容；`npm run build` 会同时产出服务端与 `dist/admin`。
+- 发布后：`/health`、一次设备授权/刷新、一次检索、一次播放会话、打开 `/admin/` 完成一次登录与内容读写，检查 5xx 与 P95。
 - 迁移已改变数据时，仅回滚镜像可能不兼容；优先前滚修复，否则按 §6 恢复。
 
 ## 10. 本地 staging 验证
@@ -167,7 +182,7 @@ MEDIA_LOCAL_DIR=/media
 ```bash
 docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
 curl -kfsS https://localhost/health
-# 设备码 → 批准 → 换 token → 检索 → 播放会话（token 由 CONSOLE_TOKEN 保护）
+# 设备码 → 账号密码批准 → 换 token → 检索 → 播放会话
 ```
 
 验证通过后即可把同一 Compose 指向真实域名与 CDN；两者差异只在 `.env.prod`。

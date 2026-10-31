@@ -6,7 +6,7 @@
 
 ## 1. 指标
 
-`GET /metrics` 由 `src/metrics.ts` 生成，Prometheus 文本格式，需 `Authorization: Bearer $CONSOLE_TOKEN`。
+`GET /metrics` 由 `src/metrics.ts` 生成，Prometheus 文本格式，需 `Authorization: Bearer $METRICS_TOKEN`。
 
 | 指标 | 标签 | 用途 |
 |---|---|---|
@@ -31,17 +31,17 @@ scrape_configs:
     scheme: https
     authorization:
       type: Bearer
-      credentials_file: /etc/prometheus/console_token
+      credentials_file: /etc/prometheus/metrics_token
     static_configs:
       - targets: ["api.example.com"]
 ```
 
-`console_token` 文件内容为 `CONSOLE_TOKEN`，权限 600。示例配置在 `deploy/monitoring/prometheus.yml`，告警规则在 `deploy/monitoring/alerts.yml`，Grafana 看板 JSON 在 `deploy/monitoring/grafana/dashboards/trend-coach.json`，可按现有监控体系取用或删除，均不参与 Compose 启动。
+`metrics_token` 文件内容为 `METRICS_TOKEN`，权限 600。示例配置在 `deploy/monitoring/prometheus.yml`，告警规则在 `deploy/monitoring/alerts.yml`，Grafana 看板 JSON 在 `deploy/monitoring/grafana/dashboards/trend-coach.json`，可按现有监控体系取用或删除，均不参与 Compose 启动。
 
 验证：
 
 ```bash
-curl -fsS -H "Authorization: Bearer $CONSOLE_TOKEN" https://$DOMAIN/metrics | head
+curl -fsS -H "Authorization: Bearer $METRICS_TOKEN" https://$DOMAIN/metrics | head
 ```
 
 ## 3. 告警规则（模板）

@@ -20,7 +20,7 @@
 
 ## 2. 设计原则与约束
 
-1. **只读业务面**：一期所有学员接口为只读；写操作只存在于内部内容管线。
+1. **业务面边界**：学员只读知识内容，仅学习进度与事件同意为学员写操作；账号与内容管理走 `/v1/admin/*`，只接受 operator/admin 会话。
 2. **凭据不落地到浏览器**：Bearer 只出现在插件 Host 与云端；浏览器只拿签名播放地址。
 3. **内容最小外流**：只下发 Top-K 片段与元数据，不下发全库正文、可下载源站地址。
 4. **契约先行**：接口字段、边界与错误码先写进需求与对接清单，再改实现与 OpenAPI。
@@ -125,6 +125,10 @@ erDiagram
   DEVICES ||--o{ TOKENS : holds
   USERS ||--o{ PLAYBACK_SESSIONS : starts
   USERS ||--o{ EVENTS : emits
+  KNOWLEDGE_POINTS ||--o{ ARTICLES : has
+  USERS ||--o{ LEARNING_PROGRESS : tracks
+  USERS ||--o{ SESSIONS : holds
+  USERS ||--o{ INVITE_CODES : receives
 ```
 
 | 表 | 关键字段 | 不变量 |
@@ -134,13 +138,19 @@ erDiagram
 | `knowledge_points` | `knowledge_point_id`、`chapter_id`、`title` | 转写、文章、片段共用同一 ID |
 | `segments` | `segment_id`、`course_id/chapter_id/knowledge_point_id`、`start_sec`、`end_sec`、`text`、`embedding halfvec`、`tsv`、`status` | `segment_id` 全局唯一、跨版本稳定；`start_sec < end_sec` 整数秒；下架 `status` 使 GET 返回 404 |
 | `media_assets` | `asset_id`、`course_id`、`hls_path`、`encryption` | 不对外暴露源站直链 |
-| `users` | `user_id`、状态、创建时间 | 支持注销；注销后不可签发令牌 |
+| `users` | `user_id`、`username`、`display_name`、`role`、`status`、`password_hash`、`events_consent` | 账号由管理员创建；`username` 唯一且小写；密码只存 scrypt 哈希；禁用立即拒绝令牌 |
+| `sessions` | `token_hash`、`user_id`、`expires_at`、`revoked_at`、`last_seen_at` | 后台会话与设备令牌分离；只存哈希；改密/禁用/角色变更即吊销 |
+| `invite_codes` | `code_hash`、`user_id`、`expires_at`、`consumed_at`、`created_by` | 单次使用；只存哈希；新建邀请码使旧码失效；默认 7 天 |
 | `devices` | `device_id`、`user_id`、首次授权时间、状态 | `device_id` 由插件首启生成并持久绑定 |
 | `tokens` | `token_hash`、`kind(access/refresh)`、`device_id`、`expires_at`、`revoked_at`、`rotated_from` | 只存哈希；旧 refresh 轮换后立即失效 |
 | `playback_sessions` | `session_id`、`user_id`、`device_id`、`segment_id`、`expires_at`、状态 | 绑定设备；并发受配额约束 |
 | `events` | `event_name`、`user_id`、`device_id_hash`、白名单字段、时间 | 无 query 原文、回答内容、完整播放地址 |
+| `articles`（M3 已落地） | `knowledge_point_id`、`markdown`、`version`、`status`、`published_at` | 仅 `published` 下发；单篇 ≤20000 字符，仅 Markdown 子集；每次保存 `version + 1`，发布时写 `published_at` |
+| `learning_progress`（M3 已落地） | `user_id`、`device_id`、`knowledge_point_id`、`watched_sec`、`completed`、`updated_at` | `(user_id, knowledge_point_id)` 唯一；`watched_sec` 取最大值；`completed` 不回退 |
 
 建库插件：`pgvector`（`halfvec`）、`pg_trgm`；检索索引与向量索引分离于业务表，可在线重建（M3 后台触发）。
+
+`learning_progress` 按用户聚合、以 `device_id` 记录最后写入设备，进度写入不进入 `events`；`articles` 与账号/后台表分阶段迁移。
 
 ## 6. 检索管线
 
@@ -206,7 +216,7 @@ sequenceDiagram
   P->>A: POST /v1/auth/device/code {clientId, deviceId}
   A-->>P: {deviceCode, userCode, verificationUri, expiresIn, interval}
   P->>B: 展示 userCode + verificationUri
-  B->>A: 用户批准（M3 账号页）
+  B->>A: POST /v1/auth/device/approve（账号登录或邀请码）
   loop 每 interval 秒
     P->>A: POST /v1/auth/device/token {deviceCode}
     A-->>P: pending / expired / authorized(grant)
@@ -221,14 +231,33 @@ sequenceDiagram
 - `clientId` 固定 `dsh-plugin-trend-coach`；`deviceId` 由插件首启随机生成并持久绑定。
 - 令牌只存哈希（如 SHA-256），刷新校验 `deviceId` 是否匹配；不匹配 `403`。
 - access 过期 `401`；插件自动刷新一次后仍失败则提示重新授权。
-- 注销由 `POST /v1/auth/revoke` 完成：吊销本设备全部 access/refresh 并置 `devices.status = revoked`，同账号其它设备不受影响；重新授权可恢复。账号级删除随 M3 账号体系提供。
-- TTL、并发设备数见 PRD §9（待账号后台定稿）。
+- 注销由 `POST /v1/auth/revoke` 完成：吊销本设备全部 access/refresh 并置 `devices.status = revoked`，同账号其它设备不受影响；重新授权可恢复。管理员可禁用账号（`PATCH /v1/admin/users/{id}`），禁用后设备令牌与后台会话均立即拒绝；不提供物理删除。
+- 批准必须绑定已存在账号：学员提交用户名密码，或邀请码 + 新密码；运营/管理员可用后台会话代批并指定 `userId`。共享控制台令牌已移除。
+- 设备批准一旦完成，设备与账号绑定固定；换账号需先注销再用目标账号授权。
 
-### 7.2 鉴权中间件
+### 7.2 账号与后台会话（M3.1）
+
+- 账号由管理员创建：`username`（小写、唯一）、`displayName`、`role`（student/operator/admin）、可选初始密码或一次性邀请码。
+- 密码用随机盐 scrypt 存储（N=16384、r=8、p=1、64 字节），比较使用常量时间；登录失败、邀请码错误与禁用账号统一返回 `401`。
+- 后台会话 `POST /v1/auth/session` 只对 operator/admin 开放；令牌 12 小时默认、只存 SHA-256 哈希；注销、改密、禁用与角色变更即吊销。
+- 邀请码默认 7 天、单次使用；相同账号新建邀请码会使未使用旧码失效；服务端只存哈希，明文只在创建响应出现一次。
+- 首个管理员由启动配置创建（`BOOTSTRAP_ADMIN_USERNAME` / `BOOTSTRAP_ADMIN_PASSWORD`），仅当库中不存在 active admin 时生效。
+- 角色边界：学员令牌只能访问业务接口；`/v1/admin/*` 读接口要求 operator/admin，账号写接口仅 admin；禁止管理员禁用或降级自己，禁止移除最后一个 active admin。
+
+### 7.3 鉴权中间件
 
 - 业务接口统一校验 `Authorization: Bearer` 与 `x-device-id`，并核对令牌所属设备。
-- 内部内容管线与后台（M3）使用独立凭据体系，学员令牌不可访问。
-- 失败语义：缺失/过期 `401`；设备不匹配 `403`；越权后台 `403`。
+- 后台接口校验后台会话 Bearer（不带 `x-device-id`），按角色放行；学员设备令牌不可访问后台。
+- 失败语义：缺失/过期 `401`；设备不匹配或角色不足 `403`。
+
+### 7.4 内容管理接口与控制台（M3.2）
+
+- 内容写接口位于 `/v1/admin/content/*`，要求 operator/admin 会话；课程、章节、知识点、文章、片段均支持创建与修改，发布/归档通过 `status` 切换，不提供物理删除。
+- 文章 `PUT` 为幂等 upsert：每次成功保存 `version + 1`、`updated_at = now()`；`status=published` 时写 `published_at`。Markdown 在服务端校验为纯 Markdown 子集，拒绝 `<script>`、`<iframe>`、事件属性与 `javascript:` 等可执行内容。
+- 片段写入校验 `startSec < endSec`、标题/文本长度与知识点归属；文本变更时清空 `embedding`，避免旧向量参与检索，需通过 `POST /v1/admin/content/reindex` 重建。
+- 学员可见性由现有查询保证：课程非 `published`、片段或文章非 `published` 时不下发；后台写入不影响已签发的播放会话，但新会话需片段仍可用。
+- 控制台为 `/admin` 单页应用（Vite + React），构建产物由 Fastify 静态托管；会话令牌存 `sessionStorage`，不使用 cookie，静态页不缓存；所有数据请求仍走 `/v1/auth/session` + 后台接口逐请求鉴权。
+- 账号管理页仅 admin 可见；operator 登录后仅显示内容管理，接口层同时校验角色，前端隐藏不作为安全边界。
 
 ## 8. 播放与媒体
 
@@ -248,9 +277,10 @@ sequenceDiagram
 | 面 | 措施 |
 |---|---|
 | 传输 | 全站 HTTPS；媒体域同样 TLS |
-| 凭据 | 令牌哈希存储；签名密钥与 CDN 密钥走密钥管理；不在日志、响应、镜像中出现 |
-| 账号 | 最小权限；学员不可访问后台；注销后令牌全部失效 |
+| 凭据 | 设备令牌与会话令牌只存哈希；密码只存带盐 scrypt；签名密钥与 CDN 密钥走密钥管理；不在日志、响应、镜像中出现 |
+| 账号 | 管理员创建账号；角色最小权限；学员不可访问后台；禁用/改密吊销会话，禁用即时拒绝设备令牌 |
 | 内容 | 只下发 Top-K；播放地址短时效、设备绑定、并发限制；不提供下载直链 |
+| 内容管理 | `/v1/admin/content/*` 仅 operator/admin 会话；Markdown 拒绝可执行 HTML/脚本；发布状态即时影响学员可见性 |
 | 输入 | 白名单校验 + 长度/体积上限；拒绝非 JSON 与超大请求 |
 | 日志 | 不记 token、完整 query、完整 deviceId；需要排障时用截断前缀或哈希 |
 | 隐私 | 数据最小化；事件需同意且可撤回；支持数据删除 |
@@ -299,7 +329,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 | M3 | 后台管理、账号体系、学习进度、索引重建/召回测试 | 内容可运营、用户可管理 |
 | M6 | 限流、压测、备份、合规加固 | 公测放行 |
 
-实现状态（2026-10-31）：M2 服务侧已落地——核心业务接口、设备码授权与令牌轮换、`POST /v1/auth/revoke` 设备注销、签名 HLS 会话、事件白名单与幂等、`GET/PUT /v1/events/consent` 同意读写、OpenAPI 与契约测试；限流为单实例内存实现。内容管线（M1）与后台（M3）未实现，TTL 与并发上限仍为临时默认值，账号级删除随 M3 提供。
+实现状态（2026-10-31）：M2 服务侧已落地——核心业务接口、设备码授权与令牌轮换、`POST /v1/auth/revoke` 设备注销、签名 HLS 会话、事件白名单与幂等、`GET/PUT /v1/events/consent` 同意读写、OpenAPI 与契约测试；限流为单实例内存实现。M3.3 体系与进度接口（课程列表、课程树、知识点详情、进度上报）已落地；M3.1 账号与后台登录（管理员创建账号、邀请码、会话、角色、设备批准绑定）已落地；内容管线（M1）与 React 管理端（M3.2）、内容管理接口（M3.2）未实现，TTL 与并发上限仍为临时默认值。
 
 ## 14. 关键设计决策（ADR）
 
