@@ -32,6 +32,7 @@ export interface AppConfig {
   consoleToken: string
   embedding?: EmbeddingConfig
   searchMinSimilarity: number
+  searchMinConfidence: number
   rrfK: number
   rateLimitSearchPerMinute: number
   rateLimitDeviceCodePerMinute: number
@@ -136,6 +137,12 @@ export function loadConfig(env: Env = process.env): AppConfig {
           : { baseUrl: embeddingUrl.replace(/\/+$/, ''), model: embeddingModel, apiKey }
       })()
 
+  const searchMinSimilarity = float(env, 'SEARCH_MIN_SIMILARITY', 0.05)
+  const searchMinConfidence = float(env, 'SEARCH_MIN_CONFIDENCE', 0.15)
+  if (searchMinSimilarity < 0 || searchMinSimilarity > 1) fail('SEARCH_MIN_SIMILARITY 必须在 0–1 之间')
+  if (searchMinConfidence < 0 || searchMinConfidence > 1) fail('SEARCH_MIN_CONFIDENCE 必须在 0–1 之间')
+  if (searchMinConfidence < searchMinSimilarity) fail('SEARCH_MIN_CONFIDENCE 不能低于 SEARCH_MIN_SIMILARITY')
+
   return {
     env: appEnv,
     host: text(env, 'HOST') ?? '127.0.0.1',
@@ -154,7 +161,8 @@ export function loadConfig(env: Env = process.env): AppConfig {
     ...(mediaLocalDir === undefined ? {} : { mediaLocalDir }),
     consoleToken,
     ...(embedding === undefined ? {} : { embedding }),
-    searchMinSimilarity: float(env, 'SEARCH_MIN_SIMILARITY', 0.05),
+    searchMinSimilarity,
+    searchMinConfidence,
     rrfK: int(env, 'RRF_K', 60),
     rateLimitSearchPerMinute: int(env, 'RATE_LIMIT_SEARCH_PER_MINUTE', 120),
     rateLimitDeviceCodePerMinute: int(env, 'RATE_LIMIT_DEVICE_CODE_PER_MINUTE', 10),

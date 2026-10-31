@@ -111,7 +111,11 @@ export class KnowledgeService {
     const window = Math.max(input.topK * RECALL_FACTOR, MIN_RECALL_WINDOW)
     const lexical = await this.lexicalRecall(input, window)
     const vector = this.embed === undefined ? [] : await this.vectorRecall(input, window)
-    const fused = fuse([lexical, vector], this.config.rrfK)
+    // 召回阈值只负责捞候选，引用置信阈值负责过滤单个 trigram 级别的偶然命中。
+    const confident = [lexical, vector].map(list =>
+      list.filter(candidate => candidate.score >= this.config.searchMinConfidence),
+    )
+    const fused = fuse(confident, this.config.rrfK)
     const segments = [...fused.values()]
       .sort((a, b) => b.score - a.score || a.row.segment_id.localeCompare(b.row.segment_id))
       .slice(0, input.topK)
@@ -179,7 +183,7 @@ export class KnowledgeService {
          AND GREATEST(similarity(kp.title, $1), word_similarity($1, kp.title)) >= $3
        ORDER BY GREATEST(similarity(kp.title, $1), word_similarity($1, kp.title)) DESC, kp.knowledge_point_id
        LIMIT $4`,
-      [query, courseId ?? null, this.config.searchMinSimilarity, MAX_RELATED_POINTS],
+      [query, courseId ?? null, this.config.searchMinConfidence, MAX_RELATED_POINTS],
     )
     return rows.map(row => ({ knowledgePointId: row.knowledge_point_id, title: row.title }))
   }
