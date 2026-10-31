@@ -352,6 +352,29 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
 
+  /v1/auth/revoke:
+    post:
+      summary: 注销当前设备并吊销其令牌
+      description: 吊销该设备全部 access/refresh 并置为 revoked；重新设备授权可恢复，不影响同账号其它设备。
+      security:
+        - bearerAuth: []
+          deviceId: []
+      responses:
+        '200':
+          description: 已注销
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
   /v1/auth/device/approve:
     post:
       summary: 控制台批准设备码（M3 账号后台上线前的过渡入口）

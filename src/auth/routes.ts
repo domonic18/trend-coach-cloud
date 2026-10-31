@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import type { AppConfig } from '../config.js'
 import { badRequest, tooManyRequests, unauthorized } from '../errors.js'
-import { clientIp } from '../http/principal.js'
+import { clientIp, requirePrincipal } from '../http/principal.js'
 import { asObject, stringField } from '../http/validation.js'
 import { RateLimiter } from '../rate-limit.js'
 import type { AuthService } from './service.js'
@@ -40,6 +40,12 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
     const refreshToken = stringField(body, 'refreshToken', { max: 256 })
     const deviceId = stringField(body, 'deviceId', { min: 8, max: 128, pattern: DEVICE_ID })
     return auth.refresh(refreshToken, deviceId)
+  })
+
+  app.post('/v1/auth/revoke', async request => {
+    const principal = await requirePrincipal(request, auth)
+    await auth.revokeDevice(principal.deviceId)
+    return { revoked: true }
   })
 
   app.post('/v1/auth/device/approve', async request => {

@@ -212,6 +212,20 @@ export class AuthService {
     }
   }
 
+  /** 注销当前设备：吊销该设备全部令牌并置为 revoked，重新授权可恢复。 */
+  async revokeDevice(deviceId: string): Promise<void> {
+    await withTransaction(this.pool, async client => {
+      await client.query(
+        'UPDATE tokens SET revoked_at = now() WHERE device_id = $1 AND revoked_at IS NULL',
+        [deviceId],
+      )
+      await client.query(
+        "UPDATE devices SET status = 'revoked' WHERE device_id = $1",
+        [deviceId],
+      )
+    })
+  }
+
   async authenticate(token: string, deviceId: string | undefined): Promise<Principal> {
     const { rows } = await this.pool.query<{
       user_id: string
