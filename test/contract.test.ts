@@ -15,23 +15,35 @@ import { seedDatabase } from '../src/seed.js'
 
 const DATABASE_URL = process.env.TEST_DATABASE_URL
   ?? 'postgres://trend_coach:trend_coach@127.0.0.1:5432/trend_coach_test'
-const CONSOLE_TOKEN = 'test-console-token-1234'
+const METRICS_TOKEN = 'test-metrics-token-1234'
 const MEDIA_SECRET = 'test-media-signing-secret-1234'
 const MEDIA_BASE_URL = 'http://127.0.0.1:3939/media'
 const SEGMENT_ID = 'seg-tc101-m1-kp1-1'
+const ADMIN_USERNAME = 'admin01'
+const ADMIN_PASSWORD = 'bootstrap-password-123'
+const STUDENT_PASSWORD = 'student-password-1234'
 
 const pool = createPool(DATABASE_URL)
 let mediaDir = ''
 let app: FastifyInstance
 let routes: string[] = []
 let mainGrant: Grant
+let adminToken = ''
+
+interface SessionBody {
+  token: string
+  expiresAt: number
+  user: { userId: string; username: string; displayName: string | null; role: string }
+}
 
 function env(overrides: Record<string, string> = {}): Record<string, string> {
   return {
     APP_ENV: 'local',
     DATABASE_URL,
     LOG_LEVEL: 'silent',
-    CONSOLE_TOKEN,
+    METRICS_TOKEN,
+    BOOTSTRAP_ADMIN_USERNAME: ADMIN_USERNAME,
+    BOOTSTRAP_ADMIN_PASSWORD: ADMIN_PASSWORD,
     MEDIA_SIGNING_SECRET: MEDIA_SECRET,
     MEDIA_LOCAL_DIR: mediaDir,
     MEDIA_BASE_URL,
@@ -39,8 +51,42 @@ function env(overrides: Record<string, string> = {}): Record<string, string> {
     RATE_LIMIT_SEARCH_PER_MINUTE: '1000',
     RATE_LIMIT_DEVICE_CODE_PER_MINUTE: '1000',
     RATE_LIMIT_EVENTS_PER_MINUTE: '1000',
+    RATE_LIMIT_PROGRESS_PER_MINUTE: '1000',
+    RATE_LIMIT_LOGIN_PER_MINUTE: '1000',
+    RATE_LIMIT_INVITE_PER_MINUTE: '1000',
+    RATE_LIMIT_DEVICE_APPROVE_PER_MINUTE: '1000',
     ...overrides,
   }
+}
+
+function adminHeaders(): Record<string, string> {
+  return { authorization: `Bearer ${adminToken}` }
+}
+
+function usernameFor(deviceId: string): string {
+  return `u${deviceId.toLowerCase().replace(/[^a-z0-9._-]/g, '-')}`.slice(0, 32)
+}
+
+async function adminCreateUser(payload: Record<string, unknown>): Promise<{ statusCode: number; body: any }> {
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/users',
+    headers: adminHeaders(),
+    payload,
+  })
+  return { statusCode: response.statusCode, body: response.json() }
+}
+
+async function ensureStudent(deviceId: string, displayName: string): Promise<string> {
+  const username = usernameFor(deviceId)
+  const created = await adminCreateUser({ username, displayName, role: 'student', password: STUDENT_PASSWORD })
+  assert.ok(created.statusCode === 201 || created.statusCode === 409, JSON.stringify(created.body))
+  return username
+}
+
+async function loginSession(username: string, password: string): Promise<{ statusCode: number; body: SessionBody & { error?: string } }> {
+  const response = await app.inject({ method: 'POST', url: '/v1/auth/session', payload: { username, password } })
+  return { statusCode: response.statusCode, body: response.json() as SessionBody & { error?: string } }
 }
 
 function authHeaders(grant: Grant): Record<string, string> {
@@ -48,6 +94,7 @@ function authHeaders(grant: Grant): Record<string, string> {
 }
 
 async function grantFor(deviceId: string, displayName = '测试学员'): Promise<Grant> {
+  const username = await ensureStudent(deviceId, displayName)
   const start = await app.inject({
     method: 'POST',
     url: '/v1/auth/device/code',
@@ -62,8 +109,7 @@ async function grantFor(deviceId: string, displayName = '测试学员'): Promise
   const approve = await app.inject({
     method: 'POST',
     url: '/v1/auth/device/approve',
-    headers: { 'x-console-token': CONSOLE_TOKEN },
-    payload: { userCode, displayName },
+    payload: { userCode, username, password: STUDENT_PASSWORD },
   })
   assert.equal(approve.statusCode, 200, approve.body)
 
@@ -113,6 +159,11 @@ before(async () => {
   })
   await app.ready()
 
+  const admin = await loginSession(ADMIN_USERNAME, ADMIN_PASSWORD)
+  assert.equal(admin.statusCode, 200, JSON.stringify(admin.body))
+  assert.equal(admin.body.user.role, 'admin')
+  adminToken = admin.body.token
+
   mainGrant = await grantFor('device-main-0001')
 })
 
@@ -128,14 +179,14 @@ test('GET /health 报告数据库可用', async () => {
   assert.deepEqual(response.json(), { ok: true })
 })
 
-test('GET /metrics 需要控制台令牌', async () => {
+test('GET /metrics 需要指标令牌', async () => {
   const denied = await app.inject({ method: 'GET', url: '/metrics' })
   assert.equal(denied.statusCode, 401)
 
   const response = await app.inject({
     method: 'GET',
     url: '/metrics',
-    headers: { authorization: `Bearer ${CONSOLE_TOKEN}` },
+    headers: { authorization: `Bearer ${METRICS_TOKEN}` },
   })
   assert.equal(response.statusCode, 200)
   assert.match(response.headers['content-type'] ?? '', /text\/plain/)
@@ -154,17 +205,18 @@ test('OpenAPI 与注册路由双向一致', async () => {
   const registered = new Set(
     routes
       .map(route => route.replace(/:([A-Za-z0-9_]+)/g, '{$1}'))
-      // HEAD 由 GET 自动注册；/device、/media/* 与 /metrics 是运维入口，不对外发布契约。
+      // HEAD 由 GET 自动注册；/device、/media/*、/metrics 与 /admin 静态资源是运维入口，不对外发布契约。
       .filter(route => !route.startsWith('HEAD '))
       .filter(route => route !== 'OPTIONS *')
       .filter(route => !route.endsWith(' /device'))
       .filter(route => !route.includes(' /media/'))
+      .filter(route => !route.includes(' /admin'))
       .filter(route => route !== 'GET /metrics'),
   )
   assert.deepEqual([...registered].sort(), [...documented].sort())
 })
 
-test('设备码：待批准、错误控制台令牌、批准、重复轮询', async () => {
+test('设备码：待批准、错误凭据、批准、重复轮询', async () => {
   const start = await app.inject({
     method: 'POST',
     url: '/v1/auth/device/code',
@@ -190,19 +242,27 @@ test('设备码：待批准、错误控制台令牌、批准、重复轮询', as
   assert.equal(expiresIn, 300)
   assert.equal(interval, 2)
 
-  const badToken = await app.inject({
+  const username = await ensureStudent('device-code-0001', '设备学员')
+
+  const wrongPassword = await app.inject({
     method: 'POST',
     url: '/v1/auth/device/approve',
-    headers: { 'x-console-token': 'wrong-console-token' },
-    payload: { userCode },
+    payload: { userCode, username, password: 'wrong-password-123' },
   })
-  assert.equal(badToken.statusCode, 401)
+  assert.equal(wrongPassword.statusCode, 401)
 
+  const unknownAccount = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/device/approve',
+    payload: { userCode, username: 'nobody-01', password: 'wrong-password-123' },
+  })
+  assert.equal(unknownAccount.statusCode, 401)
+
+  // 设备码无效时先返回 404，不消耗一次密码校验。
   const badCode = await app.inject({
     method: 'POST',
     url: '/v1/auth/device/approve',
-    headers: { 'x-console-token': CONSOLE_TOKEN },
-    payload: { userCode: 'ZZZZ-ZZZZ' },
+    payload: { userCode: 'ZZZZ-ZZZZ', username, password: STUDENT_PASSWORD },
   })
   assert.equal(badCode.statusCode, 404)
 
@@ -212,8 +272,7 @@ test('设备码：待批准、错误控制台令牌、批准、重复轮询', as
   const approved = await app.inject({
     method: 'POST',
     url: '/v1/auth/device/approve',
-    headers: { 'x-console-token': CONSOLE_TOKEN },
-    payload: { userCode },
+    payload: { userCode, username, password: STUDENT_PASSWORD },
   })
   assert.equal(approved.statusCode, 200)
   assert.deepEqual(approved.json(), { approved: true })
@@ -226,6 +285,697 @@ test('设备码：待批准、错误控制台令牌、批准、重复轮询', as
 
   const replay = await app.inject({ method: 'POST', url: '/v1/auth/device/token', payload: { deviceCode } })
   assert.deepEqual(replay.json(), { status: 'expired' })
+})
+
+test('设备码：运营账号会话可直接批准并绑定自身', async () => {
+  const username = 'operator-device-01'
+  const created = await adminCreateUser({
+    username,
+    displayName: '运营设备',
+    role: 'operator',
+    password: 'operator-password-123',
+  })
+  assert.equal(created.statusCode, 201, JSON.stringify(created.body))
+
+  const session = await loginSession(username, 'operator-password-123')
+  assert.equal(session.statusCode, 200, JSON.stringify(session.body))
+
+  const start = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/device/code',
+    payload: { clientId: 'dsh-plugin-trend-coach', deviceId: 'device-session-0001' },
+  })
+  const { deviceCode, userCode } = start.json() as { deviceCode: string; userCode: string }
+
+  const approve = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/device/approve',
+    headers: { authorization: `Bearer ${session.body.token}` },
+    payload: { userCode },
+  })
+  assert.equal(approve.statusCode, 200, approve.body)
+
+  const poll = await app.inject({ method: 'POST', url: '/v1/auth/device/token', payload: { deviceCode } })
+  const grant = (poll.json() as { status: string; grant: Grant }).grant
+  assert.equal(grant.deviceId, 'device-session-0001')
+
+  const { rows } = await pool.query<{ role: string }>(
+    'SELECT u.role FROM devices d JOIN users u ON u.user_id = d.user_id WHERE d.device_id = $1',
+    [grant.deviceId],
+  )
+  assert.equal(rows[0]?.role, 'operator')
+})
+
+test('账号：管理员登录、会话查询与注销', async () => {
+  const wrong = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/session',
+    payload: { username: ADMIN_USERNAME, password: 'wrong-password-123' },
+  })
+  assert.equal(wrong.statusCode, 401)
+
+  const created = await loginSession(ADMIN_USERNAME, ADMIN_PASSWORD)
+  assert.equal(created.statusCode, 200, JSON.stringify(created.body))
+  assert.equal(created.body.user.username, ADMIN_USERNAME)
+  assert.equal(created.body.user.role, 'admin')
+  assert.ok(created.body.expiresAt > Date.now())
+
+  const current = await app.inject({
+    method: 'GET',
+    url: '/v1/auth/session',
+    headers: { authorization: `Bearer ${created.body.token}` },
+  })
+  assert.equal(current.statusCode, 200)
+  assert.equal((current.json() as SessionBody).user.username, ADMIN_USERNAME)
+
+  const deleted = await app.inject({
+    method: 'DELETE',
+    url: '/v1/auth/session',
+    headers: { authorization: `Bearer ${created.body.token}` },
+  })
+  assert.equal(deleted.statusCode, 200)
+  assert.deepEqual(deleted.json(), { revoked: true })
+
+  const after = await app.inject({
+    method: 'GET',
+    url: '/v1/auth/session',
+    headers: { authorization: `Bearer ${created.body.token}` },
+  })
+  assert.equal(after.statusCode, 401)
+
+  const anonymous = await app.inject({ method: 'GET', url: '/v1/auth/session' })
+  assert.equal(anonymous.statusCode, 401)
+})
+
+test('账号：学员不可登录后台，运营只读，匿名不可访问', async () => {
+  const student = await adminCreateUser({
+    username: 'student-role-01',
+    displayName: '学员角色',
+    role: 'student',
+    password: STUDENT_PASSWORD,
+  })
+  assert.equal(student.statusCode, 201, JSON.stringify(student.body))
+  const studentLogin = await loginSession('student-role-01', STUDENT_PASSWORD)
+  assert.equal(studentLogin.statusCode, 403)
+
+  const operator = await adminCreateUser({
+    username: 'operator-role-01',
+    displayName: '运营角色',
+    role: 'operator',
+    password: 'operator-password-123',
+  })
+  assert.equal(operator.statusCode, 201, JSON.stringify(operator.body))
+  const operatorLogin = await loginSession('operator-role-01', 'operator-password-123')
+  assert.equal(operatorLogin.statusCode, 200, JSON.stringify(operatorLogin.body))
+  const operatorHeaders = { authorization: `Bearer ${operatorLogin.body.token}` }
+
+  const list = await app.inject({ method: 'GET', url: '/v1/admin/users', headers: operatorHeaders })
+  assert.equal(list.statusCode, 200, list.body)
+  assert.ok((list.json() as { users: unknown[] }).users.length > 0)
+
+  const createDenied = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/users',
+    headers: operatorHeaders,
+    payload: { username: 'new-user-01', displayName: '新用户', role: 'student', password: STUDENT_PASSWORD },
+  })
+  assert.equal(createDenied.statusCode, 403)
+
+  const targetId = (student.body as { user: { userId: string } }).user.userId
+  const resetDenied = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/users/${targetId}/reset`,
+    headers: operatorHeaders,
+    payload: { password: 'another-password-123' },
+  })
+  assert.equal(resetDenied.statusCode, 403)
+
+  const anonymous = await app.inject({ method: 'GET', url: '/v1/admin/users' })
+  assert.equal(anonymous.statusCode, 401)
+})
+
+test('账号：邀请码设置密码、单次使用与改密吊销会话', async () => {
+  const created = await adminCreateUser({
+    username: 'invite-user-01',
+    displayName: '邀请用户',
+    role: 'operator',
+  })
+  assert.equal(created.statusCode, 201, JSON.stringify(created.body))
+  const { inviteCode } = created.body as { inviteCode: string }
+  assert.match(inviteCode, /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/)
+
+  const beforeRedeem = await loginSession('invite-user-01', 'whatever-password-12')
+  assert.equal(beforeRedeem.statusCode, 401)
+
+  const redeemed = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/invite/redeem',
+    payload: { inviteCode: inviteCode.toLowerCase(), password: 'invited-password-123' },
+  })
+  assert.equal(redeemed.statusCode, 200, redeemed.body)
+  assert.deepEqual(redeemed.json(), { redeemed: true })
+
+  const session = await loginSession('invite-user-01', 'invited-password-123')
+  assert.equal(session.statusCode, 200, JSON.stringify(session.body))
+
+  const changed = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/session/password',
+    headers: { authorization: `Bearer ${session.body.token}` },
+    payload: { currentPassword: 'invited-password-123', newPassword: 'changed-password-123' },
+  })
+  assert.equal(changed.statusCode, 200, changed.body)
+  assert.deepEqual(changed.json(), { updated: true })
+
+  const oldSession = await app.inject({
+    method: 'GET',
+    url: '/v1/auth/session',
+    headers: { authorization: `Bearer ${session.body.token}` },
+  })
+  assert.equal(oldSession.statusCode, 401)
+
+  assert.equal((await loginSession('invite-user-01', 'invited-password-123')).statusCode, 401)
+  assert.equal((await loginSession('invite-user-01', 'changed-password-123')).statusCode, 200)
+
+  const reuse = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/invite/redeem',
+    payload: { inviteCode, password: 'another-password-123' },
+  })
+  assert.equal(reuse.statusCode, 401)
+
+  const badCode = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/invite/redeem',
+    payload: { inviteCode: 'not-a-code', password: 'another-password-123' },
+  })
+  assert.equal(badCode.statusCode, 401)
+})
+
+test('账号：重置凭据、禁用、列表筛选与自身保护', async () => {
+  const created = await adminCreateUser({
+    username: 'reset-user-01',
+    displayName: '待重置',
+    role: 'operator',
+    password: 'initial-password-123',
+  })
+  assert.equal(created.statusCode, 201, JSON.stringify(created.body))
+  const userId = (created.body as { user: { userId: string } }).user.userId
+
+  const rotated = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/users/${userId}/reset`,
+    headers: adminHeaders(),
+    payload: { password: 'rotated-password-123' },
+  })
+  assert.equal(rotated.statusCode, 200, rotated.body)
+  assert.deepEqual(rotated.json(), { updated: true })
+  assert.equal((await loginSession('reset-user-01', 'rotated-password-123')).statusCode, 200)
+  assert.equal((await loginSession('reset-user-01', 'initial-password-123')).statusCode, 401)
+
+  const invited = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/users/${userId}/reset`,
+    headers: adminHeaders(),
+  })
+  assert.equal(invited.statusCode, 200, invited.body)
+  const { inviteCode } = invited.json() as { inviteCode: string }
+  assert.match(inviteCode, /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/)
+
+  const redeemed = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/invite/redeem',
+    payload: { inviteCode, password: 'reissued-password-123' },
+  })
+  assert.equal(redeemed.statusCode, 200, redeemed.body)
+
+  const filtered = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/users?role=operator&query=reset-user&limit=10',
+    headers: adminHeaders(),
+  })
+  assert.equal(filtered.statusCode, 200, filtered.body)
+  const page = filtered.json() as { users: { username: string | null; role: string }[]; limit: number; offset: number }
+  assert.equal(page.limit, 10)
+  assert.equal(page.offset, 0)
+  assert.deepEqual(page.users.map(user => user.username), ['reset-user-01'])
+
+  for (const query of ['role=root', 'limit=0', 'limit=101', 'offset=-1']) {
+    const invalid = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/users?${query}`,
+      headers: adminHeaders(),
+    })
+    assert.equal(invalid.statusCode, 400, query)
+  }
+
+  const disabled = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/users/${userId}`,
+    headers: adminHeaders(),
+    payload: { status: 'disabled' },
+  })
+  assert.equal(disabled.statusCode, 200, disabled.body)
+  assert.equal((await loginSession('reset-user-01', 'reissued-password-123')).statusCode, 401)
+
+  const current = await app.inject({
+    method: 'GET',
+    url: '/v1/auth/session',
+    headers: adminHeaders(),
+  })
+  const adminId = (current.json() as SessionBody).user.userId
+  const selfRole = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/users/${adminId}`,
+    headers: adminHeaders(),
+    payload: { role: 'student' },
+  })
+  assert.equal(selfRole.statusCode, 403)
+  const selfReset = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/users/${adminId}/reset`,
+    headers: adminHeaders(),
+    payload: { password: 'whatever-password-12' },
+  })
+  assert.equal(selfReset.statusCode, 403)
+})
+
+test('内容管理：角色边界、课程结构、文章版本与片段校验', async () => {
+  const operator = await adminCreateUser({
+    username: 'content-operator-01',
+    displayName: '内容运营',
+    role: 'operator',
+    password: 'operator-password-123',
+  })
+  assert.equal(operator.statusCode, 201, JSON.stringify(operator.body))
+  const login = await loginSession('content-operator-01', 'operator-password-123')
+  assert.equal(login.statusCode, 200, JSON.stringify(login.body))
+  const operatorHeaders = { authorization: `Bearer ${login.body.token}` }
+
+  const anonymous = await app.inject({ method: 'GET', url: '/v1/admin/content/courses' })
+  assert.equal(anonymous.statusCode, 401)
+  const deviceToken = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/content/courses',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(deviceToken.statusCode, 401)
+
+  const courseId = 'T-M3-2-01'
+  const chapterId = 'C1'
+  const pointId = 'T-M3-2-KP1'
+  const segmentId = 'seg-tm32-c1-kp1-1'
+
+  const createdCourse = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/content/courses',
+    headers: operatorHeaders,
+    payload: { courseId, title: '内容管理测试课程' },
+  })
+  assert.equal(createdCourse.statusCode, 201, createdCourse.body)
+  assert.deepEqual(createdCourse.json(), {
+    course: { courseId, title: '内容管理测试课程', status: 'draft' },
+  })
+
+  const duplicateCourse = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/content/courses',
+    headers: operatorHeaders,
+    payload: { courseId, title: '重复课程' },
+  })
+  assert.equal(duplicateCourse.statusCode, 409)
+
+  const invalidCourse = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/content/courses',
+    headers: operatorHeaders,
+    payload: { courseId: 'bad id', title: '非法 ID' },
+  })
+  assert.equal(invalidCourse.statusCode, 400)
+
+  const emptyCreated = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/content/courses',
+    headers: operatorHeaders,
+    payload: { courseId: 'T-M3-2-EMPTY', title: '空课程' },
+  })
+  assert.equal(emptyCreated.statusCode, 201, emptyCreated.body)
+  const emptyTree = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/content/courses/T-M3-2-EMPTY',
+    headers: operatorHeaders,
+  })
+  assert.deepEqual(emptyTree.json(), {
+    course: { courseId: 'T-M3-2-EMPTY', title: '空课程', status: 'draft' },
+    chapters: [],
+  })
+
+  const createdChapter = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/content/courses/${courseId}/chapters`,
+    headers: operatorHeaders,
+    payload: { chapterId, title: '第一章', position: 1 },
+  })
+  assert.equal(createdChapter.statusCode, 201, createdChapter.body)
+  assert.equal((await app.inject({
+    method: 'POST',
+    url: `/v1/admin/content/courses/${courseId}/chapters`,
+    headers: operatorHeaders,
+    payload: { chapterId, title: '重复章节' },
+  })).statusCode, 409)
+
+  const missingCourseChapter = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/content/courses/NOPE-404/chapters',
+    headers: operatorHeaders,
+    payload: { chapterId: 'C9', title: '不存在' },
+  })
+  assert.equal(missingCourseChapter.statusCode, 404)
+
+  const createdPoint = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/content/courses/${courseId}/chapters/${chapterId}/knowledge-points`,
+    headers: operatorHeaders,
+    payload: { knowledgePointId: pointId, title: '知识点一', position: 1 },
+  })
+  assert.equal(createdPoint.statusCode, 201, createdPoint.body)
+  assert.deepEqual(createdPoint.json(), {
+    knowledgePoint: {
+      knowledgePointId: pointId,
+      title: '知识点一',
+      position: 1,
+      segmentCount: 0,
+      article: null,
+    },
+  })
+
+  const patchedPoint = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/content/knowledge-points/${pointId}`,
+    headers: operatorHeaders,
+    payload: { title: '知识点一（改）' },
+  })
+  assert.equal(patchedPoint.statusCode, 200, patchedPoint.body)
+  assert.equal((patchedPoint.json() as { knowledgePoint: { title: string } }).knowledgePoint.title, '知识点一（改）')
+
+  const patchedChapter = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/content/courses/${courseId}/chapters/${chapterId}`,
+    headers: operatorHeaders,
+    payload: { position: 2 },
+  })
+  assert.equal(patchedChapter.statusCode, 200, patchedChapter.body)
+  assert.equal((patchedChapter.json() as { chapter: { position: number } }).chapter.position, 2)
+
+  const emptyPatch = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/content/courses/${courseId}`,
+    headers: operatorHeaders,
+    payload: {},
+  })
+  assert.equal(emptyPatch.statusCode, 400)
+
+  const patchedCourse = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/content/courses/${courseId}`,
+    headers: operatorHeaders,
+    payload: { status: 'published' },
+  })
+  assert.equal(patchedCourse.statusCode, 200, patchedCourse.body)
+  assert.equal((patchedCourse.json() as { course: { status: string } }).course.status, 'published')
+
+  const noArticle = await app.inject({
+    method: 'GET',
+    url: `/v1/admin/content/knowledge-points/${pointId}/article`,
+    headers: operatorHeaders,
+  })
+  assert.equal(noArticle.statusCode, 200)
+  assert.deepEqual(noArticle.json(), { article: null })
+
+  const firstArticle = await app.inject({
+    method: 'PUT',
+    url: `/v1/admin/content/knowledge-points/${pointId}/article`,
+    headers: operatorHeaders,
+    payload: { markdown: '# 标题\n\n正文', status: 'published' },
+  })
+  assert.equal(firstArticle.statusCode, 200, firstArticle.body)
+  const firstBody = (firstArticle.json() as { article: { version: number; status: string; publishedAt: number | null } }).article
+  assert.equal(firstBody.version, 1)
+  assert.equal(firstBody.status, 'published')
+  assert.ok(typeof firstBody.publishedAt === 'number')
+
+  const secondArticle = await app.inject({
+    method: 'PUT',
+    url: `/v1/admin/content/knowledge-points/${pointId}/article`,
+    headers: operatorHeaders,
+    payload: { markdown: '# 标题\n\n正文（改）', status: 'draft' },
+  })
+  const secondBody = (secondArticle.json() as { article: { version: number; status: string; publishedAt: number | null } }).article
+  assert.equal(secondBody.version, 2)
+  assert.equal(secondBody.status, 'draft')
+  assert.equal(secondBody.publishedAt, firstBody.publishedAt)
+
+  for (const markdown of [
+    '<script>alert(1)</script>',
+    '<div onclick="x()">x</div>',
+    '[x](javascript:alert(1))',
+    '<iframe src="x"></iframe>',
+  ]) {
+    const unsafe = await app.inject({
+      method: 'PUT',
+      url: `/v1/admin/content/knowledge-points/${pointId}/article`,
+      headers: operatorHeaders,
+      payload: { markdown, status: 'draft' },
+    })
+    assert.equal(unsafe.statusCode, 400, markdown)
+  }
+
+  const tooLongArticle = await app.inject({
+    method: 'PUT',
+    url: `/v1/admin/content/knowledge-points/${pointId}/article`,
+    headers: operatorHeaders,
+    payload: { markdown: 'a'.repeat(20001), status: 'draft' },
+  })
+  assert.equal(tooLongArticle.statusCode, 400)
+
+  const badRange = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/content/segments',
+    headers: operatorHeaders,
+    payload: {
+      segmentId,
+      courseId,
+      chapterId,
+      knowledgePointId: pointId,
+      title: '片段',
+      startSec: 100,
+      endSec: 100,
+      text: '文本',
+    },
+  })
+  assert.equal(badRange.statusCode, 400)
+
+  const unknownPoint = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/content/segments',
+    headers: operatorHeaders,
+    payload: {
+      segmentId,
+      courseId,
+      chapterId,
+      knowledgePointId: 'T-M3-2-MISSING',
+      title: '片段',
+      startSec: 0,
+      endSec: 100,
+      text: '文本',
+    },
+  })
+  assert.equal(unknownPoint.statusCode, 404)
+
+  const mismatchedPoint = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/content/segments',
+    headers: operatorHeaders,
+    payload: {
+      segmentId,
+      courseId: 'T-M3-2-EMPTY',
+      chapterId,
+      knowledgePointId: pointId,
+      title: '片段',
+      startSec: 0,
+      endSec: 100,
+      text: '文本',
+    },
+  })
+  assert.equal(mismatchedPoint.statusCode, 400)
+
+  const createdSegment = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/content/segments',
+    headers: operatorHeaders,
+    payload: {
+      segmentId,
+      courseId,
+      chapterId,
+      knowledgePointId: pointId,
+      title: '片段一',
+      startSec: 0,
+      endSec: 100,
+      text: '趋势的定义',
+      status: 'published',
+    },
+  })
+  assert.equal(createdSegment.statusCode, 201, createdSegment.body)
+  const segment = (createdSegment.json() as { segment: { status: string; hasEmbedding: boolean } }).segment
+  assert.equal(segment.status, 'published')
+  assert.equal(segment.hasEmbedding, false)
+
+  const duplicateSegment = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/content/segments',
+    headers: operatorHeaders,
+    payload: {
+      segmentId,
+      courseId,
+      chapterId,
+      knowledgePointId: pointId,
+      title: '重复片段',
+      startSec: 0,
+      endSec: 100,
+      text: '重复',
+    },
+  })
+  assert.equal(duplicateSegment.statusCode, 409)
+
+  const listed = await app.inject({
+    method: 'GET',
+    url: `/v1/admin/content/segments?courseId=${courseId}&knowledgePointId=${pointId}&status=published&query=${encodeURIComponent('趋势')}&offset=0&limit=10`,
+    headers: operatorHeaders,
+  })
+  assert.equal(listed.statusCode, 200, listed.body)
+  const page = listed.json() as { segments: { segmentId: string }[]; total: number; offset: number; limit: number }
+  assert.equal(page.total, 1)
+  assert.equal(page.offset, 0)
+  assert.equal(page.limit, 10)
+  assert.deepEqual(page.segments.map(item => item.segmentId), [segmentId])
+
+  const emptyListing = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/content/segments?query=not-present-keyword',
+    headers: operatorHeaders,
+  })
+  assert.equal((emptyListing.json() as { total: number }).total, 0)
+
+  for (const query of ['limit=0', 'limit=101', 'offset=-1', 'status=invalid', 'courseId=bad%20id']) {
+    const invalid = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/content/segments?${query}`,
+      headers: operatorHeaders,
+    })
+    assert.equal(invalid.statusCode, 400, query)
+  }
+
+  const patchedSegment = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/content/segments/${segmentId}`,
+    headers: operatorHeaders,
+    payload: { text: '趋势的定义（改）', startSec: 10 },
+  })
+  assert.equal(patchedSegment.statusCode, 200, patchedSegment.body)
+  const patchedBody = (patchedSegment.json() as {
+    segment: { startSec: number; endSec: number; text: string; hasEmbedding: boolean }
+  }).segment
+  assert.equal(patchedBody.startSec, 10)
+  assert.equal(patchedBody.endSec, 100)
+  assert.equal(patchedBody.text, '趋势的定义（改）')
+  assert.equal(patchedBody.hasEmbedding, false)
+
+  const narrowed = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/content/segments/${segmentId}`,
+    headers: operatorHeaders,
+    payload: { startSec: 120 },
+  })
+  assert.equal(narrowed.statusCode, 400)
+
+  const emptySegmentPatch = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/content/segments/${segmentId}`,
+    headers: operatorHeaders,
+    payload: {},
+  })
+  assert.equal(emptySegmentPatch.statusCode, 400)
+
+  const missingSegment = await app.inject({
+    method: 'PATCH',
+    url: '/v1/admin/content/segments/seg-tm32-missing',
+    headers: operatorHeaders,
+    payload: { title: '不存在' },
+  })
+  assert.equal(missingSegment.statusCode, 404)
+
+  const tree = await app.inject({
+    method: 'GET',
+    url: `/v1/admin/content/courses/${courseId}`,
+    headers: operatorHeaders,
+  })
+  assert.equal(tree.statusCode, 200, tree.body)
+  const treeBody = tree.json() as {
+    course: { status: string }
+    chapters: { knowledgePoints: { segmentCount: number; article: { version: number; status: string } | null }[] }[]
+  }
+  assert.equal(treeBody.course.status, 'published')
+  assert.equal(treeBody.chapters[0]?.knowledgePoints[0]?.segmentCount, 1)
+  assert.equal(treeBody.chapters[0]?.knowledgePoints[0]?.article?.version, 2)
+  assert.equal(treeBody.chapters[0]?.knowledgePoints[0]?.article?.status, 'draft')
+
+  const courses = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/content/courses',
+    headers: operatorHeaders,
+  })
+  const summary = (courses.json() as {
+    courses: {
+      courseId: string
+      title: string
+      status: string
+      chapterCount: number
+      knowledgePointCount: number
+      segmentCount: number
+      articleCount: number
+    }[]
+  }).courses.find(item => item.courseId === courseId)
+  assert.deepEqual(summary, {
+    courseId,
+    title: '内容管理测试课程',
+    status: 'published',
+    chapterCount: 1,
+    knowledgePointCount: 1,
+    segmentCount: 1,
+    articleCount: 1,
+  })
+
+  const reindex = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/content/reindex',
+    headers: operatorHeaders,
+    payload: { courseId },
+  })
+  assert.equal(reindex.statusCode, 409)
+
+  const archived = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/content/courses/${courseId}`,
+    headers: operatorHeaders,
+    payload: { status: 'archived' },
+  })
+  assert.equal(archived.statusCode, 200, archived.body)
+  const studentTree = await app.inject({
+    method: 'GET',
+    url: `/v1/catalog/courses/${courseId}`,
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(studentTree.statusCode, 404)
 })
 
 test('鉴权：缺失、无效令牌与设备不匹配', async () => {
@@ -725,6 +1475,293 @@ test('事件：同意读写、门禁、白名单与幂等', async () => {
     payload: { ...event, eventId: 'evt-contract-0006' },
   })
   assert.equal(deniedAfterRevoke.statusCode, 403)
+})
+
+test('体系：课程列表与课程树', async () => {
+  const list = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/courses',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(list.statusCode, 200, list.body)
+  const { courses } = list.json() as {
+    courses: { courseId: string; title: string; chapterCount: number; knowledgePointCount: number; completedCount: number }[]
+  }
+  assert.equal(courses.length, 1)
+  assert.deepEqual(courses[0], {
+    courseId: 'TC-101',
+    title: '趋势交易基础',
+    chapterCount: 3,
+    knowledgePointCount: 6,
+    completedCount: 0,
+  })
+
+  const detail = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/courses/TC-101',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(detail.statusCode, 200, detail.body)
+  const course = detail.json() as {
+    courseId: string
+    chapters: { chapterId: string; knowledgePoints: Record<string, unknown>[] }[]
+  }
+  assert.equal(course.courseId, 'TC-101')
+  assert.deepEqual(course.chapters.map(chapter => chapter.chapterId), ['M1', 'M2', 'M3'])
+  const points = course.chapters.flatMap(chapter => chapter.knowledgePoints)
+  assert.equal(points.length, 6)
+  for (const point of points) {
+    assert.equal('startSec' in point, false)
+    assert.equal('endSec' in point, false)
+    assert.match(point.knowledgePointId as string, /^[A-Za-z0-9._-]+$/)
+    assert.match(point.segmentId as string, /^seg-[A-Za-z0-9._-]+$/)
+    assert.equal(point.watchedSec, 0)
+    assert.equal(point.completed, false)
+  }
+
+  const invalid = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/courses/bad%20id',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(invalid.statusCode, 400)
+
+  const missing = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/courses/NOPE',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(missing.statusCode, 404)
+})
+
+test('体系：知识点详情、文章与相邻知识点', async () => {
+  const response = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/knowledge-points/KP-1.1',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(response.statusCode, 200, response.body)
+  const detail = response.json() as {
+    knowledgePointId: string
+    courseId: string
+    chapterId: string
+    title: string
+    article: { markdown: string; version: number; publishedAt: number } | null
+    segmentId?: string
+    adjacentKnowledgePoints: { knowledgePointId: string; title: string }[]
+  }
+  assert.equal(detail.knowledgePointId, 'KP-1.1')
+  assert.equal(detail.courseId, 'TC-101')
+  assert.equal(detail.chapterId, 'M1')
+  assert.equal(detail.segmentId, SEGMENT_ID)
+  assert.ok(detail.article !== null)
+  assert.match(detail.article.markdown, /趋势/)
+  assert.equal(detail.article.version, 1)
+  assert.ok(detail.article.publishedAt > 0)
+  assert.ok(detail.adjacentKnowledgePoints.length <= 5)
+  assert.ok(detail.adjacentKnowledgePoints.some(point => point.knowledgePointId === 'KP-1.2'))
+  for (const point of detail.adjacentKnowledgePoints) {
+    assert.deepEqual(Object.keys(point).sort(), ['knowledgePointId', 'title'])
+  }
+
+  const invalid = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/knowledge-points/bad%20id',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(invalid.statusCode, 400)
+
+  const missing = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/knowledge-points/KP-9.9',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(missing.statusCode, 404)
+
+  await pool.query("UPDATE articles SET status = 'draft' WHERE knowledge_point_id = 'KP-1.1'")
+  try {
+    const draft = await app.inject({
+      method: 'GET',
+      url: '/v1/catalog/knowledge-points/KP-1.1',
+      headers: authHeaders(mainGrant),
+    })
+    assert.equal(draft.statusCode, 200)
+    assert.equal((draft.json() as { article: unknown }).article, null)
+  } finally {
+    await pool.query("UPDATE articles SET status = 'published' WHERE knowledge_point_id = 'KP-1.1'")
+  }
+})
+
+test('体系：未发布课程不可见', async () => {
+  await pool.query("UPDATE courses SET status = 'draft' WHERE course_id = 'TC-101'")
+  try {
+    const list = await app.inject({
+      method: 'GET',
+      url: '/v1/catalog/courses',
+      headers: authHeaders(mainGrant),
+    })
+    assert.equal(list.statusCode, 200)
+    assert.deepEqual(list.json(), { courses: [] })
+
+    const course = await app.inject({
+      method: 'GET',
+      url: '/v1/catalog/courses/TC-101',
+      headers: authHeaders(mainGrant),
+    })
+    assert.equal(course.statusCode, 404)
+
+    const point = await app.inject({
+      method: 'GET',
+      url: '/v1/catalog/knowledge-points/KP-1.1',
+      headers: authHeaders(mainGrant),
+    })
+    assert.equal(point.statusCode, 404)
+  } finally {
+    await pool.query("UPDATE courses SET status = 'published' WHERE course_id = 'TC-101'")
+  }
+})
+
+test('进度：合并、不可回退、幂等与用户隔离', async () => {
+  const consent = await app.inject({
+    method: 'GET',
+    url: '/v1/events/consent',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(consent.statusCode, 200)
+
+  const first = await app.inject({
+    method: 'PUT',
+    url: '/v1/progress/knowledge-points/KP-1.1',
+    headers: authHeaders(mainGrant),
+    payload: { watchedSec: 120, completed: false },
+  })
+  assert.equal(first.statusCode, 200, first.body)
+  assert.deepEqual(
+    (({ knowledgePointId, watchedSec, completed }) => ({ knowledgePointId, watchedSec, completed }))(first.json()),
+    { knowledgePointId: 'KP-1.1', watchedSec: 120, completed: false },
+  )
+
+  const completed = await app.inject({
+    method: 'PUT',
+    url: '/v1/progress/knowledge-points/KP-1.1',
+    headers: authHeaders(mainGrant),
+    payload: { watchedSec: 60, completed: true },
+  })
+  assert.equal(completed.statusCode, 200)
+  const completedBody = completed.json() as { watchedSec: number; completed: boolean }
+  assert.equal(completedBody.watchedSec, 120)
+  assert.equal(completedBody.completed, true)
+
+  const regressed = await app.inject({
+    method: 'PUT',
+    url: '/v1/progress/knowledge-points/KP-1.1',
+    headers: authHeaders(mainGrant),
+    payload: { watchedSec: 30, completed: false },
+  })
+  assert.equal(regressed.statusCode, 200)
+  const regressedBody = regressed.json() as { watchedSec: number; completed: boolean }
+  assert.equal(regressedBody.watchedSec, 120)
+  assert.equal(regressedBody.completed, true)
+
+  const tree = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/courses/TC-101',
+    headers: authHeaders(mainGrant),
+  })
+  const point = (tree.json() as {
+    chapters: { knowledgePoints: { knowledgePointId: string; watchedSec: number; completed: boolean }[] }[]
+  }).chapters.flatMap(chapter => chapter.knowledgePoints)
+    .find(entry => entry.knowledgePointId === 'KP-1.1')
+  assert.deepEqual(point, {
+    knowledgePointId: 'KP-1.1',
+    title: '趋势的定义与三种方向',
+    position: 1,
+    segmentId: SEGMENT_ID,
+    watchedSec: 120,
+    completed: true,
+  })
+
+  const list = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/courses',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal((list.json() as { courses: { completedCount: number }[] }).courses[0]?.completedCount, 1)
+
+  const other = await grantFor('progress-other-0001')
+  const otherWrite = await app.inject({
+    method: 'PUT',
+    url: '/v1/progress/knowledge-points/KP-1.1',
+    headers: authHeaders(other),
+    payload: { watchedSec: 20, completed: false },
+  })
+  assert.equal(otherWrite.statusCode, 200)
+  const otherBody = otherWrite.json() as { watchedSec: number; completed: boolean }
+  assert.equal(otherBody.watchedSec, 20)
+  assert.equal(otherBody.completed, false)
+
+  const unchanged = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/courses/TC-101',
+    headers: authHeaders(mainGrant),
+  })
+  const unchangedPoint = (unchanged.json() as {
+    chapters: { knowledgePoints: { knowledgePointId: string; watchedSec: number; completed: boolean }[] }[]
+  }).chapters.flatMap(chapter => chapter.knowledgePoints)
+    .find(entry => entry.knowledgePointId === 'KP-1.1')
+  assert.equal(unchangedPoint?.watchedSec, 120)
+  assert.equal(unchangedPoint?.completed, true)
+
+  const invalidBodies: unknown[] = [
+    { watchedSec: 10 },
+    { watchedSec: -1, completed: false },
+    { watchedSec: 86401, completed: false },
+    { watchedSec: 1.5, completed: false },
+    { watchedSec: 10, completed: 'yes' },
+    [],
+  ]
+  for (const payload of invalidBodies) {
+    const invalid = await app.inject({
+      method: 'PUT',
+      url: '/v1/progress/knowledge-points/KP-1.1',
+      headers: authHeaders(mainGrant),
+      payload: payload as Record<string, unknown>,
+    })
+    assert.equal(invalid.statusCode, 400, JSON.stringify(payload))
+  }
+
+  const missing = await app.inject({
+    method: 'PUT',
+    url: '/v1/progress/knowledge-points/KP-9.9',
+    headers: authHeaders(mainGrant),
+    payload: { watchedSec: 10, completed: false },
+  })
+  assert.equal(missing.statusCode, 404)
+})
+
+test('进度限流：单设备超出配额返回 429', async () => {
+  const limited = await buildApp({
+    config: loadConfig(env({ RATE_LIMIT_PROGRESS_PER_MINUTE: '1' })),
+    pool,
+  })
+  try {
+    const first = await limited.inject({
+      method: 'PUT',
+      url: '/v1/progress/knowledge-points/KP-1.1',
+      headers: authHeaders(mainGrant),
+      payload: { watchedSec: 10, completed: false },
+    })
+    assert.equal(first.statusCode, 200)
+    const second = await limited.inject({
+      method: 'PUT',
+      url: '/v1/progress/knowledge-points/KP-1.1',
+      headers: authHeaders(mainGrant),
+      payload: { watchedSec: 20, completed: false },
+    })
+    assert.equal(second.statusCode, 429)
+  } finally {
+    await limited.close()
+  }
 })
 
 test('检索限流：单设备超出配额返回 429', async () => {

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { hashPassword, verifyPassword } from '../src/accounts/password.js'
 import { loadConfig } from '../src/config.js'
 import { parseEventBody } from '../src/events/service.js'
 import { fuse, parseSearchBody, type Candidate, type SegmentRow } from '../src/kb/service.js'
@@ -10,7 +11,7 @@ const baseEnv = {
   APP_ENV: 'local',
   DATABASE_URL: 'postgres://user:pass@127.0.0.1:5432/db',
   LOG_LEVEL: 'silent',
-  CONSOLE_TOKEN: '0123456789abcdef',
+  METRICS_TOKEN: '0123456789abcdef',
   MEDIA_SIGNING_SECRET: '0123456789abcdef',
 }
 
@@ -45,9 +46,9 @@ test('staging/production 拒绝本地默认密钥', () => {
       ...baseEnv,
       APP_ENV: 'staging',
       PUBLIC_BASE_URL: 'https://api.example.com',
-      CONSOLE_TOKEN: 'local-console-token',
+      METRICS_TOKEN: 'local-metrics-token',
     }),
-    /CONSOLE_TOKEN/,
+    /METRICS_TOKEN/,
   )
   assert.throws(
     () => loadConfig({
@@ -136,6 +137,36 @@ test('播放签名：往返、篡改、过期与目录作用域', () => {
   assert.equal(verifyPlaybackToken(secret, expired), undefined)
   const scoped = signPlaybackToken(secret, { v: 1, p: '../hls/', e: Date.now() + 60_000, s: 'ps_x' })
   assert.equal(verifyPlaybackToken(secret, scoped), undefined)
+})
+
+test('密码哈希：随机盐、可验证、格式异常失败', async () => {
+  const first = await hashPassword('correct horse battery')
+  const second = await hashPassword('correct horse battery')
+  assert.match(first, /^scrypt\$16384\$8\$1\$/)
+  assert.notEqual(first, second)
+  assert.equal(await verifyPassword('correct horse battery', first), true)
+  assert.equal(await verifyPassword('wrong password', first), false)
+  assert.equal(await verifyPassword('correct horse battery', null), false)
+  assert.equal(await verifyPassword('correct horse battery', 'bcrypt$x$y'), false)
+  assert.equal(await verifyPassword('correct horse battery', 'scrypt$1$1$1$bad$bad'), false)
+})
+
+test('管理员引导配置必须成对且密码至少 12 字符', () => {
+  assert.throws(() => loadConfig({ ...baseEnv, BOOTSTRAP_ADMIN_USERNAME: 'admin01' }), /同时配置/)
+  assert.throws(
+    () => loadConfig({ ...baseEnv, BOOTSTRAP_ADMIN_USERNAME: 'admin01', BOOTSTRAP_ADMIN_PASSWORD: 'short' }),
+    /至少 12/,
+  )
+  assert.throws(
+    () => loadConfig({ ...baseEnv, BOOTSTRAP_ADMIN_USERNAME: 'Admin01', BOOTSTRAP_ADMIN_PASSWORD: 'long-enough-password' }),
+    /BOOTSTRAP_ADMIN_USERNAME/,
+  )
+  const config = loadConfig({
+    ...baseEnv,
+    BOOTSTRAP_ADMIN_USERNAME: 'admin01',
+    BOOTSTRAP_ADMIN_PASSWORD: 'long-enough-password',
+  })
+  assert.equal(config.bootstrapAdmin?.username, 'admin01')
 })
 
 test('事件白名单：字段、名称与时间范围', () => {
