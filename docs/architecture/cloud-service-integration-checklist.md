@@ -36,6 +36,7 @@
 | `POST /v1/auth/device/code` | `{ clientId, deviceId }` | `{ deviceCode, userCode, verificationUri, expiresIn, interval }` |
 | `POST /v1/auth/device/token` | `{ deviceCode }` | `{ status: "pending" } \| { status: "expired" } \| { status: "authorized", grant }` |
 | `POST /v1/auth/refresh` | `{ refreshToken, deviceId }` | `grant`；旧 refresh 立即失效 |
+| `POST /v1/auth/revoke` | 无（Bearer + `x-device-id`） | `{ revoked: true }`；该设备全部令牌吊销，重新授权可恢复 |
 
 `grant` 结构：
 
@@ -46,7 +47,8 @@
 - `clientId` 固定为 `dsh-plugin-trend-coach`；`deviceId` 由插件首启随机生成并持久绑定。
 - `expiresIn/interval` 单位为秒；`interval` 是轮询间隔。
 - 刷新必须轮换 access/refresh 双令牌；旧 refresh 复用返回 `401`；设备不匹配返回 `403`。
-- 待决策：access/refresh TTL、并发设备上限、主动吊销、多设备登录策略（架构 §16.1）。
+- 注销为设备级：吊销本设备全部令牌并置 `revoked`，不影响同账号其它设备；账号级删除随 M3 账号体系提供。
+- 待决策：access/refresh TTL、并发设备上限、多设备登录策略（架构 §16.1）。
 
 ### 3.2 检索
 

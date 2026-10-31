@@ -23,6 +23,7 @@
 | `POST /v1/auth/device/token` | 轮询授权结果 |
 | `POST /v1/auth/device/approve` | 控制台批准设备码（临时入口） |
 | `POST /v1/auth/refresh` | 轮换 access/refresh |
+| `POST /v1/auth/revoke` | 注销当前设备并吊销其令牌 |
 | `POST /v1/kb/search` | Top-K 片段检索 |
 | `GET /v1/kb/segments/{segmentId}` | 片段详情 |
 | `POST /v1/playback/sessions` | 换取签名播放地址 |

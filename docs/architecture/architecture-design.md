@@ -214,12 +214,15 @@ sequenceDiagram
   P->>A: 业务请求 Bearer + x-device-id
   P->>A: POST /v1/auth/refresh（access 过期时）
   A-->>P: 新 grant（access/refresh 同时轮换）
+  P->>A: POST /v1/auth/revoke（退出并注销本设备）
+  A-->>P: 该设备全部令牌吊销
 ```
 
 - `clientId` 固定 `dsh-plugin-trend-coach`；`deviceId` 由插件首启随机生成并持久绑定。
 - 令牌只存哈希（如 SHA-256），刷新校验 `deviceId` 是否匹配；不匹配 `403`。
 - access 过期 `401`；插件自动刷新一次后仍失败则提示重新授权。
-- TTL、并发设备数、吊销策略见 PRD §9（待账号后台定稿）。
+- 注销由 `POST /v1/auth/revoke` 完成：吊销本设备全部 access/refresh 并置 `devices.status = revoked`，同账号其它设备不受影响；重新授权可恢复。账号级删除随 M3 账号体系提供。
+- TTL、并发设备数见 PRD §9（待账号后台定稿）。
 
 ### 7.2 鉴权中间件
 
@@ -296,7 +299,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 | M3 | 后台管理、账号体系、学习进度、索引重建/召回测试 | 内容可运营、用户可管理 |
 | M6 | 限流、压测、备份、合规加固 | 公测放行 |
 
-实现状态（2026-10-31）：M2 服务侧已落地——核心业务接口、设备码授权与令牌轮换、签名 HLS 会话、事件白名单与幂等、`GET/PUT /v1/events/consent` 同意读写、OpenAPI 与契约测试；限流为单实例内存实现。内容管线（M1）与后台（M3）未实现，TTL 与并发上限仍为临时默认值。
+实现状态（2026-10-31）：M2 服务侧已落地——核心业务接口、设备码授权与令牌轮换、`POST /v1/auth/revoke` 设备注销、签名 HLS 会话、事件白名单与幂等、`GET/PUT /v1/events/consent` 同意读写、OpenAPI 与契约测试；限流为单实例内存实现。内容管线（M1）与后台（M3）未实现，TTL 与并发上限仍为临时默认值，账号级删除随 M3 提供。
 
 ## 14. 关键设计决策（ADR）
 
