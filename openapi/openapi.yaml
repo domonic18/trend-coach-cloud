@@ -1,0 +1,536 @@
+openapi: 3.1.0
+info:
+  title: 趋势课程云端服务
+  version: 0.1.0
+  description: |
+    仅供 dsh-plugin-trend-coach 使用。业务接口只读，凭据只出现在插件 Host 侧。
+    接口口径以 docs/architecture/cloud-service-integration-checklist.md 为准。
+servers:
+  - url: http://127.0.0.1:3939
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+    deviceId:
+      type: apiKey
+      in: header
+      name: x-device-id
+    consoleToken:
+      type: apiKey
+      in: header
+      name: x-console-token
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        requestId:
+          type: string
+
+    Segment:
+      type: object
+      additionalProperties: false
+      required:
+        [segmentId, courseId, chapterId, knowledgePointId, title, startSec, endSec, text, score]
+      properties:
+        segmentId:
+          type: string
+          pattern: '^seg-[A-Za-z0-9._-]+$'
+          maxLength: 80
+        courseId:
+          type: string
+        chapterId:
+          type: string
+        knowledgePointId:
+          type: string
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        courseTitle:
+          type: string
+          maxLength: 200
+        chapterTitle:
+          type: string
+          maxLength: 200
+        knowledgePointTitle:
+          type: string
+          maxLength: 200
+        startSec:
+          type: integer
+          minimum: 0
+        endSec:
+          type: integer
+        text:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+
+    RelatedKnowledgePoint:
+      type: object
+      additionalProperties: false
+      required: [knowledgePointId, title]
+      properties:
+        knowledgePointId:
+          type: string
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+
+    SearchResponse:
+      type: object
+      additionalProperties: false
+      required: [segments, relatedKnowledgePoints]
+      properties:
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Segment'
+        relatedKnowledgePoints:
+          type: array
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/RelatedKnowledgePoint'
+
+    Grant:
+      type: object
+      additionalProperties: false
+      required: [accessToken, refreshToken, expiresAt, deviceId]
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        expiresAt:
+          type: integer
+          description: 毫秒时间戳
+        deviceId:
+          type: string
+
+    DeviceCodeStart:
+      type: object
+      additionalProperties: false
+      required: [deviceCode, userCode, verificationUri, expiresIn, interval]
+      properties:
+        deviceCode:
+          type: string
+        userCode:
+          type: string
+        verificationUri:
+          type: string
+          format: uri
+        expiresIn:
+          type: integer
+          description: 秒
+        interval:
+          type: integer
+          description: 轮询间隔，秒
+
+    DeviceTokenResponse:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [status]
+          properties:
+            status:
+              const: pending
+        - type: object
+          additionalProperties: false
+          required: [status]
+          properties:
+            status:
+              const: expired
+        - type: object
+          additionalProperties: false
+          required: [status, grant]
+          properties:
+            status:
+              const: authorized
+            grant:
+              $ref: '#/components/schemas/Grant'
+
+    PlaybackSession:
+      type: object
+      additionalProperties: false
+      required: [sessionId, playlistUrl, expiresAt, watermark]
+      properties:
+        sessionId:
+          type: string
+        playlistUrl:
+          type: string
+          format: uri
+        expiresAt:
+          type: integer
+          description: 毫秒时间戳，至少覆盖 60s 播放窗口
+        watermark:
+          type: object
+          additionalProperties: false
+          required: [label]
+          properties:
+            label:
+              type: string
+
+    EventRequest:
+      type: object
+      additionalProperties: false
+      required: [eventId, name, props]
+      properties:
+        eventId:
+          type: string
+          pattern: '^[A-Za-z0-9._:-]{8,64}$'
+        name:
+          type: string
+          enum: [search_requested, citation_clicked, player_started]
+        occurredAt:
+          type: integer
+          description: 毫秒时间戳；缺省为服务端接收时间
+        props:
+          type: object
+          description: |
+            字段白名单随 name 变化，不接受其它字段：
+            search_requested = durationMs/topK/hits/empty；
+            citation_clicked = segmentId；
+            player_started = startupMs/autoplayBlocked。
+
+  responses:
+    BadRequest:
+      description: 入参或结构不合法
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: 未授权或令牌过期
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: 设备不匹配或越权
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: 资源不存在或已下架
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: 超出配额
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+paths:
+  /health:
+    get:
+      summary: 健康检查（含数据库连通性）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+        '503':
+          description: 数据库不可用
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+
+  /v1/auth/device/code:
+    post:
+      summary: 发起设备码授权
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [clientId, deviceId]
+              properties:
+                clientId:
+                  const: dsh-plugin-trend-coach
+                deviceId:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+      responses:
+        '200':
+          description: 设备码已签发
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceCodeStart'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/auth/device/token:
+    post:
+      summary: 轮询设备码状态
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [deviceCode]
+              properties:
+                deviceCode:
+                  type: string
+      responses:
+        '200':
+          description: 待批准 / 已过期 / 已授权
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /v1/auth/refresh:
+    post:
+      summary: 轮换 access/refresh 令牌
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [refreshToken, deviceId]
+              properties:
+                refreshToken:
+                  type: string
+                deviceId:
+                  type: string
+      responses:
+        '200':
+          description: 新 grant；旧 refresh 立即失效
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Grant'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/auth/device/approve:
+    post:
+      summary: 控制台批准设备码（M3 账号后台上线前的过渡入口）
+      security:
+        - consoleToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [userCode]
+              properties:
+                userCode:
+                  type: string
+                  pattern: '^[A-Z0-9]{4}-[A-Z0-9]{4}$'
+                userId:
+                  type: string
+                  maxLength: 64
+                displayName:
+                  type: string
+                  maxLength: 200
+      responses:
+        '200':
+          description: 已批准
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [approved]
+                properties:
+                  approved:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/kb/search:
+    post:
+      summary: Top-K 片段检索
+      security:
+        - bearerAuth: []
+          deviceId: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [query]
+              properties:
+                query:
+                  type: string
+                  description: 去首尾空白后 1–500 字符
+                topK:
+                  type: integer
+                  minimum: 1
+                  maximum: 20
+                  default: 5
+                courseId:
+                  type: string
+                  pattern: '^[A-Za-z0-9._-]{1,64}$'
+      responses:
+        '200':
+          description: 检索结果；空召回时给 relatedKnowledgePoints
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/kb/segments/{segmentId}:
+    get:
+      summary: 片段详情（权威起止秒）
+      security:
+        - bearerAuth: []
+          deviceId: []
+      parameters:
+        - name: segmentId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^seg-[A-Za-z0-9._-]+$'
+            maxLength: 80
+      responses:
+        '200':
+          description: 片段元数据，score 恒为 1
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Segment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/playback/sessions:
+    post:
+      summary: 换取短时效签名播放会话
+      security:
+        - bearerAuth: []
+          deviceId: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [segmentId]
+              properties:
+                segmentId:
+                  type: string
+      responses:
+        '200':
+          description: 签名 playlistUrl；浏览器不持 Bearer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaybackSession'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          description: 媒体资源不可用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/events:
+    post:
+      summary: 接收白名单指标事件
+      description: 需要用户同意；按 eventId 幂等。不接收 query 原文、回答内容或播放地址。
+      security:
+        - bearerAuth: []
+          deviceId: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventRequest'
+      responses:
+        '202':
+          description: 已接收（重复 eventId 同样返回 202）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted]
+                properties:
+                  accepted:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 未同意上报
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
