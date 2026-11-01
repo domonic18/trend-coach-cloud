@@ -1,7 +1,7 @@
 import type { Pool } from 'pg'
 import { badRequest, conflict, HttpError, notFound } from '../errors.js'
 import { codePointLength, stringField } from '../http/validation.js'
-import { toVectorLiteral } from '../kb/embedding.js'
+import { toVectorLiteral, type EmbeddingResolver } from '../kb/embedding.js'
 
 export const CONTENT_STATUSES = ['draft', 'published', 'archived'] as const
 export type ContentStatus = (typeof CONTENT_STATUSES)[number]
@@ -209,7 +209,7 @@ export function boundedQuery(raw: unknown): string | undefined {
 export class ContentService {
   constructor(
     private readonly pool: Pool,
-    private readonly embed?: (text: string) => Promise<number[]>,
+    private readonly embedding?: EmbeddingResolver,
   ) {}
 
   async listCourses(): Promise<{ courses: AdminCourseSummary[] }> {
@@ -529,7 +529,8 @@ export class ContentService {
     if (input.startSec >= input.endSec) throw badRequest('startSec must be less than endSec')
     await this.requireKnowledgePointIn(input.knowledgePointId, input.courseId, input.chapterId)
 
-    const vector = this.embed === undefined ? null : toVectorLiteral(await this.embed(input.text))
+    const embed = await this.embedding?.resolve()
+    const vector = embed === undefined ? null : toVectorLiteral(await embed(input.text))
     const { rows } = await this.pool.query<SegmentDbRow>(
       `INSERT INTO segments
          (segment_id, course_id, chapter_id, knowledge_point_id, title, start_sec, end_sec, text, status, embedding)
@@ -578,9 +579,10 @@ export class ContentService {
     if (startSec >= endSec) throw badRequest('startSec must be less than endSec')
 
     const textChanged = input.text !== undefined && input.text !== current.text
-    const vector = textChanged && this.embed !== undefined
-      ? toVectorLiteral(await this.embed(input.text as string))
-      : null
+    const embed = textChanged ? await this.embedding?.resolve() : undefined
+    const vector = embed === undefined
+      ? null
+      : toVectorLiteral(await embed(input.text as string))
 
     const { rows } = await this.pool.query<SegmentDbRow>(
       `UPDATE segments
@@ -602,7 +604,8 @@ export class ContentService {
   }
 
   async reindex(rawCourseId: string | undefined): Promise<{ embedded: number }> {
-    if (this.embed === undefined) throw conflict('embedding provider not configured')
+    const embed = await this.embedding?.resolve()
+    if (embed === undefined) throw conflict('embedding provider not configured')
     let courseId: string | undefined
     if (rawCourseId !== undefined) {
       courseId = parseContentId(rawCourseId, 'courseId')
@@ -619,7 +622,7 @@ export class ContentService {
 
     let embedded = 0
     for (const row of rows) {
-      const vector = toVectorLiteral(await this.embed(row.text))
+      const vector = toVectorLiteral(await embed(row.text))
       await this.pool.query(
         `UPDATE segments SET embedding = $2::halfvec, updated_at = now() WHERE segment_id = $1`,
         [row.segment_id, vector],

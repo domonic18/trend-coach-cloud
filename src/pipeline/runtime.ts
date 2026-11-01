@@ -1,14 +1,15 @@
 import { constants } from 'node:fs'
 import { access, mkdir } from 'node:fs/promises'
 import type { Pool } from 'pg'
-import { createMiniMaxLongFormAsr, type LongFormAsr } from '../asr/longform.js'
+import { createLongFormAsr, type LongFormAsr } from '../asr/longform.js'
 import type { AppConfig } from '../config.js'
 import { serviceUnavailable } from '../errors.js'
 import type { Metrics } from '../metrics.js'
+import type { ModelConfigService } from '../model-config/service.js'
 import { checkMediaTools } from './ffmpeg.js'
 import { createGenerationHook } from './generation.js'
 import { JobQueue } from './jobs.js'
-import { createLlmClient, type LlmClient } from './llm.js'
+import type { LlmClient } from './llm.js'
 import { createLocalMediaProcessor, type MediaProcessor } from './media-processor.js'
 import { createLocalMediaStore, type MediaStore } from './media-store.js'
 import { PipelineService, type PipelineApi } from './service.js'
@@ -26,8 +27,11 @@ export interface PipelineRuntimeInput {
   config: AppConfig
   metrics: Metrics
   log: WorkerLogger
+  /** 生产环境由 app 注入；测试可用 asr/llm 直连覆盖。 */
+  models?: ModelConfigService
   store?: MediaStore
   processor?: MediaProcessor
+  /** 测试注入；生产环境走数据库配置。 */
   asr?: LongFormAsr
   generator?: GenerationHook
   llm?: LlmClient
@@ -91,21 +95,30 @@ export async function createPipelineRuntime(input: PipelineRuntimeInput): Promis
     tools: { ffmpegPath: config.ffmpegPath, ffprobePath: config.ffprobePath },
     maxSourceSeconds: config.maxSourceSeconds,
   })
-  const asr = input.asr
-    ?? (input.config.asr === undefined ? undefined : createMiniMaxLongFormAsr(input.config.asr))
-  const llm = input.llm
-    ?? (input.config.llm === undefined ? undefined : createLlmClient(input.config.llm))
-  const generator = input.generator ?? (llm === undefined
-    ? undefined
-    : createGenerationHook({
-      pool: input.pool,
-      config,
-      llm,
-      model: input.config.llm?.model ?? 'unknown',
-    }))
+
+  const resolveAsr = async (): Promise<{ asr: LongFormAsr; model: string } | undefined> => {
+    if (input.asr !== undefined) return { asr: input.asr, model: 'test' }
+    const resolved = await input.models?.resolveAsr()
+    return resolved === undefined
+      ? undefined
+      : { asr: createLongFormAsr(resolved), model: resolved.model }
+  }
+  const resolveLlm = async (): Promise<{ llm: LlmClient; model: string } | undefined> => {
+    if (input.llm !== undefined) return { llm: input.llm, model: 'test' }
+    const resolved = await input.models?.resolveLlm('content')
+    return resolved === undefined ? undefined : { llm: resolved.client, model: resolved.model }
+  }
+
+  const generator = input.generator ?? createGenerationHook({
+    pool: input.pool,
+    config,
+    resolveLlm,
+  })
   const jobs = new JobQueue(input.pool, config.maxAttempts)
   const api = new PipelineService(input.pool, config, jobs, store, {
-    llmAvailable: llm !== undefined,
+    llmAvailable: async () =>
+      input.llm !== undefined || (await input.models?.resolveLlm('content')) !== undefined,
+    embeddingAvailable: async () => input.models === undefined || input.models.hasEmbedding(),
     ...(input.reindex === undefined ? {} : { reindex: input.reindex }),
   })
   const worker = new PipelineWorker({
@@ -114,10 +127,9 @@ export async function createPipelineRuntime(input: PipelineRuntimeInput): Promis
     jobs,
     store,
     processor,
-    ...(asr === undefined ? {} : { asr }),
-    ...(input.config.asr === undefined ? {} : { asrConfig: input.config.asr }),
+    resolveAsr,
     asrLongTimeoutMs: input.config.asrLongTimeoutMs,
-    ...(generator === undefined ? {} : { generator }),
+    generator,
     log: input.log,
     metrics: input.metrics,
   })

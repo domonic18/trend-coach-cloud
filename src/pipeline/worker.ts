@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { access } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Pool } from 'pg'
-import type { AsrConfig, PipelineConfig } from '../config.js'
+import type { PipelineConfig } from '../config.js'
 import { AsrError } from '../asr/provider.js'
 import type { LongFormAsr } from '../asr/longform.js'
 import type { Metrics } from '../metrics.js'
@@ -33,14 +33,19 @@ export interface GenerationHook {
   ): Promise<void>
 }
 
+/** 每个 ingest 任务开始时解析当前后台配置；未配置时返回 undefined。 */
+export interface ResolvedLongFormAsr {
+  asr: LongFormAsr
+  model: string
+}
+
 export interface WorkerDeps {
   pool: Pool
   config: PipelineConfig
   jobs: JobQueue
   store: MediaStore
   processor: MediaProcessor
-  asr?: LongFormAsr
-  asrConfig?: AsrConfig
+  resolveAsr?: () => Promise<ResolvedLongFormAsr | undefined>
   asrLongTimeoutMs: number
   generator?: GenerationHook
   log: WorkerLogger
@@ -340,10 +345,10 @@ export class PipelineWorker {
     await onProgress('transcribe', 60)
     assertNotCanceled(signal)
 
-    if (this.deps.asr === undefined || this.deps.asrConfig === undefined || durationMs === null) {
-      throw new PipelineFailure(PIPELINE_ERRORS.asrUnavailable, false)
-    }
-    const asr = this.deps.asr
+    if (durationMs === null) throw new PipelineFailure(PIPELINE_ERRORS.asrUnavailable, false)
+    const resolved = await this.deps.resolveAsr?.()
+    if (resolved === undefined) throw new PipelineFailure(PIPELINE_ERRORS.asrUnavailable, false)
+    const { asr } = resolved
     const language = languageOf(job)
 
     const audioPath = join(store.workDir(job.assetId), 'audio.wav')
@@ -368,7 +373,7 @@ export class PipelineWorker {
     const chunks = planAudioChunks({ durationMs, maxSec: ASR_CHUNK_MAX_SEC, silences })
     if (chunks.length === 0) throw new PipelineFailure(PIPELINE_ERRORS.transcribeFailed, true)
 
-    const transcriptId = await this.ensureTranscript(job, durationMs, language)
+    const transcriptId = await this.ensureTranscript(job, durationMs, language, resolved.model)
     await this.ensureChunkRows(transcriptId, chunks)
 
     const rows = await this.loadChunks(transcriptId)
@@ -386,7 +391,7 @@ export class PipelineWorker {
         if (row === undefined) return
         try {
           assertNotCanceled(signal)
-          await this.transcribeChunk(row, job, language, signal)
+          await this.transcribeChunk(row, job, language, signal, asr)
           completed += 1
           await onProgress('transcribe', 60 + Math.round((completed / total) * 35))
         } catch (error) {
@@ -411,10 +416,9 @@ export class PipelineWorker {
     job: PipelineJob,
     language: Language,
     signal: AbortSignal,
+    asr: LongFormAsr,
   ): Promise<void> {
     const { config, pool, processor } = this.deps
-    const asr = this.deps.asr
-    if (asr === undefined) throw new PipelineFailure(PIPELINE_ERRORS.asrUnavailable, false)
     const startMs = milliseconds(row.start_ms)
     const endMs = milliseconds(row.end_ms)
 
@@ -458,6 +462,7 @@ export class PipelineWorker {
     job: PipelineJob,
     durationMs: number,
     language: Language,
+    model: string,
   ): Promise<string> {
     const transcriptId = `tr_${randomBytes(8).toString('hex')}`
     const { rows } = await this.deps.pool.query<{ transcript_id: string }>(
@@ -472,7 +477,7 @@ export class PipelineWorker {
            error_code = NULL,
            updated_at = now()
        RETURNING transcript_id`,
-      [transcriptId, job.assetId, job.jobId, language, this.deps.asrConfig?.model ?? 'unknown', durationMs],
+      [transcriptId, job.assetId, job.jobId, language, model, durationMs],
     )
     const row = rows[0]
     if (row === undefined) throw new PipelineFailure(PIPELINE_ERRORS.internal, true)

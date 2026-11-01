@@ -1372,6 +1372,179 @@ components:
           type: integer
           minimum: 0
 
+    LlmPurpose:
+      type: string
+      enum: [content, embedding]
+
+    AsrProtocol:
+      type: string
+      enum: [minimax, openai]
+
+    ModelTestResult:
+      type: object
+      additionalProperties: false
+      required: [status, detail, testedAt]
+      properties:
+        status:
+          type: string
+          enum: [success, failed]
+        detail:
+          type: string
+        testedAt:
+          type: integer
+
+    LlmConfig:
+      type: object
+      additionalProperties: false
+      required:
+        [configId, name, provider, protocol, baseUrl, model, purpose, apiKeyConfigured,
+         apiKeyMasked, isDefault, isActive, lastTestedAt, lastTestStatus, lastTestError,
+         createdAt, updatedAt]
+      properties:
+        configId:
+          type: string
+          pattern: '^llmc_[0-9a-f]{16}$'
+        name:
+          type: string
+        provider:
+          type: string
+        protocol:
+          type: string
+          enum: [openai]
+        baseUrl:
+          type: string
+        model:
+          type: string
+        purpose:
+          $ref: '#/components/schemas/LlmPurpose'
+        apiKeyConfigured:
+          type: boolean
+        apiKeyMasked:
+          type: [string, 'null']
+        isDefault:
+          type: boolean
+        isActive:
+          type: boolean
+        lastTestedAt:
+          type: [integer, 'null']
+        lastTestStatus:
+          type: [string, 'null']
+          enum: [success, failed, null]
+        lastTestError:
+          type: [string, 'null']
+        createdAt:
+          type: integer
+        updatedAt:
+          type: integer
+
+    CreateLlmConfigRequest:
+      type: object
+      additionalProperties: false
+      required: [name, provider, baseUrl, model, purpose]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        provider:
+          type: string
+          maxLength: 32
+        baseUrl:
+          type: string
+          maxLength: 500
+        model:
+          type: string
+          maxLength: 200
+        purpose:
+          $ref: '#/components/schemas/LlmPurpose'
+        apiKey:
+          type: string
+          maxLength: 500
+          description: 明文只在写入时出现；留空表示不配置密钥。
+        isDefault:
+          type: boolean
+        isActive:
+          type: boolean
+
+    UpdateLlmConfigRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        provider:
+          type: string
+          maxLength: 32
+        baseUrl:
+          type: string
+          maxLength: 500
+        model:
+          type: string
+          maxLength: 200
+        purpose:
+          $ref: '#/components/schemas/LlmPurpose'
+        apiKey:
+          type: string
+          maxLength: 500
+          description: 留空字符串表示保留原密钥。
+        isDefault:
+          type: boolean
+        isActive:
+          type: boolean
+
+    AsrConfig:
+      type: object
+      additionalProperties: false
+      required:
+        [provider, protocol, baseUrl, model, apiKeyConfigured, apiKeyMasked, enabled,
+         lastTestedAt, lastTestStatus, lastTestError, updatedAt]
+      properties:
+        provider:
+          type: string
+        protocol:
+          $ref: '#/components/schemas/AsrProtocol'
+        baseUrl:
+          type: string
+        model:
+          type: string
+        apiKeyConfigured:
+          type: boolean
+        apiKeyMasked:
+          type: [string, 'null']
+        enabled:
+          type: boolean
+        lastTestedAt:
+          type: [integer, 'null']
+        lastTestStatus:
+          type: [string, 'null']
+          enum: [success, failed, null]
+        lastTestError:
+          type: [string, 'null']
+        updatedAt:
+          type: integer
+
+    UpdateAsrConfigRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        provider:
+          type: string
+          maxLength: 32
+        protocol:
+          $ref: '#/components/schemas/AsrProtocol'
+        baseUrl:
+          type: string
+          maxLength: 500
+        model:
+          type: string
+          maxLength: 200
+        apiKey:
+          type: string
+          maxLength: 500
+        enabled:
+          type: boolean
+
   responses:
     BadRequest:
       description: 入参或结构不合法
@@ -3449,3 +3622,236 @@ paths:
           $ref: '#/components/responses/TooManyRequests'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/model-configs/llm:
+    get:
+      summary: 模型配置列表（admin）
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: 模型配置列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LlmConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    post:
+      summary: 新增模型配置（admin）
+      security:
+        - sessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLlmConfigRequest'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/admin/model-configs/llm/{configId}:
+    parameters:
+      - name: configId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^llmc_[0-9a-f]{16}$'
+    get:
+      summary: 模型配置详情（admin）
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: 模型配置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      summary: 更新模型配置（admin）
+      security:
+        - sessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateLlmConfigRequest'
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      summary: 删除模型配置（admin）
+      security:
+        - sessionAuth: []
+      responses:
+        '204':
+          description: 已删除
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/model-configs/llm/{configId}/set-default:
+    parameters:
+      - name: configId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^llmc_[0-9a-f]{16}$'
+    post:
+      summary: 设为该用途的默认模型（admin）
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: 已设为默认
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/model-configs/llm/{configId}/test:
+    parameters:
+      - name: configId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^llmc_[0-9a-f]{16}$'
+    post:
+      summary: 连通性测试（admin）
+      description: content 发一次最小 chat 请求；embedding 校验返回 1024 维。
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: 测试结果（写入 lastTest* 字段）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelTestResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/model-configs/asr:
+    get:
+      summary: ASR 渠道配置（admin）
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: ASR 配置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsrConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    patch:
+      summary: 更新 ASR 渠道配置（admin）
+      security:
+        - sessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAsrConfigRequest'
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsrConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/admin/model-configs/asr/test:
+    post:
+      summary: ASR 连通性测试（admin）
+      description: 上传 1 秒合成 WAV，2xx 且 MiniMax base_resp 正常即通过。
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: 测试结果（写入 lastTest* 字段）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelTestResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'

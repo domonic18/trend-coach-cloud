@@ -7,7 +7,7 @@ import Fastify, { LogController, type FastifyError, type FastifyInstance } from 
 import type { Pool } from 'pg'
 import { AccountService } from './accounts/service.js'
 import { registerAccountRoutes } from './accounts/routes.js'
-import { createMiniMaxProvider, type AsrProvider } from './asr/provider.js'
+import { createAsrProvider, type AsrProvider } from './asr/provider.js'
 import { registerAsrRoutes } from './asr/routes.js'
 import { AuthService } from './auth/service.js'
 import { registerAuthRoutes } from './auth/routes.js'
@@ -22,8 +22,10 @@ import { registerEventRoutes } from './events/routes.js'
 import { HttpError } from './errors.js'
 import { createMetrics, type Metrics } from './metrics.js'
 import { RateLimiter } from './rate-limit.js'
-import { createEmbeddingProvider } from './kb/embedding.js'
+import type { EmbeddingResolver } from './kb/embedding.js'
 import { KnowledgeService } from './kb/service.js'
+import { ModelConfigService } from './model-config/service.js'
+import { registerModelConfigRoutes } from './model-config/routes.js'
 import { registerKbRoutes } from './kb/routes.js'
 import { registerMediaRoutes } from './media/routes.js'
 import { PlaybackService } from './playback/service.js'
@@ -36,8 +38,10 @@ import { createPipelineRuntime, type PipelineRuntime } from './pipeline/runtime.
 export interface BuildAppOptions {
   config: AppConfig
   pool: Pool
-  /** 测试用：注入 fake provider，不访问真实 MiniMax。 */
+  /** 测试用：注入 fake provider，不访问真实 ASR。 */
   asr?: AsrProvider
+  /** 测试用：替换数据库模型配置服务（如固定 embedding provider）。 */
+  models?: ModelConfigService
   /** 测试用：收集已注册路由，与 OpenAPI 做一致性校验。 */
   onRoute?: (method: string, url: string) => void
   /** 测试用：注入已装配的管线运行时（可带假处理器/假 ASR）。 */
@@ -53,6 +57,7 @@ export async function buildApp({
   pool,
   onRoute,
   asr: injectedAsr,
+  models: injectedModels,
   pipeline: injectedPipeline,
   metrics: injectedMetrics,
   startPipeline = false,
@@ -153,31 +158,44 @@ export async function buildApp({
   const accounts = new AccountService(pool, config)
   const bootstrap = await accounts.bootstrapAdmin()
   if (bootstrap.created) app.log.info('bootstrap admin created')
-  const embed = config.embedding === undefined ? undefined : createEmbeddingProvider(config.embedding)
-  const kb = new KnowledgeService(pool, config, embed)
+  const models = injectedModels ?? new ModelConfigService(pool, {
+    encryptionKey: config.credentialEncryptionKey,
+    asrTimeoutMs: config.asrTimeoutMs,
+    llmTuning: config.llmTuning,
+  })
+  // 每次检索/建索引时回数据库解析，后台保存后无需重启。
+  const embedding: EmbeddingResolver = { resolve: () => models.resolveEmbedding() }
+  const kb = new KnowledgeService(pool, config, embedding)
   const playback = new PlaybackService(pool, config, auth)
   const events = new EventService(pool)
   const catalog = new CatalogService(pool)
   const progress = new ProgressService(pool)
-  const content = new ContentService(pool, embed)
-  const asr = injectedAsr ?? (config.asr === undefined ? undefined : createMiniMaxProvider(config.asr))
+  const content = new ContentService(pool, embedding)
+  const resolveAsr = async (): Promise<AsrProvider | undefined> => {
+    if (injectedAsr !== undefined) return injectedAsr
+    const resolved = await models.resolveAsr()
+    return resolved === undefined ? undefined : createAsrProvider(resolved)
+  }
   const pipeline = injectedPipeline ?? await createPipelineRuntime({
     pool,
     config,
     metrics,
     log: app.log,
-    ...(embed === undefined ? {} : { reindex: (courseId: string) => content.reindex(courseId) }),
+    models,
+    reindex: (courseId: string) => content.reindex(courseId),
   })
 
   registerAuthRoutes(app, { auth, accounts, config, limiter })
   registerAccountRoutes(app, { accounts, config, limiter })
+  registerModelConfigRoutes(app, { models, accounts, config, limiter })
   registerKbRoutes(app, { kb, auth, config, limiter })
   registerPlaybackRoutes(app, { playback, auth })
   registerEventRoutes(app, { events, auth, config, limiter })
   registerCatalogRoutes(app, { catalog, auth, config, limiter })
   registerProgressRoutes(app, { progress, auth, config, limiter })
   registerAsrRoutes(app, {
-    ...(asr === undefined ? {} : { asr }),
+    ...(injectedAsr === undefined ? {} : { asr: injectedAsr }),
+    resolveAsr,
     auth,
     config,
     limiter,

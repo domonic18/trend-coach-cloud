@@ -1,0 +1,189 @@
+import type { FastifyInstance } from 'fastify'
+import type { AccountService } from '../accounts/service.js'
+import type { AppConfig } from '../config.js'
+import { badRequest, tooManyRequests } from '../errors.js'
+import { requireSession } from '../http/principal.js'
+import { asObject, optionalStringField, stringField } from '../http/validation.js'
+import type { RateLimiter } from '../rate-limit.js'
+import {
+  LLM_PURPOSES,
+  ModelConfigService,
+  type AsrProtocol,
+  type LlmConfigInput,
+  type LlmConfigPatch,
+  type LlmPurpose,
+} from './service.js'
+
+const CONFIG_ID = /^llmc_[0-9a-f]{16}$/
+const PROVIDER = /^[A-Za-z0-9._-]{1,32}$/
+const PROTOCOLS: readonly AsrProtocol[] = ['minimax', 'openai']
+
+export interface ModelConfigRouteDeps {
+  models: ModelConfigService
+  accounts: AccountService
+  config: AppConfig
+  limiter: RateLimiter
+}
+
+function configIdParam(raw: string): string {
+  if (!CONFIG_ID.test(raw)) throw badRequest('configId invalid')
+  return raw
+}
+
+function purposeField(value: unknown): LlmPurpose {
+  if (typeof value !== 'string' || !(LLM_PURPOSES as readonly string[]).includes(value)) {
+    throw badRequest('purpose must be content or embedding')
+  }
+  return value as LlmPurpose
+}
+
+function protocolField(value: unknown): AsrProtocol {
+  if (typeof value !== 'string' || !(PROTOCOLS as readonly string[]).includes(value)) {
+    throw badRequest('protocol must be minimax or openai')
+  }
+  return value as AsrProtocol
+}
+
+function optionalBoolean(body: Record<string, unknown>, key: string): boolean | undefined {
+  const value = body[key]
+  if (value === undefined) return undefined
+  if (typeof value !== 'boolean') throw badRequest(`${key} must be a boolean`)
+  return value
+}
+
+interface ConnectionFields {
+  provider?: string
+  baseUrl?: string
+  model?: string
+  apiKey?: string
+}
+
+/** 空字符串表示保留原密钥，因此不能用 min=1 的通用字符串校验。 */
+function optionalApiKey(body: Record<string, unknown>): string | undefined {
+  const value = body.apiKey
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw badRequest('apiKey must be a string')
+  if ([...value].length > 500) throw badRequest('apiKey must be at most 500 characters')
+  return value
+}
+
+function connectionFields(body: Record<string, unknown>): ConnectionFields {
+  const result: ConnectionFields = {}
+  const provider = optionalStringField(body, 'provider', { max: 32, pattern: PROVIDER })
+  const baseUrl = optionalStringField(body, 'baseUrl', { max: 500 })
+  const model = optionalStringField(body, 'model', { max: 200 })
+  const apiKey = optionalApiKey(body)
+  if (provider !== undefined) result.provider = provider
+  if (baseUrl !== undefined) result.baseUrl = baseUrl
+  if (model !== undefined) result.model = model
+  if (apiKey !== undefined) result.apiKey = apiKey
+  return result
+}
+
+function createInput(body: Record<string, unknown>): LlmConfigInput {
+  const isDefault = optionalBoolean(body, 'isDefault')
+  const isActive = optionalBoolean(body, 'isActive')
+  const apiKey = optionalApiKey(body)
+  return {
+    name: stringField(body, 'name', { max: 100 }),
+    provider: stringField(body, 'provider', { max: 32, pattern: PROVIDER }),
+    baseUrl: stringField(body, 'baseUrl', { max: 500 }),
+    model: stringField(body, 'model', { max: 200 }),
+    purpose: purposeField(body.purpose),
+    ...(apiKey === undefined ? {} : { apiKey }),
+    ...(isDefault === undefined ? {} : { isDefault }),
+    ...(isActive === undefined ? {} : { isActive }),
+  }
+}
+
+function patchInput(body: Record<string, unknown>): LlmConfigPatch {
+  const protocol = body.protocol
+  if (protocol !== undefined && protocol !== 'openai') throw badRequest('protocol must be openai')
+  const name = optionalStringField(body, 'name', { max: 100 })
+  const isDefault = optionalBoolean(body, 'isDefault')
+  const isActive = optionalBoolean(body, 'isActive')
+  return {
+    ...connectionFields(body),
+    ...(name === undefined ? {} : { name }),
+    ...(body.purpose === undefined ? {} : { purpose: purposeField(body.purpose) }),
+    ...(isDefault === undefined ? {} : { isDefault }),
+    ...(isActive === undefined ? {} : { isActive }),
+  }
+}
+
+export function registerModelConfigRoutes(app: FastifyInstance, deps: ModelConfigRouteDeps): void {
+  const { models, accounts, config, limiter } = deps
+  const guard = async (request: Parameters<typeof requireSession>[0]): Promise<void> => {
+    const principal = await requireSession(request, accounts, ['admin'])
+    if (!limiter.take(`model-config:${principal.userId}`, config.rateLimitModelConfigPerMinute)) {
+      throw tooManyRequests()
+    }
+  }
+
+  app.get('/v1/admin/model-configs/llm', async request => {
+    await guard(request)
+    return models.listLlm()
+  })
+
+  app.post('/v1/admin/model-configs/llm', async (request, reply) => {
+    await guard(request)
+    const created = await models.createLlm(createInput(asObject(request.body)))
+    return reply.code(201).send(created)
+  })
+
+  app.get<{ Params: { configId: string } }>('/v1/admin/model-configs/llm/:configId', async request => {
+    await guard(request)
+    return models.getLlm(configIdParam(request.params.configId))
+  })
+
+  app.patch<{ Params: { configId: string } }>('/v1/admin/model-configs/llm/:configId', async request => {
+    await guard(request)
+    return models.updateLlm(configIdParam(request.params.configId), patchInput(asObject(request.body)))
+  })
+
+  app.delete<{ Params: { configId: string } }>('/v1/admin/model-configs/llm/:configId', async (request, reply) => {
+    await guard(request)
+    await models.deleteLlm(configIdParam(request.params.configId))
+    return reply.code(204).send()
+  })
+
+  app.post<{ Params: { configId: string } }>(
+    '/v1/admin/model-configs/llm/:configId/set-default',
+    async request => {
+      await guard(request)
+      return models.setDefaultLlm(configIdParam(request.params.configId))
+    },
+  )
+
+  app.post<{ Params: { configId: string } }>(
+    '/v1/admin/model-configs/llm/:configId/test',
+    async request => {
+      await guard(request)
+      return models.testLlm(configIdParam(request.params.configId))
+    },
+  )
+
+  app.get('/v1/admin/model-configs/asr', async request => {
+    await guard(request)
+    return models.getAsr()
+  })
+
+  app.patch('/v1/admin/model-configs/asr', async request => {
+    await guard(request)
+    const body = asObject(request.body)
+    const enabled = optionalBoolean(body, 'enabled')
+    const protocol = body.protocol === undefined ? undefined : protocolField(body.protocol)
+    const apiKey = optionalApiKey(body)
+    return models.updateAsr({
+      ...connectionFields(body),
+      ...(protocol === undefined ? {} : { protocol }),
+      ...(enabled === undefined ? {} : { enabled }),
+      ...(apiKey === undefined ? {} : { apiKey }),
+    })
+  })
+
+  app.post('/v1/admin/model-configs/asr/test', async request => {
+    await guard(request)
+    return models.testAsr()
+  })
+}

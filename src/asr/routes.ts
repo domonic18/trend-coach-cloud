@@ -10,7 +10,9 @@ import { AsrError, type AsrProvider } from './provider.js'
 export const ASR_BODY_LIMIT = 3 * 1024 * 1024
 
 export interface AsrRouteDeps {
+  /** 测试注入；生产环境每次请求按后台配置解析。 */
   asr?: AsrProvider
+  resolveAsr?: () => Promise<AsrProvider | undefined>
   auth: AuthService
   config: AppConfig
   limiter: RateLimiter
@@ -24,20 +26,22 @@ export function cleanTranscript(value: string): string {
 }
 
 export function registerAsrRoutes(app: FastifyInstance, deps: AsrRouteDeps): void {
-  const { asr, auth, config, limiter } = deps
+  const { asr, resolveAsr, auth, config, limiter } = deps
 
   app.post('/v1/asr/transcribe', { bodyLimit: ASR_BODY_LIMIT }, async request => {
     const principal = await requirePrincipal(request, auth)
-    if (asr === undefined) throw serviceUnavailable('asr service not configured')
     if (!limiter.take(`asr:${principal.deviceId}`, config.rateLimitAsrPerMinute)) {
       throw tooManyRequests()
     }
+
+    const provider = asr ?? await resolveAsr?.()
+    if (provider === undefined) throw serviceUnavailable('asr service not configured')
 
     const { bytes, durationMs } = parseAsrBody(request.body)
 
     let raw: string
     try {
-      raw = await asr.transcribe(bytes, durationMs)
+      raw = await provider.transcribe(bytes, durationMs)
     } catch (error) {
       if (error instanceof AsrError) {
         request.log.warn({ kind: error.kind }, 'asr upstream failed')

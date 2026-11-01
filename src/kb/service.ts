@@ -2,7 +2,7 @@ import type { Pool } from 'pg'
 import type { AppConfig } from '../config.js'
 import { badRequest, HttpError } from '../errors.js'
 import { codePointLength, intField, optionalStringField, stringField, asObject } from '../http/validation.js'
-import { toVectorLiteral } from './embedding.js'
+import { toVectorLiteral, type EmbeddingResolver } from './embedding.js'
 
 const SEGMENT_ID = /^seg-[A-Za-z0-9._-]+$/
 const COURSE_ID = /^[A-Za-z0-9._-]{1,64}$/
@@ -104,13 +104,14 @@ export class KnowledgeService {
   constructor(
     private readonly pool: Pool,
     private readonly config: AppConfig,
-    private readonly embed?: (text: string) => Promise<number[]>,
+    private readonly embedding?: EmbeddingResolver,
   ) {}
 
   async search(input: SearchInput): Promise<SearchResult> {
     const window = Math.max(input.topK * RECALL_FACTOR, MIN_RECALL_WINDOW)
     const lexical = await this.lexicalRecall(input, window)
-    const vector = this.embed === undefined ? [] : await this.vectorRecall(input, window)
+    const embed = await this.embedding?.resolve()
+    const vector = embed === undefined ? [] : await this.vectorRecall(embed, input, window)
     // 召回阈值只负责捞候选，引用置信阈值负责过滤单个 trigram 级别的偶然命中。
     const confident = [lexical, vector].map(list =>
       list.filter(candidate => candidate.score >= this.config.searchMinConfidence),
@@ -150,9 +151,12 @@ export class KnowledgeService {
     return rows.map(row => ({ row, score: Number(row.score) }))
   }
 
-  private async vectorRecall(input: SearchInput, limit: number): Promise<Candidate[]> {
-    if (this.embed === undefined) return []
-    const vector = toVectorLiteral(await this.embed(input.query))
+  private async vectorRecall(
+    embed: (text: string) => Promise<number[]>,
+    input: SearchInput,
+    limit: number,
+  ): Promise<Candidate[]> {
+    const vector = toVectorLiteral(await embed(input.query))
     const { rows } = await this.pool.query<SegmentRow>(
       `SELECT s.segment_id, s.course_id, s.chapter_id, s.knowledge_point_id, s.title,
               s.start_sec, s.end_sec, s.text,

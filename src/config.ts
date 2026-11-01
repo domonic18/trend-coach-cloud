@@ -8,6 +8,7 @@ export type LogLevel = (typeof LOG_LEVELS)[number]
 
 const LOCAL_METRICS_TOKEN = 'local-metrics-token'
 const LOCAL_MEDIA_SECRET = 'local-media-signing-secret'
+const LOCAL_CREDENTIAL_KEY = 'local-credential-encryption-key-01'
 const USERNAME = /^[a-z][a-z0-9._-]{2,31}$/
 
 export interface EmbeddingConfig {
@@ -17,10 +18,18 @@ export interface EmbeddingConfig {
 }
 
 export interface AsrConfig {
+  protocol: 'minimax' | 'openai'
   baseUrl: string
   apiKey: string
   model: string
   timeoutMs: number
+}
+
+export interface LlmTuning {
+  timeoutMs: number
+  temperature: number
+  maxTokens: number
+  maxInputChars: number
 }
 
 export interface PipelineConfig {
@@ -74,16 +83,16 @@ export interface AppConfig {
   playbackMaxConcurrent: number
   mediaBaseUrl: string
   mediaSigningSecret: string
+  credentialEncryptionKey: string
   mediaLocalDir?: string
   metricsToken: string
   sessionTtlSec: number
   inviteTtlSec: number
   bootstrapAdmin?: { username: string; password: string }
-  embedding?: EmbeddingConfig
-  asr?: AsrConfig
+  asrTimeoutMs: number
   asrLongTimeoutMs: number
   pipeline?: PipelineConfig
-  llm?: LlmConfig
+  llmTuning: LlmTuning
   searchMinSimilarity: number
   searchMinConfidence: number
   rrfK: number
@@ -100,6 +109,7 @@ export interface AppConfig {
   rateLimitRefreshPerMinute: number
   rateLimitCatalogPerMinute: number
   rateLimitContentPerMinute: number
+  rateLimitModelConfigPerMinute: number
 }
 
 type Env = Record<string, string | undefined>
@@ -204,38 +214,16 @@ export function loadConfig(env: Env = process.env): AppConfig {
   if (mediaSigningSecret.length < 16) fail('MEDIA_SIGNING_SECRET 至少 16 个字符')
   if (appEnv !== 'local' && mediaSigningSecret === LOCAL_MEDIA_SECRET) fail('MEDIA_SIGNING_SECRET 不得使用本地默认值')
 
-  const mediaLocalDir = text(env, 'MEDIA_LOCAL_DIR')
-  const embeddingUrl = text(env, 'EMBEDDING_BASE_URL')
-  const embeddingModel = text(env, 'EMBEDDING_MODEL')
-  if ((embeddingUrl === undefined) !== (embeddingModel === undefined)) {
-    fail('EMBEDDING_BASE_URL 与 EMBEDDING_MODEL 必须同时配置')
+  // 模型密钥落库时用此密钥加密；一旦更换，已存密文不可解密（需在后台重新录入）。
+  const credentialEncryptionKey = text(env, 'CREDENTIAL_ENCRYPTION_KEY')
+    ?? (appEnv === 'local' ? LOCAL_CREDENTIAL_KEY : fail('CREDENTIAL_ENCRYPTION_KEY 必填'))
+  if (credentialEncryptionKey.length < 32) fail('CREDENTIAL_ENCRYPTION_KEY 至少 32 个字符')
+  if (appEnv !== 'local' && credentialEncryptionKey === LOCAL_CREDENTIAL_KEY) {
+    fail('CREDENTIAL_ENCRYPTION_KEY 不得使用本地默认值')
   }
-  const embedding = embeddingUrl === undefined || embeddingModel === undefined
-    ? undefined
-    : (() => {
-        parseUrl('EMBEDDING_BASE_URL', embeddingUrl, appEnv)
-        const apiKey = text(env, 'EMBEDDING_API_KEY')
-        return apiKey === undefined
-          ? { baseUrl: embeddingUrl.replace(/\/+$/, ''), model: embeddingModel }
-          : { baseUrl: embeddingUrl.replace(/\/+$/, ''), model: embeddingModel, apiKey }
-      })()
 
-  const asrBaseRaw = text(env, 'ASR_BASE_URL')
-  const asrApiKey = text(env, 'ASR_API_KEY')
-  if (asrBaseRaw !== undefined && asrApiKey === undefined) {
-    fail('ASR_BASE_URL 显式设置时必须配置 ASR_API_KEY')
-  }
-  if (appEnv !== 'local' && asrApiKey === undefined) fail(`ASR_API_KEY 在 ${appEnv} 必填`)
-  const asr: AsrConfig | undefined = asrApiKey === undefined
-    ? undefined
-    : {
-        baseUrl: (asrBaseRaw === undefined
-          ? 'https://api.minimaxi.com'
-          : parseUrl('ASR_BASE_URL', asrBaseRaw, appEnv).toString()).replace(/\/+$/, ''),
-        apiKey: asrApiKey,
-        model: text(env, 'ASR_MODEL') ?? 'asr-1.0',
-        timeoutMs: int(env, 'ASR_TIMEOUT_MS', 30_000),
-      }
+  const mediaLocalDir = text(env, 'MEDIA_LOCAL_DIR')
+  const asrTimeoutMs = int(env, 'ASR_TIMEOUT_MS', 30_000)
 
   const pipelineEnabled = bool(env, 'PIPELINE_ENABLED', false)
   let pipeline: PipelineConfig | undefined
@@ -282,29 +270,14 @@ export function loadConfig(env: Env = process.env): AppConfig {
     }
   }
 
-  const llmBaseRaw = text(env, 'CONTENT_LLM_BASE_URL')
-  const llmModel = text(env, 'CONTENT_LLM_MODEL')
-  if ((llmBaseRaw === undefined) !== (llmModel === undefined)) {
-    fail('CONTENT_LLM_BASE_URL 与 CONTENT_LLM_MODEL 必须同时配置')
-  }
-  let llm: LlmConfig | undefined
-  if (llmBaseRaw !== undefined && llmModel !== undefined) {
-    const baseUrl = parseUrl('CONTENT_LLM_BASE_URL', llmBaseRaw, appEnv)
-    const apiKey = text(env, 'CONTENT_LLM_API_KEY')
-    if (appEnv !== 'local' && !isLoopback(baseUrl.hostname) && apiKey === undefined) {
-      fail(`CONTENT_LLM_API_KEY 在 ${appEnv} 必填`)
-    }
-    const temperature = float(env, 'CONTENT_LLM_TEMPERATURE', 0.2)
-    if (temperature < 0 || temperature > 2) fail('CONTENT_LLM_TEMPERATURE 必须在 0–2 之间')
-    llm = {
-      baseUrl: baseUrl.toString().replace(/\/+$/, ''),
-      model: llmModel,
-      ...(apiKey === undefined ? {} : { apiKey }),
-      timeoutMs: int(env, 'CONTENT_LLM_TIMEOUT_MS', 120_000, { min: 1000 }),
-      temperature,
-      maxTokens: int(env, 'CONTENT_LLM_MAX_TOKENS', 8192, { max: 1_000_000 }),
-      maxInputChars: int(env, 'CONTENT_LLM_MAX_INPUT_CHARS', 120_000, { min: 1000 }),
-    }
+  // 模型连接信息（baseUrl/model/key）在管理端「模型配置」维护；这里只保留生成侧调参。
+  const llmTemperature = float(env, 'CONTENT_LLM_TEMPERATURE', 0.2)
+  if (llmTemperature < 0 || llmTemperature > 2) fail('CONTENT_LLM_TEMPERATURE 必须在 0–2 之间')
+  const llmTuning: LlmTuning = {
+    timeoutMs: int(env, 'CONTENT_LLM_TIMEOUT_MS', 120_000, { min: 1000 }),
+    temperature: llmTemperature,
+    maxTokens: int(env, 'CONTENT_LLM_MAX_TOKENS', 8192, { max: 1_000_000 }),
+    maxInputChars: int(env, 'CONTENT_LLM_MAX_INPUT_CHARS', 120_000, { min: 1000 }),
   }
 
   const searchMinSimilarity = float(env, 'SEARCH_MIN_SIMILARITY', 0.05)
@@ -328,16 +301,16 @@ export function loadConfig(env: Env = process.env): AppConfig {
     playbackMaxConcurrent: int(env, 'PLAYBACK_MAX_CONCURRENT', 5),
     mediaBaseUrl: mediaBaseUrl.toString().replace(/\/+$/, ''),
     mediaSigningSecret,
+    credentialEncryptionKey,
     ...(mediaLocalDir === undefined ? {} : { mediaLocalDir }),
     metricsToken,
     sessionTtlSec: int(env, 'SESSION_TTL_SECONDS', 12 * 60 * 60, { min: 300 }),
     inviteTtlSec: int(env, 'INVITE_TTL_SECONDS', 7 * 24 * 60 * 60, { min: 3600 }),
     ...(bootstrapAdmin === undefined ? {} : { bootstrapAdmin }),
-    ...(embedding === undefined ? {} : { embedding }),
+    asrTimeoutMs,
     asrLongTimeoutMs: int(env, 'ASR_LONG_TIMEOUT_MS', 600_000, { min: 1000 }),
-    ...(asr === undefined ? {} : { asr }),
     ...(pipeline === undefined ? {} : { pipeline }),
-    ...(llm === undefined ? {} : { llm }),
+    llmTuning,
     searchMinSimilarity,
     searchMinConfidence,
     rrfK: int(env, 'RRF_K', 60),
@@ -354,5 +327,6 @@ export function loadConfig(env: Env = process.env): AppConfig {
     rateLimitRefreshPerMinute: int(env, 'RATE_LIMIT_REFRESH_PER_MINUTE', 60),
     rateLimitCatalogPerMinute: int(env, 'RATE_LIMIT_CATALOG_PER_MINUTE', 240),
     rateLimitContentPerMinute: int(env, 'RATE_LIMIT_CONTENT_PER_MINUTE', 300),
+    rateLimitModelConfigPerMinute: int(env, 'RATE_LIMIT_MODEL_CONFIG_PER_MINUTE', 30),
   }
 }

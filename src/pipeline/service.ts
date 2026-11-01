@@ -27,8 +27,11 @@ const LANGUAGES = ['zh', 'en', 'auto'] as const
 export type Language = (typeof LANGUAGES)[number]
 
 export interface PipelineServiceOptions {
-  llmAvailable: boolean
+  /** 每次入队时查询后台配置，管理员保存后即刻生效。 */
+  llmAvailable: () => Promise<boolean>
   reindex?: (courseId: string) => Promise<{ embedded: number }>
+  /** 未配置 embedding 时发布仍可用，只是不建向量索引。 */
+  embeddingAvailable?: () => Promise<boolean>
 }
 
 export interface AssetDto {
@@ -363,7 +366,7 @@ export class PipelineService implements PipelineApi {
     private readonly config: PipelineConfig,
     private readonly jobs: JobQueue,
     private readonly store: MediaStore,
-    private readonly options: PipelineServiceOptions = { llmAvailable: false },
+    private readonly options: PipelineServiceOptions = { llmAvailable: async () => false },
   ) {}
 
   async listAssets(filters: AssetFilters): Promise<{
@@ -591,7 +594,7 @@ export class PipelineService implements PipelineApi {
       [assetId],
     )
     if ((rowCount ?? 0) > 0) throw conflict('draft generation already exists')
-    if (!this.options.llmAvailable) throw serviceUnavailable('content llm unavailable')
+    if (!(await this.options.llmAvailable())) throw serviceUnavailable('content llm unavailable')
 
     let job: PipelineJob
     try {
@@ -809,9 +812,11 @@ export class PipelineService implements PipelineApi {
     )
     if ((countRows[0]?.count ?? 0) < 1) throw conflict('course has no segments')
 
-    let embedded = 0
     const reindex = this.options.reindex
-    if (reindex !== undefined) {
+    const embeddingReady = reindex !== undefined
+      && (this.options.embeddingAvailable === undefined || await this.options.embeddingAvailable())
+    let embedded = 0
+    if (reindex !== undefined && embeddingReady) {
       try {
         embedded = (await reindex(courseId)).embedded
       } catch {
@@ -847,7 +852,7 @@ export class PipelineService implements PipelineApi {
         status: 'published',
         articlesPublished: articles.rowCount ?? 0,
         segmentsPublished: segments.rowCount ?? 0,
-        indexed: reindex !== undefined,
+        indexed: embeddingReady,
         embedded,
       }
     } catch (error) {

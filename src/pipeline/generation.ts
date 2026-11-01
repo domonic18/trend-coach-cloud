@@ -35,11 +35,16 @@ import type { GenerationHook } from './worker.js'
 
 const ARTICLE_INPUT_MAX_CHARS = 60_000
 
+/** 每个生成任务开始时解析当前后台配置；未配置时返回 undefined。 */
+export interface ResolvedContentLlm {
+  llm: LlmClient
+  model: string
+}
+
 export interface GenerationDeps {
   pool: Pool
   config: PipelineConfig
-  llm: LlmClient
-  model: string
+  resolveLlm: () => Promise<ResolvedContentLlm | undefined>
 }
 
 interface GenerationWindow {
@@ -94,13 +99,13 @@ function mapLlmError(error: unknown): PipelineFailure {
 }
 
 async function ask<T>(
-  deps: GenerationDeps,
+  llm: LlmClient,
   request: PromptRequest,
   parse: (value: unknown) => T,
   signal: AbortSignal,
 ): Promise<T> {
   try {
-    return await deps.llm.completeJson({ ...request, signal }, parse)
+    return await llm.completeJson({ ...request, signal }, parse)
   } catch (error) {
     throw mapLlmError(error)
   }
@@ -258,6 +263,7 @@ async function writeGeneration(
   job: PipelineJob,
   transcriptId: string,
   payload: GenerationPayload,
+  model: string,
 ): Promise<string> {
   const needsReview = payload.knowledgePoints.filter(point => point.needsReview).length
   const generationId = randomId('gen')
@@ -274,7 +280,7 @@ async function writeGeneration(
       job.courseId,
       job.jobId,
       PROMPT_VERSION,
-      deps.model,
+      model,
       payload.chapters.length,
       payload.knowledgePoints.length,
       payload.segments.length,
@@ -290,6 +296,10 @@ async function writeGeneration(
 export function createGenerationHook(deps: GenerationDeps): GenerationHook {
   return async (job, signal, progress) => {
     const { config, pool } = deps
+
+    const resolved = await deps.resolveLlm()
+    if (resolved === undefined) throw new PipelineFailure(PIPELINE_ERRORS.llmUnavailable, false)
+    const { llm, model } = resolved
 
     const { rows: transcriptRows } = await pool.query<TranscriptRow>(
       'SELECT transcript_id, status FROM media_transcripts WHERE asset_id = $1',
@@ -331,7 +341,7 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
       windows,
       config.llmConcurrency,
       signal,
-      window => ask(deps, chapterPrompt(window.segments), parseChapterResponse, signal),
+      window => ask(llm, chapterPrompt(window.segments), parseChapterResponse, signal),
     )
 
     const chapterDrafts: ChapterDraft[] = []
@@ -353,7 +363,7 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
       signal,
       (window, index) => {
         const titles = (windowChapters[index] ?? []).map(chapter => chapter.title)
-        return ask(deps, pointPrompt(window.segments, titles), parsePointResponse, signal)
+        return ask(llm, pointPrompt(window.segments, titles), parsePointResponse, signal)
       },
     )
     await progress('structure', 45)
@@ -443,7 +453,7 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
         if (signal.aborted) throw new JobCanceledError()
         try {
           const candidate = await ask(
-            deps,
+            llm,
             articlePrompt(point.title, [{ startMs: point.startMs, endMs: point.endMs, text: input }]),
             parseArticleResponse,
             signal,
@@ -483,7 +493,7 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
       })),
       segments: segmentDrafts,
     }
-    await writeGeneration(deps, job, transcript.transcript_id, payload)
+    await writeGeneration(deps, job, transcript.transcript_id, payload, model)
     await progress('finalize', 100)
   }
 }

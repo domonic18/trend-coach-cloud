@@ -3,6 +3,11 @@ import { serviceUnavailable } from '../errors.js'
 
 export const EMBEDDING_DIM = 1024
 
+/** 按当前后台配置解析；未配置或已停用时返回 undefined，调用方退化为纯词法。 */
+export interface EmbeddingResolver {
+  resolve(): Promise<((text: string) => Promise<number[]>) | undefined>
+}
+
 /** OpenAI 兼容的 /embeddings 端点；维度必须与迁移中的 halfvec(1024) 一致。 */
 export function createEmbeddingProvider(
   config: EmbeddingConfig,
