@@ -4,6 +4,7 @@ import {
   FileTextOutlined,
   PictureOutlined,
   PlusOutlined,
+  QuestionCircleOutlined,
   RocketOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -41,6 +42,7 @@ import { qk } from '../../lib/queryKeys'
 import type { Chapter, ContentStatus, CourseTree, KnowledgePoint } from '../../types'
 import { ArticleDrawer } from './ArticleDrawer'
 import { FiguresDrawer } from './FiguresDrawer'
+import { QuizDrawer } from './QuizDrawer'
 
 interface CourseInfoForm {
   title: string
@@ -64,6 +66,7 @@ export function CourseEditor({ courseId }: { courseId: string }) {
   const { message, modal } = App.useApp()
   const [form] = Form.useForm<CourseInfoForm>()
   const [articleChapter, setArticleChapter] = useState<Chapter | null>(null)
+  const [quizChapter, setQuizChapter] = useState<Chapter | null>(null)
   const [figuresChapter, setFiguresChapter] = useState<Chapter | null>(null)
   const [chapterModal, setChapterModal] = useState(false)
   const [pointModal, setPointModal] = useState<{ chapterId: string } | null>(null)
@@ -247,6 +250,14 @@ export function CourseEditor({ courseId }: { courseId: string }) {
                       <Typography.Text type="secondary">v{chapter.article.version}</Typography.Text>
                     </>
                   )}
+                  {chapter.quiz === null ? (
+                    <Tag bordered={false}>无题库</Tag>
+                  ) : (
+                    <>
+                      <StatusTag value={chapter.quiz.status} />
+                      <Typography.Text type="secondary">题库 v{chapter.quiz.version}</Typography.Text>
+                    </>
+                  )}
                   <Typography.Text type="secondary">{chapter.figureCount} 张图示</Typography.Text>
                   <Typography.Text type="secondary">{chapter.knowledgePoints.length} 个知识点</Typography.Text>
                 </Space>
@@ -260,6 +271,14 @@ export function CourseEditor({ courseId }: { courseId: string }) {
                     onClick={() => setArticleChapter(chapter)}
                   >
                     教材
+                  </Button>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<QuestionCircleOutlined />}
+                    onClick={() => setQuizChapter(chapter)}
+                  >
+                    测验
                   </Button>
                   <Button
                     type="text"
@@ -327,6 +346,13 @@ export function CourseEditor({ courseId }: { courseId: string }) {
         chapter={articleChapter}
         open={articleChapter !== null}
         onClose={() => setArticleChapter(null)}
+      />
+
+      <QuizDrawer
+        courseId={courseId}
+        chapter={quizChapter}
+        open={quizChapter !== null}
+        onClose={() => setQuizChapter(null)}
       />
 
       <FiguresDrawer

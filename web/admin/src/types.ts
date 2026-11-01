@@ -46,11 +46,24 @@ export interface KnowledgePoint {
   segmentCount: number
 }
 
+export interface QuizQuestion {
+  questionId: string
+  prompt: string
+  options: string[]
+  answerIndex: number
+  explanation: string
+}
+
+export interface Quiz extends ArticleMeta {
+  questions: QuizQuestion[]
+}
+
 export interface Chapter {
   chapterId: string
   title: string
   position: number
   article: ArticleMeta | null
+  quiz: ArticleMeta | null
   figureCount: number
   knowledgePoints: KnowledgePoint[]
 }

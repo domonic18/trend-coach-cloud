@@ -31,6 +31,8 @@ import type {
   PipelineJobKind,
   PipelineJobList,
   PipelineJobStatus,
+  Quiz,
+  QuizQuestion,
   Segment,
   SegmentList,
   SessionResponse,
@@ -213,6 +215,28 @@ export async function putChapterArticle(
     `/v1/admin/content/courses/${encodeURIComponent(courseId)}/chapters/${encodeURIComponent(chapterId)}/article`,
     input,
   )).article
+}
+
+export async function getChapterQuiz(
+  courseId: string,
+  chapterId: string,
+): Promise<Quiz | null> {
+  return (await request<{ quiz: Quiz | null }>(
+    'GET',
+    `/v1/admin/content/courses/${encodeURIComponent(courseId)}/chapters/${encodeURIComponent(chapterId)}/quiz`,
+  )).quiz
+}
+
+export async function putChapterQuiz(
+  courseId: string,
+  chapterId: string,
+  input: { questions: QuizQuestion[]; status: ContentStatus },
+): Promise<Quiz> {
+  return (await request<{ quiz: Quiz }>(
+    'PUT',
+    `/v1/admin/content/courses/${encodeURIComponent(courseId)}/chapters/${encodeURIComponent(chapterId)}/quiz`,
+    input,
+  )).quiz
 }
 
 export async function enqueueIllustrate(
