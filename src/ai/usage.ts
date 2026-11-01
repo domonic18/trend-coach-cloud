@@ -27,6 +27,11 @@ export interface AiCallRecord {
   cachedTokens?: number
   audioSeconds?: number
   characters?: number
+  images?: number
+  /** 生成时单价换算的成本，预算统计只读此列。 */
+  costMicros?: number
+  /** 按课程归集图片预算；非课程任务留空。 */
+  courseId?: string
 }
 
 const MAX_ERROR = 64
@@ -74,8 +79,8 @@ export class AiUsageService {
     const usageRows = await this.pool.query<{ usage_id: string }>(
       `INSERT INTO ai_usage_events
          (run_id, task_key, provider, model, config_id, input_tokens, output_tokens, cached_tokens,
-          audio_seconds, characters, latency_ms, status, error_code)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          audio_seconds, characters, images, cost_micros, course_id, latency_ms, status, error_code)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        RETURNING usage_id`,
       [
         handle?.runId ?? null,
@@ -88,6 +93,9 @@ export class AiUsageService {
         record.cachedTokens ?? 0,
         record.audioSeconds ?? 0,
         record.characters ?? 0,
+        record.images ?? 0,
+        record.costMicros ?? 0,
+        record.courseId ?? null,
         record.latencyMs,
         record.status,
         trimError(record.errorCode),

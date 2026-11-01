@@ -5,6 +5,25 @@ export class HttpError extends Error {
   }
 }
 
+/** 需要机器可读错误码的管理端接口（图示未解析、图片预算超限）。 */
+export class CodedHttpError extends HttpError {
+  constructor(
+    statusCode: number,
+    readonly code: string,
+    message: string,
+    readonly details: Record<string, unknown> = {},
+  ) {
+    super(statusCode, message)
+    this.name = 'CodedHttpError'
+  }
+}
+
+export const codedConflict = (
+  code: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): CodedHttpError => new CodedHttpError(409, code, message, details)
+
 export const badRequest = (message: string): HttpError => new HttpError(400, message)
 export const unauthorized = (message = 'unauthorized'): HttpError => new HttpError(401, message)
 export const forbidden = (message = 'forbidden'): HttpError => new HttpError(403, message)

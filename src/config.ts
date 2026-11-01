@@ -49,6 +49,7 @@ export interface PipelineConfig {
   maxAttempts: number
   ffmpegTimeoutMs: number
   audioTimeoutMs: number
+  imageTimeoutMs: number
   transcriptSegmentMaxSec: number
   segmentDraftMaxSec: number
   generationWindowSec: number
@@ -86,6 +87,8 @@ export interface AppConfig {
   playbackMaxConcurrent: number
   mediaBaseUrl: string
   mediaSigningSecret: string
+  figureLocalDir?: string
+  figureSigningTtlSec: number
   credentialEncryptionKey: string
   mediaLocalDir?: string
   metricsToken: string
@@ -266,6 +269,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
       maxAttempts: int(env, 'PIPELINE_MAX_ATTEMPTS', 3, { max: 10 }),
       ffmpegTimeoutMs: int(env, 'PIPELINE_FFMPEG_TIMEOUT_MS', 2 * 60 * 60 * 1000, { min: 1000 }),
       audioTimeoutMs: int(env, 'PIPELINE_AUDIO_TIMEOUT_MS', 10 * 60 * 1000, { min: 1000 }),
+      imageTimeoutMs: int(env, 'PIPELINE_IMAGE_TIMEOUT_MS', 2 * 60 * 1000, { min: 1000 }),
       transcriptSegmentMaxSec: int(env, 'TRANSCRIPT_SEGMENT_MAX_SEC', 30, { max: 480 }),
       segmentDraftMaxSec: int(env, 'SEGMENT_DRAFT_MAX_SEC', 120, { max: 600 }),
       generationWindowSec: int(env, 'GENERATION_WINDOW_SEC', 600, { min: 60 }),
@@ -275,6 +279,12 @@ export function loadConfig(env: Env = process.env): AppConfig {
       generationMaxArticles: int(env, 'GENERATION_MAX_ARTICLES', 80, { max: 500 }),
     }
   }
+
+  // 图示独立于课程媒体目录；管线启用时默认落在 storage 同级 figures/。
+  const figureDirRaw = text(env, 'PIPELINE_FIGURE_DIR')
+  const figureLocalDir = figureDirRaw !== undefined
+    ? resolve(figureDirRaw)
+    : pipeline === undefined ? undefined : resolve(pipeline.storageDir, '..', 'figures')
 
   // 模型连接信息（baseUrl/model/key）在管理端「模型配置」维护；这里只保留生成侧调参。
   const llmTemperature = float(env, 'CONTENT_LLM_TEMPERATURE', 0.2)
@@ -307,6 +317,8 @@ export function loadConfig(env: Env = process.env): AppConfig {
     playbackMaxConcurrent: int(env, 'PLAYBACK_MAX_CONCURRENT', 5),
     mediaBaseUrl: mediaBaseUrl.toString().replace(/\/+$/, ''),
     mediaSigningSecret,
+    figureSigningTtlSec: int(env, 'FIGURE_SIGNING_TTL_SECONDS', 600, { min: 60, max: 3600 }),
+    ...(figureLocalDir === undefined ? {} : { figureLocalDir }),
     credentialEncryptionKey,
     ...(mediaLocalDir === undefined ? {} : { mediaLocalDir }),
     metricsToken,

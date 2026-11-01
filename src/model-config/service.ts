@@ -8,7 +8,7 @@ import { createLlmClient, type LlmClient } from '../pipeline/llm.js'
 import { taskPurpose, type LlmTaskKey } from '../ai/tasks.js'
 import { decryptSecret, encryptSecret, maskSecret } from './crypto.js'
 
-export const LLM_PURPOSES = ['content', 'embedding'] as const
+export const LLM_PURPOSES = ['content', 'embedding', 'image'] as const
 export type LlmPurpose = (typeof LLM_PURPOSES)[number]
 
 export type AsrProtocol = 'minimax' | 'openai'
@@ -30,6 +30,7 @@ export interface LlmConfigDto {
   isActive: boolean
   inputPriceMicrosPer1k: number | null
   outputPriceMicrosPer1k: number | null
+  imagePriceMicros: number
   lastTestedAt: number | null
   lastTestStatus: 'success' | 'failed' | null
   lastTestError: string | null
@@ -69,6 +70,7 @@ export interface LlmConfigInput {
   isActive?: boolean
   inputPriceMicrosPer1k?: number | null
   outputPriceMicrosPer1k?: number | null
+  imagePriceMicros?: number
 }
 
 export interface LlmConfigPatch {
@@ -83,6 +85,7 @@ export interface LlmConfigPatch {
   isActive?: boolean
   inputPriceMicrosPer1k?: number | null
   outputPriceMicrosPer1k?: number | null
+  imagePriceMicros?: number
 }
 
 export interface AsrConfigPatch {
@@ -107,6 +110,7 @@ interface LlmRow {
   is_active: boolean
   input_price_micros_per_1k: number | null
   output_price_micros_per_1k: number | null
+  image_price_micros: number
   last_tested_at: Date | null
   last_test_status: 'success' | 'failed' | null
   last_test_error: string | null
@@ -146,6 +150,15 @@ export interface ResolvedTaskLlm {
   fallback?: ResolvedLlm
 }
 
+export interface ResolvedImage {
+  configId: string
+  provider: string
+  baseUrl: string
+  model: string
+  apiKey: string
+  priceMicros: number
+}
+
 function toMillis(value: Date | null): number | null {
   return value === null ? null : value.getTime()
 }
@@ -156,6 +169,7 @@ function normalizeApiBase(raw: string): string {
     .replace(/\/+$/, '')
     .replace(/\/(?:v1\/)?chat\/completions$/i, '')
     .replace(/\/v1\/messages$/i, '')
+    .replace(/\/(?:v1\/)?images\/generations$/i, '')
     .replace(/\/embeddings$/i, '')
     .replace(/\/(?:v1\/)?audio\/transcriptions$/i, '')
     .replace(/\/(?:v1\/)?speech_to_text$/i, '')
@@ -178,6 +192,10 @@ function requireHttpUrl(raw: string): string {
 function requireProtocolForPurpose(protocol: LlmProtocol, purpose: LlmPurpose): void {
   if (purpose === 'embedding' && protocol !== 'openai') {
     throw badRequest('embedding config requires the openai protocol')
+  }
+  // 火山方舟文生图走 OpenAI 兼容的 /images/generations。
+  if (purpose === 'image' && protocol !== 'openai') {
+    throw badRequest('image config requires the openai protocol')
   }
 }
 
@@ -223,8 +241,9 @@ export class ModelConfigService {
       const { rows } = await client.query<LlmRow>(
         `INSERT INTO llm_configs
            (config_id, name, provider, protocol, base_url, model, api_key_encrypted,
-            purpose, is_default, is_active, input_price_micros_per_1k, output_price_micros_per_1k)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            purpose, is_default, is_active, input_price_micros_per_1k, output_price_micros_per_1k,
+            image_price_micros)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING *`,
         [
           configId,
@@ -239,6 +258,7 @@ export class ModelConfigService {
           input.isActive !== false,
           input.inputPriceMicrosPer1k ?? null,
           input.outputPriceMicrosPer1k ?? null,
+          input.imagePriceMicros ?? 120000,
         ],
       )
       await client.query('COMMIT')
@@ -284,6 +304,7 @@ export class ModelConfigService {
            is_active = $10,
            input_price_micros_per_1k = $11,
            output_price_micros_per_1k = $12,
+           image_price_micros = $13,
            updated_at = now()
          WHERE config_id = $1
          RETURNING *`,
@@ -304,6 +325,9 @@ export class ModelConfigService {
           patch.outputPriceMicrosPer1k === undefined
             ? existing.output_price_micros_per_1k
             : patch.outputPriceMicrosPer1k,
+          patch.imagePriceMicros === undefined
+            ? existing.image_price_micros
+            : patch.imagePriceMicros,
         ],
       )
       await client.query('COMMIT')
@@ -444,6 +468,27 @@ export class ModelConfigService {
     return row === undefined ? undefined : this.toResolvedLlm(row)
   }
 
+  /** 文生图没有任务绑定，只取 image 用途的默认启用配置；密钥缺失视为未配置。 */
+  async resolveImage(): Promise<ResolvedImage | undefined> {
+    const { rows } = await this.pool.query<LlmRow>(
+      `SELECT * FROM llm_configs
+       WHERE purpose = 'image' AND is_default AND is_active
+       LIMIT 1`,
+    )
+    const row = rows[0]
+    if (row === undefined || row.api_key_encrypted === null) return undefined
+    const apiKey = this.decryptOrUndefined(row.api_key_encrypted)
+    if (apiKey === undefined) return undefined
+    return {
+      configId: row.config_id,
+      provider: row.provider,
+      baseUrl: row.base_url,
+      model: row.model,
+      apiKey,
+      priceMicros: row.image_price_micros,
+    }
+  }
+
   /** 任务绑定优先；绑定失效（停用/用途不符）时回落默认模型，保证既有部署不受影响。 */
   async resolveTaskModels(taskKey: LlmTaskKey): Promise<ResolvedTaskLlm> {
     const purpose = taskPurpose(taskKey)
@@ -544,6 +589,7 @@ export class ModelConfigService {
       isActive: row.is_active,
       inputPriceMicrosPer1k: row.input_price_micros_per_1k,
       outputPriceMicrosPer1k: row.output_price_micros_per_1k,
+      imagePriceMicros: row.image_price_micros,
       lastTestedAt: toMillis(row.last_tested_at),
       lastTestStatus: row.last_test_status,
       lastTestError: row.last_test_error,
@@ -632,6 +678,33 @@ export class ModelConfigService {
         }
       }
       return { status: 'success', detail: `模型 ${row.model} 连通正常（${dims.length} 维）`, testedAt }
+    }
+
+    if (row.purpose === 'image') {
+      let response: Response
+      try {
+        response = await fetch(`${base}/images/generations`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            model: row.model,
+            prompt: '简约几何示意图，无文字',
+            size: '512x512',
+            response_format: 'url',
+            watermark: false,
+          }),
+          signal: AbortSignal.timeout(60_000),
+        })
+      } catch (error) {
+        return { status: 'failed', detail: errorDetail(error), testedAt }
+      }
+      if (!response.ok) return { status: 'failed', detail: `HTTP ${response.status}`, testedAt }
+      const payload: unknown = await response.json().catch(() => undefined)
+      const data = (payload as { data?: unknown } | undefined)?.data
+      if (!Array.isArray(data) || data.length === 0) {
+        return { status: 'failed', detail: '响应缺少 data 字段', testedAt }
+      }
+      return { status: 'success', detail: `模型 ${row.model} 连通正常（出图 1 张）`, testedAt }
     }
 
     let response: Response

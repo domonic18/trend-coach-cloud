@@ -228,6 +228,31 @@ export async function extractWav(
   )
 }
 
+/** 关键帧至少 800px，长边不超过 2000px；小分辨率源按需放大以满足图示下限。 */
+export async function extractFrame(
+  tools: FfmpegToolPaths,
+  inputPath: string,
+  outputPath: string,
+  options: { atSec: number; timeoutMs: number; signal?: AbortSignal },
+): Promise<void> {
+  await runMediaTool(
+    tools.ffmpegPath,
+    [
+      '-hide_banner', '-nostats', '-y',
+      '-ss', Math.max(0, options.atSec).toFixed(3),
+      '-i', inputPath,
+      '-frames:v', '1',
+      '-vf', "scale='if(gte(iw,ih),-2,max(800,min(2000,iw)))':'if(gte(iw,ih),max(800,min(2000,ih)),-2)'",
+      '-q:v', '2',
+      outputPath,
+    ],
+    {
+      timeoutMs: options.timeoutMs,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    },
+  )
+}
+
 export async function detectSilences(
   tools: FfmpegToolPaths,
   wavPath: string,

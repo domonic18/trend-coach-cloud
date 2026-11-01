@@ -34,7 +34,7 @@ function configIdParam(raw: string): string {
 
 function purposeField(value: unknown): LlmPurpose {
   if (typeof value !== 'string' || !(LLM_PURPOSES as readonly string[]).includes(value)) {
-    throw badRequest('purpose must be content or embedding')
+    throw badRequest('purpose must be content, embedding or image')
   }
   return value as LlmPurpose
 }
@@ -88,6 +88,16 @@ function optionalPrice(body: Record<string, unknown>, key: string): number | nul
   return value
 }
 
+/** 单张图片价格（micros），不随 token 计价，显式 null 视为非法。 */
+function optionalImagePrice(body: Record<string, unknown>): number | undefined {
+  const value = body.imagePriceMicros
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 1_000_000_000) {
+    throw badRequest('imagePriceMicros must be a non-negative integer')
+  }
+  return value
+}
+
 function connectionFields(body: Record<string, unknown>): ConnectionFields {
   const result: ConnectionFields = {}
   const provider = optionalStringField(body, 'provider', { max: 32, pattern: PROVIDER })
@@ -108,6 +118,7 @@ function createInput(body: Record<string, unknown>): LlmConfigInput {
   const protocol = optionalLlmProtocol(body.protocol)
   const inputPrice = optionalPrice(body, 'inputPriceMicrosPer1k')
   const outputPrice = optionalPrice(body, 'outputPriceMicrosPer1k')
+  const imagePrice = optionalImagePrice(body)
   return {
     name: stringField(body, 'name', { max: 100 }),
     provider: stringField(body, 'provider', { max: 32, pattern: PROVIDER }),
@@ -120,6 +131,7 @@ function createInput(body: Record<string, unknown>): LlmConfigInput {
     ...(isActive === undefined ? {} : { isActive }),
     ...(inputPrice === undefined ? {} : { inputPriceMicrosPer1k: inputPrice }),
     ...(outputPrice === undefined ? {} : { outputPriceMicrosPer1k: outputPrice }),
+    ...(imagePrice === undefined ? {} : { imagePriceMicros: imagePrice }),
   }
 }
 
@@ -130,6 +142,7 @@ function patchInput(body: Record<string, unknown>): LlmConfigPatch {
   const isActive = optionalBoolean(body, 'isActive')
   const inputPrice = optionalPrice(body, 'inputPriceMicrosPer1k')
   const outputPrice = optionalPrice(body, 'outputPriceMicrosPer1k')
+  const imagePrice = optionalImagePrice(body)
   return {
     ...connectionFields(body),
     ...(protocol === undefined ? {} : { protocol }),
@@ -139,6 +152,7 @@ function patchInput(body: Record<string, unknown>): LlmConfigPatch {
     ...(isActive === undefined ? {} : { isActive }),
     ...(inputPrice === undefined ? {} : { inputPriceMicrosPer1k: inputPrice }),
     ...(outputPrice === undefined ? {} : { outputPriceMicrosPer1k: outputPrice }),
+    ...(imagePrice === undefined ? {} : { imagePriceMicros: imagePrice }),
   }
 }
 
