@@ -18,7 +18,9 @@
     "db:down": "docker compose down",
     "migrate": "node --env-file-if-exists=.env --import tsx scripts/migrate.ts",
     "seed": "node --env-file-if-exists=.env --import tsx scripts/seed.ts",
-    "test": "node --env-file-if-exists=.env --import tsx --test --test-concurrency=1 test/*.test.ts"
+    "test": "node --env-file-if-exists=.env --import tsx --test --test-concurrency=1 test/*.test.ts",
+    "loadtest": "node scripts/load-test.mjs",
+    "drill": "scripts/restore-drill.sh"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",
