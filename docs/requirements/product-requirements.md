@@ -74,7 +74,7 @@
 - 媒体素材：`POST /v1/admin/content/media-assets` 绑定 `draft` 课程；`PUT .../source` 流式上传 `application/octet-stream`（≤2GiB，可选 `x-file-sha256` 校验）；ffprobe 必须同时检测到视频流与音频流，时长 ≤14400s，否则 `422`；失败素材可重传，不做物理删除（`archived`）。
 - 转码：单码率 H.264/AAC HLS（6s 分片、VOD），产物原子发布；本地文件系统经 `MediaStore` 抽象预留对象存储。播放仅选择 `status=ready` 且 `hls_path` 非空的最新素材。
 - 转写：ffmpeg 抽取 16kHz 单声道 PCM16 WAV；`silencedetect` 切块 ≤480s；调用 MiniMax 长音频转写（`verbose_json` + sentence 时间戳），逐块缓存、每块最多 3 次重试；全部完成后合并为全局时间戳，按 ≤30s 分组写入数据库。已成功块不重复计费。
-- 切分与生成：按 600s 窗口调用内容 LLM（最多 24 窗口），每窗口生成 1–6 个章节、≤8 个知识点；知识点 `excerpt` 必须在转写中逐字锚定，无法锚定标 `excerpt_not_found` 待审，置信度 <0.6 标 `low_confidence`；按标题去重。片段由知识点时间窗与转写片段交集确定性生成，≤120s/4000 字，超限在转写片段边界拆分。每知识点基于对应转写生成 Markdown 文章草稿，走安全 Markdown 与 ≤20000 字校验，失败标 `article_invalid` 不阻塞其它内容。
+- 切分与生成：先基于转写节选与总时长生成全局章节大纲（3–8 章），再按 600s 窗口调用内容 LLM（最多 24 窗口）生成 ≤8 个知识点，`chapterTitle` 从全局大纲中选择；知识点 `excerpt` 必须在转写中逐字锚定，无法锚定标 `excerpt_not_found` 待审，置信度 <0.6 标 `low_confidence`；按标题去重，同一时间范围且摘录互相包含的重复知识点丢弃，无知识点的章节丢弃。片段由知识点时间窗与转写片段交集确定性生成，≤120s/4000 字，超限在转写片段边界拆分。每知识点取前后各 60s 转写上下文生成 200–800 字 Markdown 文章草稿，走安全 Markdown 与 ≤20000 字校验；失败标 `article_invalid`、正文 <200 字标 `article_short`，均不阻塞其它内容。
 - 任务编排：`pipeline_jobs` 状态 `queued/running/succeeded/failed/canceled`，ingest 阶段 `probe→transcode→transcribe→finalize`，generate 阶段 `structure→generate→finalize`；支持取消、重试、心跳与崩溃恢复；同一素材同类型同时最多一个 active job；失败只暴露稳定 `error_code` 与静态文案。
 - 审核与发布：生成结果只写 `draft`，不得自动发布；`apply` 单事务把章节、知识点、文章与片段写入草稿课程；`POST /v1/admin/content/courses/{courseId}/publish` 需显式调用，配置 embedding 时先重建索引，失败返回 `503` 且不翻状态。
 - 边界：内容生产 LLM 只允许管理端会话调用；`sourceRelPath`、`hlsPath`、SHA、ffmpeg stderr、provider 原始响应与生成正文不进列表/预览响应或日志；转写正文只经管理端转写接口返回。
@@ -198,11 +198,11 @@
 
 | 阶段 | 云端交付 | 出口标准 |
 |---|---|---|
-| M1 | 视频上传/转码、带时间戳长音频转写、章节/知识点/片段切分、文章草稿、人工发布与索引 | 1 门课程结构化上线，可检索；已落地，真实 ASR/LLM 待后台录入密钥验收 |
+| M1 | 视频上传/转码、带时间戳长音频转写、章节/知识点/片段切分、文章草稿、人工发布与索引 | 1 门课程结构化上线，可检索；已落地并完成真实链路验收（ASR、content LLM、embedding） |
 | M2 | 六个接口、设备码授权、签名 HLS、契约测试 | 对接清单验收通过，插件联调完成 |
 | M3 | 后台管理、账号与体系数据、学习进度 | 内容可运营、用户可管理 |
-| M4.2 | 语音转写（MiniMax ASR）、限流与密钥配置 | 契约测试通过；真实 MiniMax 需后台录入 ASR 密钥 |
-| M6 | 公测加固：限流、压测、备份、合规 | 公测放行；已落地限流补齐、压测脚本、恢复演练与合规清单，账号注销/数据删除与真实密钥验收待完成 |
+| M4.2 | 语音转写（MiniMax ASR）、限流与密钥配置 | 契约测试通过；真实 MiniMax 已验收（后台录入密钥） |
+| M6 | 公测加固：限流、压测、备份、合规 | 公测放行；已落地限流补齐、压测脚本、恢复演练与合规清单，账号注销/数据删除待完成 |
 
 ## 9. 待冻结事项
 
