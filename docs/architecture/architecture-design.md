@@ -125,7 +125,7 @@ PostgreSQL ── 课程 / 章节 / 知识点 / 片段 / 文章 / 向量 / 用�
 
 - 两个环境严格隔离数据库、媒体存储、令牌密钥与 CDN 配置。
 - 签名密钥、数据库口令、CDN 密钥、ASR/LLM 密钥通过环境变量/密钥管理注入，不入库、不入镜像。
-- 镜像内置 ffmpeg/ffprobe；`PIPELINE_STORAGE_DIR`（源文件与工作区）与 `PIPELINE_HLS_DIR`（对外 HLS）挂载持久卷且同卷，保证 HLS 原子 rename。
+- 镜像内置 ffmpeg/ffprobe；`PIPELINE_STORAGE_DIR`（源文件与工作区）与 `PIPELINE_HLS_DIR`（对外 HLS）位于同一挂载点（宿主 `workspace/pipeline` 挂到 `/data`），保证 HLS 原子 rename。所有运行期持久化数据按 ai-invest 约定放在仓库根 `workspace/`，整体 gitignore。
 
 ## 5. 数据模型
 
@@ -236,11 +236,12 @@ sequenceDiagram
 #### 存储布局与抽象
 
 ```text
-PIPELINE_STORAGE_DIR/
-  sources/<assetId>/source
-  work/<assetId>/{audio.wav,chunks/,hls/}
-PIPELINE_HLS_DIR/
-  hls/<assetId>/{index.m3u8,seg_00000.ts}
+workspace/pipeline/            # 容器内挂载为 /data
+  storage/                     # PIPELINE_STORAGE_DIR
+    sources/<assetId>/source
+    work/<assetId>/{audio.wav,chunks/,hls/}
+  hls/                         # PIPELINE_HLS_DIR
+    hls/<assetId>/{index.m3u8,seg_00000.ts}
 ```
 
 - `MediaStore` 接口负责创建目录、流式写、SHA-256、原子 rename、清理与 HLS 校验；当前实现为本地文件系统，预留 S3/MinIO。

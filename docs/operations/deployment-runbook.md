@@ -1,6 +1,6 @@
 # 部署 Runbook
 
-版本：v0.3（2026-11-01）
+版本：v0.4（2026-11-01）
 
 面向运维与开发：把云端服务部署到一台 Linux 主机，覆盖 TLS、数据库迁移、备份恢复、媒体 CDN、视频管线与本地 staging 验证。监控见 [监控与告警](./monitoring.md)。
 
@@ -9,8 +9,10 @@
 ```
 Internet ── Caddy(80/443, 自动 TLS) ── app(Fastify, 3939, 镜像内置 ffmpeg/ffprobe)
                                           ├── db(PostgreSQL 17 + pgvector)
-                                          ├── pipeline-data volume（/data：源视频、工作区、HLS）
-                                          └── 媒体：生产走 CDN；仅本地 staging 由 app 的 /media 提供
+                                          ├── workspace/postgres（数据库数据）
+                                          ├── workspace/pipeline（挂载到 /data：源视频、工作区、HLS）
+                                          ├── workspace/caddy（证书与配置）
+                                          └── 媒体：生产走 CDN；仅本地 staging 由 workspace/media 挂载提供
 Prometheus(可选) ── 抓取 app:/metrics（Bearer METRICS_TOKEN）
 Grafana(可选) ── 查询 Prometheus
 ```
@@ -21,6 +23,7 @@ Grafana(可选) ── 查询 Prometheus
 - 公网域名（A/AAAA 指向主机），放行 80/443；数据库与 3939 不对公网暴露。
 - 生产媒体域名与对象存储/CDN 已就绪（见 §7）。
 - 管线磁盘：按源视频与 HLS 预留容量，至少为单次最大上传（默认 2GiB）的 3–4 倍；`PIPELINE_STORAGE_DIR` 与 `PIPELINE_HLS_DIR` 必须同卷。
+- 所有运行期持久化数据位于仓库根 `workspace/`（已 gitignore）：`postgres/`、`pipeline/`、`caddy/`、`media/`、`backups/`。整个目录可直接随主机迁移或备份；Linux 上 app 容器以 node（uid 1000）写入，先执行 `chown -R 1000:1000 workspace/pipeline workspace/media`。
 
 ## 2. 准备配置与密钥
 
@@ -86,7 +89,7 @@ curl -fsS -X POST https://$DOMAIN/v1/auth/device/approve \
 ```
 
 - 内容管理控制台：浏览器打开 `https://$DOMAIN/admin/`，用 operator/admin 账号登录，管理课程、章节、知识点、文章与片段。镜像构建已包含 `web/admin` 并输出到 `dist/admin`；服务端只在 `dist/admin/index.html` 存在时挂载 `/admin/`，缺失时该路径 404 而 API 不受影响。前端是纯静态 SPA，会话令牌存 `sessionStorage`，关标签即失效，不使用 Cookie，因此 `/admin/` 反向代理无需额外鉴权配置（接口本身仍校验 Bearer）。
-- 视频建课：「视频建课」页创建 draft 课程与素材 → 上传 → 处理 → 查看转写 → 生成 → 预览 → 应用到草稿 → 发布。发布前会按配置重建索引；索引失败返回 `503` 且课程保持 draft。源视频默认保留在 `pipeline_data` 卷，清理策略未冻结前不要手工删除 `sources/`。
+- 视频建课：「视频建课」页创建 draft 课程与素材 → 上传 → 处理 → 查看转写 → 生成 → 预览 → 应用到草稿 → 发布。发布前会按配置重建索引；索引失败返回 `503` 且课程保持 draft。源视频默认保留在 `workspace/pipeline/storage/sources/`，清理策略未冻结前不要手工删除 `sources/`。
 
 ## 4. TLS
 
@@ -104,14 +107,14 @@ Caddy 为 `$DOMAIN` 自动申请与续期证书（Let's Encrypt / ZeroSSL）。�
 
 ## 6. 备份与恢复
 
-备份（默认保留 14 天，输出到 `backups/`）：
+备份（默认保留 14 天，输出到 `workspace/backups/`）：
 
 ```bash
 scripts/backup.sh
 # 可覆盖：ENV_FILE、BACKUP_DIR、BACKUP_RETENTION_DAYS
 ```
 
-建议 cron（每天 03:17，并把 `backups/` 同步到异机/对象存储）：
+建议 cron（每天 03:17，并把 `workspace/backups/` 同步到异机/对象存储）：
 
 ```cron
 17 3 * * * cd /srv/trend-coach-cloud && ./scripts/backup.sh >> /var/log/trend-coach-backup.log 2>&1
@@ -120,7 +123,7 @@ scripts/backup.sh
 恢复（会停 app、覆盖数据库，需显式确认）：
 
 ```bash
-RESTORE_CONFIRM=yes scripts/restore.sh backups/trend-coach-20261031T031700Z.sql.gz
+RESTORE_CONFIRM=yes scripts/restore.sh workspace/backups/trend-coach-20261031T031700Z.sql.gz
 ```
 
 演练：至少每季度在 staging 恢复一次，并跑一次设备授权 + 检索 + 播放冒烟。
@@ -148,7 +151,7 @@ curl -sI https://media.example.com/hls/index.m3u8 -H 'Origin: https://example.co
 curl -sI https://media.example.com/hls/seg0.ts -H 'Range: bytes=0-99' | grep -iE 'HTTP/|content-range|accept-ranges'
 ```
 
-仅本地 staging 验证时，设置 `MEDIA_HOST_DIR`（挂载到容器 `/media`）与 `MEDIA_LOCAL_DIR=/media`，并把 `MEDIA_BASE_URL` 设为 `https://$DOMAIN/media`；此时 Range、CORS 与令牌校验由 app 负责。
+仅本地 staging 验证时，默认把 `workspace/media` 挂载到容器 `/media`（可用 `MEDIA_HOST_DIR` 覆盖）并设 `MEDIA_LOCAL_DIR=/media`，同时把 `MEDIA_BASE_URL` 设为 `https://$DOMAIN/media`；此时 Range、CORS 与令牌校验由 app 负责。
 
 ## 8. 健康检查与观测
 
@@ -182,7 +185,8 @@ APP_ENV=staging
 PUBLIC_BASE_URL=https://localhost
 MEDIA_BASE_URL=https://localhost/media
 DOMAIN=localhost
-MEDIA_HOST_DIR=../dsh-plugin-trend-coach/spike/media
+# 默认即 ./workspace/media；要复用插件样片可覆盖为 ../dsh-plugin-trend-coach/spike/media
+MEDIA_HOST_DIR=./workspace/media
 MEDIA_LOCAL_DIR=/media
 PIPELINE_ENABLED=true
 # 两目录必须在同一个 /media 挂载点内，HLS 才能原子 rename
@@ -227,4 +231,5 @@ curl -fsS -H "Authorization: Bearer $SESSION_TOKEN" \
 - `sources/<assetId>/source` 默认保留；`work/<assetId>/` 成功或失败后清理。
 - 磁盘告警阈值建议 ≤75%；不要手工删除 `sources/`，除非已确认版权与重试需求。
 - `PIPELINE_MAX_CONCURRENT_JOBS` 默认 1；提高前先评估 CPU 与内存，转码阻塞会影响 API 延迟。
-- 默认使用挂到 `/data` 的 `pipeline_data` 命名卷；镜像预建 `/data/pipeline`、`/data/hls` 并归属 `node`（uid 1000），卷会继承属主。改用 `PIPELINE_HOST_DIR` 绑定宿主目录时先 `chown -R 1000:1000`；不要让两目录落在不同挂载点，否则 HLS 的原子 rename 会因跨设备失败。
+- 管线数据默认落在 `workspace/pipeline/`，compose 将其整体挂到 `/data`（`storage/` 与 `hls/` 同挂载点，HLS 才能原子 rename）。镜像预建 `/data/storage`、`/data/hls` 并归属 `node`（uid 1000）；bind mount 不会继承该属主，Linux 上需先 `chown -R 1000:1000 workspace/pipeline`。
+- `workspace/postgres` 与 `workspace/caddy` 同样以 bind mount 持久化；不要把手写文件放进 `workspace/`，该目录整体不入库。

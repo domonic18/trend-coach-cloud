@@ -9,6 +9,8 @@ coverage/
 *.log
 .DS_Store
 *.tgz
+# 运行期持久化数据统一放仓库根 workspace/（与 ai-invest 约定一致）。
+workspace/
 backups/
 media/*
 !media/.gitkeep

@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 ENV_FILE=${ENV_FILE:-.env.prod}
 COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.prod.yml}
-BACKUP_DIR=${BACKUP_DIR:-backups}
+BACKUP_DIR=${BACKUP_DIR:-workspace/backups}
 RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-14}
 
 if [[ ! -f "$ENV_FILE" ]]; then

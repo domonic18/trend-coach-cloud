@@ -125,11 +125,13 @@ npm test                       # 单元 + 契约测试（自动重置测试库�
 
 本地媒体需在 `.env` 设置 `MEDIA_LOCAL_DIR` 指向含 `hls/index.m3u8` 的目录；生产媒体走 CDN，不设该项。配置项与默认值见 `.env.example`。
 
-视频建课管线默认 `PIPELINE_ENABLED=false`。启用需本机安装 `ffmpeg`/`ffprobe`，并设置 `PIPELINE_STORAGE_DIR` 与 `PIPELINE_HLS_DIR`（两目录同卷；设置 `MEDIA_LOCAL_DIR` 时必须与其相同）。真实转写与文章生成还需 `ASR_API_KEY` 与 `CONTENT_LLM_BASE_URL/MODEL/API_KEY`；缺失时对应阶段返回 `503`，不影响服务启动。管理端「视频建课」页按“上传 → 处理 → 转写 → 生成 → 应用 → 发布”操作，生成内容始终先落 `draft`。
+运行期持久化数据（数据库、管线、证书、媒体、备份）统一放在仓库根 `workspace/`，该目录已 gitignore，可整体迁移或备份。
+
+视频建课管线默认 `PIPELINE_ENABLED=false`。启用需本机安装 `ffmpeg`/`ffprobe`，并设置 `PIPELINE_STORAGE_DIR` 与 `PIPELINE_HLS_DIR`（默认 `workspace/pipeline/{storage,hls}`；两目录同卷，设置 `MEDIA_LOCAL_DIR` 时必须与其相同）。真实转写与文章生成还需 `ASR_API_KEY` 与 `CONTENT_LLM_BASE_URL/MODEL/API_KEY`；缺失时对应阶段返回 `503`，不影响服务启动。管理端「视频建课」页按“上传 → 处理 → 转写 → 生成 → 应用 → 发布”操作，生成内容始终先落 `draft`。
 
 ## 部署
 
-生产使用 Docker Compose + Caddy（自动 TLS），数据库为 pgvector；镜像内置 ffmpeg，管线源文件与 HLS 通过卷持久化。迁移在应用启动时执行。
+生产使用 Docker Compose + Caddy（自动 TLS），数据库为 pgvector；镜像内置 ffmpeg，数据库、管线源文件与 HLS、Caddy 证书统一 bind mount 到 `workspace/`。迁移在应用启动时执行。
 
 ```bash
 cp .env.prod.example .env.prod   # 填域名、数据库与两个密钥

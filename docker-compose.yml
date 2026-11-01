@@ -9,7 +9,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ./workspace/postgres:/var/lib/postgresql/data
       - ./docker/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U trend_coach -d trend_coach"]
@@ -17,5 +17,4 @@ services:
       timeout: 3s
       retries: 20
 
-volumes:
-  pgdata:
+# 持久化数据统一由 ./workspace 承接，不使用命名卷。

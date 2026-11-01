@@ -12,7 +12,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?在 .env.prod 设置 POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:?在 .env.prod 设置 POSTGRES_DB}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ./workspace/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -35,11 +35,11 @@ services:
       db:
         condition: service_healthy
     volumes:
-      # 仅本地 staging 验证需要；生产媒体走 CDN，不挂载。
-      # 本地 staging 的 PIPELINE_HLS_DIR=/media，故需可写。
-      - ${MEDIA_HOST_DIR:-./media}:/media
+      # 仅本地 staging 验证需要；生产媒体走 CDN。本地 staging 的
+      # PIPELINE_HLS_DIR=/media，故以可写方式挂载。
+      - ${MEDIA_HOST_DIR:-./workspace/media}:/media
       # 管线工作区与 HLS 输出必须在同一挂载点内，HLS 才能原子 rename。
-      - ${PIPELINE_HOST_DIR:-pipeline_data}:/data
+      - ./workspace/pipeline:/data
     networks: [edge, backend]
 
   caddy:
@@ -56,16 +56,12 @@ services:
       DOMAIN: ${DOMAIN:?在 .env.prod 设置 DOMAIN}
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - ./workspace/caddy/data:/data
+      - ./workspace/caddy/config:/config
     networks: [edge]
 
 networks:
   edge:
   backend:
 
-volumes:
-  pgdata:
-  pipeline_data:
-  caddy_data:
-  caddy_config:
+# 持久化数据统一由 ./workspace 承接（postgres / pipeline / caddy），不使用命名卷。

@@ -56,13 +56,14 @@ src/                 服务实现（accounts/auth/content/kb/playback/events/med
 web/admin/           React + Vite 管理端（构建产物 dist/admin）
 migrations/          SQL 迁移（004 为视频管线）
 data/seed.json       本地种子数据
+workspace/           运行期持久化数据（gitignore；postgres/pipeline/caddy/media/backups）
 openapi/             对外契约
 test/                单元、契约与管线 E2E
 scripts/             migrate/seed 入口
 docs/                需求、架构、规范、结构说明
 ```
 
-管线存储（默认 `$PIPELINE_STORAGE_DIR`）：`sources/<assetId>/source` 存源视频，`work/<assetId>/` 为转码工作区，`$PIPELINE_HLS_DIR/hls/<assetId>/` 为对外签名的 HLS。源目录不得位于媒体根下；两目录需同卷以支持原子 rename。
+管线存储（默认 `workspace/pipeline/storage` 与 `workspace/pipeline/hls`，容器内为 `/data/storage` 与 `/data/hls`）：`sources/<assetId>/source` 存源视频，`work/<assetId>/` 为转码工作区，`hls/<assetId>/` 为对外签名的 HLS。源目录不得位于媒体根下；两目录需同卷以支持原子 rename。所有持久化数据一律落在 `workspace/`，不得写入其他仓库路径或提交入库。
 
 ## 改动规则
 

@@ -1,6 +1,6 @@
 # 项目结构
 
-版本：v0.6（2026-11-01）
+版本：v0.7（2026-11-01）
 
 本仓库已进入 M1 实现阶段：单进程模块化单体（Fastify + PostgreSQL/pgvector），业务接口、鉴权、媒体签名、体系与进度、账号与后台登录、内容管理与 React 管理端、语音转写、视频→课程管线与契约测试已落地。管线覆盖流式上传、ffmpeg HLS、长音频转写、切分、文章草稿与人工发布；真实 ASR/LLM 待密钥验收。本文件描述现状与已确定的目标结构，避免后续实现随意扩散。
 
@@ -21,6 +21,12 @@ trend-coach-cloud/
 │   └── 004_pipeline.sql                       # 素材状态、任务、转写、生成
 ├── data/
 │   └── seed.json                              # 本地/CI 种子数据（不含真实版权内容）
+├── workspace/                                 # 运行期持久化数据（已 gitignore，不入库）
+│   ├── postgres/                              # PostgreSQL 数据
+│   ├── pipeline/{storage,hls}/                # 源视频/工作区与 HLS（同一挂载点）
+│   ├── caddy/{data,config}/                   # 证书与配置
+│   ├── media/                                 # 本地 staging 媒体
+│   └── backups/                               # scripts/backup.sh 输出
 ├── scripts/
 │   ├── migrate.ts                             # npm run migrate [-- --reset]
 │   └── seed.ts                                # npm run seed
@@ -63,12 +69,12 @@ trend-coach-cloud/
 └── docs/                                      # 本文档体系
 ```
 
-管线存储（不在仓库内）：
+管线存储（`workspace/` 整体 gitignore；容器内为 `/data/storage` 与 `/data/hls`）：
 
 ```text
-PIPELINE_STORAGE_DIR/sources/<assetId>/source
-PIPELINE_STORAGE_DIR/work/<assetId>/{audio.wav,chunks/,hls/}
-PIPELINE_HLS_DIR/hls/<assetId>/{index.m3u8,seg_00000.ts}
+workspace/pipeline/storage/sources/<assetId>/source
+workspace/pipeline/storage/work/<assetId>/{audio.wav,chunks/,hls/}
+workspace/pipeline/hls/hls/<assetId>/{index.m3u8,seg_00000.ts}
 ```
 
 ## 2. 目标结构（M1/M3 之后）
@@ -90,7 +96,7 @@ deploy/           # staging/production 部署与密钥注入说明（不含密�
 | 检索排序/阈值参数 | `src/config.ts` 配置项，可调；默认值写进架构文档 |
 | 媒体签名逻辑 | `src/playback/`，与 CDN 配置分离 |
 | 管线任务与生成 | `src/pipeline/`；任务表见 `004_pipeline.sql`，不把业务状态塞进 `options` |
-| 源视频与 HLS | `PIPELINE_STORAGE_DIR` / `PIPELINE_HLS_DIR`，绝不写入仓库；两目录同卷 |
+| 源视频与 HLS | `workspace/pipeline/{storage,hls}`（已 gitignore）；容器内由 `/data` 单挂载点提供，两目录必须同卷 |
 | 契约测试夹具 | `data/seed.json`，与插件 `spike/fixtures.json` 的响应形状对齐 |
 | 文档 | `docs/<类别>/`，索引见 `docs/ai-context/docs-overview.md` |
 
