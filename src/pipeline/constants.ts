@@ -1,6 +1,6 @@
 import { MAX_ARTICLE, MAX_TEXT, MAX_TITLE } from '../content/service.js'
 
-export const PROMPT_VERSION = 'm1-v1'
+export const PROMPT_VERSION = 'm1-v2'
 
 /** MiniMax 单次转写上限约 500s，留出余量。 */
 export const ASR_CHUNK_MAX_SEC = 480
@@ -12,6 +12,12 @@ export const WINDOW_OVERLAP_MS = 30_000
 export const MAX_TITLE_CHARS = MAX_TITLE
 export const MAX_TEXT_CHARS = MAX_TEXT
 export const MAX_ARTICLE_CHARS = MAX_ARTICLE
+
+/** 低于该长度的文章判为内容单薄，标待审；实测 m1-v1 中位数约 200 字。 */
+export const ARTICLE_MIN_CHARS = 200
+
+/** 文章生成时向知识点时间窗前后各取一段转写作为上下文，避免只有一句话可写。 */
+export const ARTICLE_CONTEXT_MS = 60_000
 
 export const PIPELINE_ERRORS = {
   sourceMissing: 'source_missing',
@@ -32,4 +38,5 @@ export const REVIEW_REASONS = {
   excerptNotFound: 'excerpt_not_found',
   lowConfidence: 'low_confidence',
   articleInvalid: 'article_invalid',
+  articleShort: 'article_short',
 } as const

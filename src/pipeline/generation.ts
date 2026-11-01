@@ -3,6 +3,8 @@ import type { PipelineConfig } from '../config.js'
 import { assertSafeMarkdown, MAX_ARTICLE } from '../content/service.js'
 import { codePointLength } from '../http/validation.js'
 import {
+  ARTICLE_CONTEXT_MS,
+  ARTICLE_MIN_CHARS,
   MAX_TEXT_CHARS,
   MAX_TITLE_CHARS,
   PIPELINE_ERRORS,
@@ -16,7 +18,7 @@ import type { PipelineJob } from './jobs.js'
 import { LlmError, type LlmClient } from './llm.js'
 import {
   articlePrompt,
-  chapterPrompt,
+  outlinePrompt,
   parseArticleResponse,
   parseChapterResponse,
   parsePointResponse,
@@ -165,6 +167,24 @@ export function buildGenerationWindows(
     throw new PipelineFailure(PIPELINE_ERRORS.budgetExceeded, false)
   }
   return windows
+}
+
+/** 全局大纲只看转写节选：均匀采样，避免长视频超出模型输入上限。 */
+export function buildOutlineDigest(
+  segments: TranscriptSegment[],
+  maxSentences = 150,
+): TranscriptSegment[] {
+  if (segments.length <= maxSentences) return segments
+  return Array.from(
+    { length: maxSentences },
+    (_, index) => segments[Math.floor((index * segments.length) / maxSentences)],
+  ).filter((segment): segment is TranscriptSegment => segment !== undefined)
+}
+
+/** 窗口没有命中任何给定章节时，按时长比例落到对应章节，避免全部堆进第一章。 */
+function chapterIndexForWindow(windowIndex: number, windowCount: number, chapterCount: number): number {
+  if (chapterCount <= 1) return 0
+  return Math.min(chapterCount - 1, Math.floor((windowIndex / windowCount) * chapterCount))
 }
 
 function splitPiece(piece: Piece, maxMs: number): Piece[] {
@@ -337,43 +357,41 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
     if (windows.length === 0) throw new PipelineFailure(PIPELINE_ERRORS.generationFailed, false)
 
     await progress('structure', 5)
-    const windowChapters = await mapLimit(
-      windows,
-      config.llmConcurrency,
+    const durationMs = Math.max(0, (segments[segments.length - 1]?.endMs ?? 0) - (segments[0]?.startMs ?? 0))
+    const outline = await ask(
+      llm,
+      outlinePrompt(buildOutlineDigest(segments), durationMs),
+      parseChapterResponse,
       signal,
-      window => ask(llm, chapterPrompt(window.segments), parseChapterResponse, signal),
     )
 
     const chapterDrafts: ChapterDraft[] = []
     const chapterByTitle = new Map<string, string>()
-    for (const chapters of windowChapters) {
-      for (const chapter of chapters) {
-        const normalized = normalizeForMatch(chapter.title)
-        if (chapterByTitle.has(normalized)) continue
-        const key = `ch${String(chapterDrafts.length + 1).padStart(2, '0')}`
-        chapterDrafts.push({ key, title: chapter.title, position: chapterDrafts.length })
-        chapterByTitle.set(normalized, key)
-      }
+    for (const chapter of outline) {
+      const normalized = normalizeForMatch(chapter.title)
+      if (chapterByTitle.has(normalized)) continue
+      const key = `ch${String(chapterDrafts.length + 1).padStart(2, '0')}`
+      chapterDrafts.push({ key, title: chapter.title, position: chapterDrafts.length })
+      chapterByTitle.set(normalized, key)
     }
+    if (chapterDrafts.length === 0) throw new PipelineFailure(PIPELINE_ERRORS.generationFailed, false)
+    const chapterTitles = chapterDrafts.map(chapter => chapter.title)
     await progress('structure', 25)
 
     const windowPoints = await mapLimit(
       windows,
       config.llmConcurrency,
       signal,
-      (window, index) => {
-        const titles = (windowChapters[index] ?? []).map(chapter => chapter.title)
-        return ask(llm, pointPrompt(window.segments, titles), parsePointResponse, signal)
-      },
+      window => ask(llm, pointPrompt(window.segments, chapterTitles), parsePointResponse, signal),
     )
     await progress('structure', 45)
 
     const points: PointDraft[] = []
     const seenTitles = new Set<string>()
+    const seenRanges = new Map<string, string[]>()
     for (const [windowIndex, suggestions] of windowPoints.entries()) {
       const window = windows[windowIndex]
       if (window === undefined) continue
-      const windowTitles = (windowChapters[windowIndex] ?? []).map(chapter => chapter.title)
       for (const suggestion of suggestions) {
         const normalized = normalizeForMatch(suggestion.title)
         if (seenTitles.has(normalized)) continue
@@ -383,24 +401,23 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
         if (range === null) range = locateExcerpt(window.segments, suggestion.title)
         if (range === null) continue
 
+        // 同一时间段常被重复提取：措辞不同但摘录互相包含的视为同一知识点。
+        const rangeKey = `${range.startMs}:${range.endMs}`
+        const excerptKey = normalizeForMatch(suggestion.excerpt)
+        const priorExcerpts = seenRanges.get(rangeKey) ?? []
+        if (
+          excerptKey !== '' &&
+          priorExcerpts.some(text => text.includes(excerptKey) || excerptKey.includes(text))
+        ) {
+          continue
+        }
+
         if (points.length >= config.generationMaxKps) {
           throw new PipelineFailure(PIPELINE_ERRORS.budgetExceeded, false)
         }
 
-        let chapterKey: string | undefined
-        const direct = chapterByTitle.get(normalizeForMatch(suggestion.chapterTitle))
-        if (direct !== undefined) {
-          chapterKey = direct
-        } else {
-          for (const title of windowTitles) {
-            const key = chapterByTitle.get(normalizeForMatch(title))
-            if (key !== undefined) {
-              chapterKey = key
-              break
-            }
-          }
-        }
-        chapterKey ??= chapterDrafts[0]?.key
+        const chapterKey = chapterByTitle.get(normalizeForMatch(suggestion.chapterTitle))
+          ?? chapterDrafts[chapterIndexForWindow(windowIndex, windows.length, chapterDrafts.length)]?.key
         if (chapterKey === undefined) throw new PipelineFailure(PIPELINE_ERRORS.internal, true)
 
         const reviewReasons: string[] = []
@@ -410,6 +427,7 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
         }
 
         seenTitles.add(normalized)
+        if (excerptKey !== '') seenRanges.set(rangeKey, [...priorExcerpts, excerptKey])
         points.push({
           key: `kp${String(points.length + 1).padStart(2, '0')}`,
           chapterKey,
@@ -430,6 +448,21 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
       throw new PipelineFailure(PIPELINE_ERRORS.budgetExceeded, false)
     }
 
+    // 全局大纲里没有被任何知识点命中的章节丢弃，避免学员点进空章。
+    const usedChapterKeys = new Set(points.map(point => point.chapterKey))
+    const keptChapters = chapterDrafts.filter(chapter => usedChapterKeys.has(chapter.key))
+    const chapterKeyMap = new Map<string, string>()
+    keptChapters.forEach((chapter, index) => {
+      const key = `ch${String(index + 1).padStart(2, '0')}`
+      chapterKeyMap.set(chapter.key, key)
+      chapter.key = key
+      chapter.position = index
+    })
+    for (const point of points) {
+      point.chapterKey = chapterKeyMap.get(point.chapterKey) ?? keptChapters[0]?.key ?? point.chapterKey
+    }
+    chapterDrafts.splice(0, chapterDrafts.length, ...keptChapters)
+
     await progress('generate', 55)
     const segmentDrafts = buildSegmentDrafts(
       points.map(point => ({
@@ -446,7 +479,11 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
 
     let completed = 0
     await mapLimit(points, config.llmConcurrency, signal, async point => {
-      const relevant = pointsInRange(segments, point.startMs, point.endMs)
+      const relevant = pointsInRange(
+        segments,
+        Math.max(0, point.startMs - ARTICLE_CONTEXT_MS),
+        point.endMs + ARTICLE_CONTEXT_MS,
+      )
       const input = truncateText(relevant.map(segment => segment.text).join('\n'), ARTICLE_INPUT_MAX_CHARS)
       let markdown: string | null = null
       for (let attempt = 0; attempt < 2 && markdown === null; attempt += 1) {
@@ -471,6 +508,10 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
         point.reviewReasons.push(REVIEW_REASONS.articleInvalid)
       } else {
         point.articleMarkdown = markdown
+        if (codePointLength(markdown) < ARTICLE_MIN_CHARS) {
+          point.needsReview = true
+          point.reviewReasons.push(REVIEW_REASONS.articleShort)
+        }
       }
       completed += 1
       await progress('generate', 60 + Math.round((completed / points.length) * 30))

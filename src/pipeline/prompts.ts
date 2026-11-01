@@ -18,11 +18,12 @@ export interface PromptRequest {
   user: string
 }
 
-const CHAPTER_SYSTEM = [
-  '你负责把课程视频的转写整理成分章结构。',
+const OUTLINE_SYSTEM = [
+  '你负责为整门课程视频划出章节大纲。',
   '只输出 JSON 对象，格式为 {"chapters":[{"title":"章节标题"}]}。',
-  '输出 1–6 个按讲解顺序排列的章节，标题为 2–20 字的中文短语，不要编号。',
-  '不要输出解释、Markdown 代码块或额外字段。',
+  '按讲解顺序输出 3–8 个章节：总时长 30 分钟以内 3–6 个，超过 30 分钟 5–8 个。',
+  '每个章节应是一个独立、体量相当的讲解单元，不要把同一主题拆成多章，也不要遗漏结尾内容。',
+  '标题为 2–20 字的中文短语，不要编号。不要输出解释、Markdown 代码块或额外字段。',
 ].join('\n')
 
 const POINT_SYSTEM = [
@@ -38,13 +39,15 @@ const ARTICLE_SYSTEM = [
   '你负责把一段课程转写整理成可发布的 Markdown 文章。',
   '只输出 JSON 对象，格式为 {"markdown":"# 标题\\n\\n正文"}。',
   '只依据给定转写写作，不补充转写中没有的事实；使用标题、段落、列表组织内容；',
+  '正文 200–800 字：先说明概念与判断依据，再结合转写中的例子展开，最后给出可执行的结论；',
   '禁止 HTML、脚本、iframe 与 javascript: 链接。不要输出解释或额外字段。',
 ].join('\n')
 
-export function chapterPrompt(window: TranscriptSentence[]): PromptRequest {
+export function outlinePrompt(digest: TranscriptSentence[], durationMs: number): PromptRequest {
+  const minutes = Math.max(1, Math.round(durationMs / 60_000))
   return {
-    system: CHAPTER_SYSTEM,
-    user: `课程转写：\n${formatTranscript(window)}`,
+    system: OUTLINE_SYSTEM,
+    user: `课程总时长：${minutes} 分钟\n课程转写节选：\n${formatTranscript(digest)}`,
   }
 }
 
@@ -95,7 +98,7 @@ function textValue(value: unknown, maxChars: number): string | null {
 export function parseChapterResponse(value: unknown): ChapterSuggestion[] {
   const root = record(value)
   const list = root?.chapters
-  if (!Array.isArray(list) || list.length === 0 || list.length > 6) {
+  if (!Array.isArray(list) || list.length === 0 || list.length > 10) {
     throw new Error('invalid chapters')
   }
   const chapters: ChapterSuggestion[] = []

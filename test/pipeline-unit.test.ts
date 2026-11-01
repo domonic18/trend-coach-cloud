@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { planAudioChunks, planWindows } from '../src/pipeline/chunks.js'
+import { buildOutlineDigest } from '../src/pipeline/generation.js'
 import {
   chapterIdFor,
   draftSegmentIdFor,
   knowledgePointIdFor,
   randomId,
 } from '../src/pipeline/ids.js'
+import { parseChapterResponse } from '../src/pipeline/prompts.js'
 import { parseSilences } from '../src/pipeline/silence.js'
 import {
   joinText,
@@ -75,6 +77,29 @@ test('生成窗口按转写片段回退并保留重叠', () => {
   assert.equal(windows[windows.length - 1]?.endMs, 200_000)
   assert.ok(windows.every(window => window.sentences.length > 0))
   assert.deepEqual(planWindows([], { windowMs: 60_000 }), [])
+})
+
+test('全局大纲摘要均匀采样且保持顺序', () => {
+  const segments = Array.from({ length: 400 }, (_, index) => ({
+    startMs: index * 1000,
+    endMs: index * 1000 + 900,
+    text: `句子${index}`,
+  }))
+  const digest = buildOutlineDigest(segments, 100)
+  assert.equal(digest.length, 100)
+  assert.equal(digest[0]?.text, '句子0')
+  for (let index = 1; index < digest.length; index += 1) {
+    assert.ok((digest[index]?.startMs ?? 0) > (digest[index - 1]?.startMs ?? 0))
+  }
+  assert.equal(buildOutlineDigest(segments, 500).length, 400)
+})
+
+test('全局大纲接受多章节并拒绝超限', () => {
+  const titles = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({ title: `章节${index + 1}` }))
+  assert.equal(parseChapterResponse({ chapters: titles(8) }).length, 8)
+  assert.throws(() => parseChapterResponse({ chapters: titles(11) }))
+  assert.throws(() => parseChapterResponse({ chapters: [] }))
 })
 
 test('转写解析兼容秒/毫秒时间键与整段退化', () => {

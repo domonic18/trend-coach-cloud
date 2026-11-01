@@ -195,7 +195,9 @@ const fakeLlm: LlmClient = {
     if (request.system.includes('章节')) {
       return parse({ chapters: [{ title: '趋势反转' }] })
     }
-    return parse({ markdown: '# 趋势反转\n\n趋势反转需要成交量确认。' })
+    return parse({
+      markdown: `# 趋势反转\n\n${'趋势反转需要成交量同步放大来确认，避免把反弹误判为反转。'.repeat(10)}`,
+    })
   },
 }
 
