@@ -18,7 +18,7 @@ export interface SegmentFilters {
 
 export interface JobFilters {
   courseId?: string
-  kind?: 'ingest' | 'generate'
+  kind?: 'ingest' | 'generate' | 'illustrate'
   status?: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
   limit?: number
 }
@@ -55,7 +55,10 @@ export const qk = {
   session: ['auth', 'session'] as const,
   courses: ['content', 'courses'] as const,
   course: (courseId: string) => ['content', 'course', courseId] as const,
-  article: (knowledgePointId: string) => ['content', 'article', knowledgePointId] as const,
+  chapterArticle: (courseId: string, chapterId: string) =>
+    ['content', 'chapter-article', courseId, chapterId] as const,
+  figures: (courseId: string, chapterId: string) =>
+    ['content', 'figures', courseId, chapterId] as const,
   segments: (filters: SegmentFilters) => ['segments', filters] as const,
   assets: (courseId: string | null, status?: string) => ['pipeline', 'assets', courseId, status ?? ''] as const,
   jobs: (filters: JobFilters) => ['pipeline', 'jobs', filters] as const,

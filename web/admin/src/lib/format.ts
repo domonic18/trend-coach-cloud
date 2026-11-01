@@ -47,6 +47,11 @@ export function formatPricePer1k(micros: number | null): string {
   return `$${(micros / 1_000_000).toFixed(6)}/1k`
 }
 
+export function formatPricePerImage(micros: number | null): string {
+  if (micros === null) return '—'
+  return `$${(micros / 1_000_000).toFixed(4)}/张`
+}
+
 export function formatIso(value: string | null): string {
   if (value === null) return '—'
   return dayjs(value).format('YYYY-MM-DD HH:mm:ss')

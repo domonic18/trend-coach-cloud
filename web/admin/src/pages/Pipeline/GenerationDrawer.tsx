@@ -36,7 +36,7 @@ const pointColumns: ColumnsType<PreviewPoint> = [
       if (point.needsReview) {
         return <Tag color="gold">待审：{point.reviewReasons.join('、')}</Tag>
       }
-      return point.hasArticle ? <Tag color="green">正常</Tag> : <Tag>无文章草稿</Tag>
+      return <Tag color="green">正常</Tag>
     },
   },
 ]
@@ -83,7 +83,7 @@ export function GenerationDrawer({
       void message.success(
         result.alreadyApplied
           ? '该生成结果此前已应用'
-          : `已应用：章节 ${Object.keys(result.applied.chapters).length}、知识点 ${Object.keys(result.applied.knowledgePoints).length}、片段 ${Object.keys(result.applied.segments).length}`,
+          : `已应用：章节 ${result.chapters.length}、教材 ${result.chapterArticles}、知识点 ${result.knowledgePoints.length}、图示 ${result.figuresApplied}、片段 ${result.segments.length}`,
       )
     },
   })
@@ -160,10 +160,12 @@ export function GenerationDrawer({
               { key: 'course', label: '课程', children: generation.courseId },
               { key: 'model', label: '模型', children: generation.model },
               { key: 'prompt', label: '提示词', children: generation.promptVersion },
-              { key: 'chapters', label: '章节', children: generation.chapters },
-              { key: 'points', label: '知识点', children: generation.knowledgePoints },
-              { key: 'segments', label: '片段', children: generation.segments },
-              { key: 'review', label: '待审', children: generation.needsReview },
+              { key: 'chapters', label: '章节', children: generation.counts.chapters },
+              { key: 'articles', label: '教材', children: generation.counts.chapterArticles },
+              { key: 'points', label: '知识点', children: generation.counts.knowledgePoints },
+              { key: 'figures', label: '图示', children: generation.counts.figures },
+              { key: 'segments', label: '片段', children: generation.counts.segments },
+              { key: 'review', label: '待审', children: generation.counts.needsReview },
               { key: 'created', label: '创建时间', children: formatDateTime(generation.createdAt) },
             ]}
           />
@@ -173,7 +175,23 @@ export function GenerationDrawer({
             <Space wrap>
               {data.chapters.length === 0 ? <Typography.Text type="secondary">无</Typography.Text> : null}
               {data.chapters.map(chapter => (
-                <Tag key={chapter.key}>{chapter.title}</Tag>
+                <Tag key={chapter.key}>
+                  {chapter.title}
+                  {chapter.hasArticle ? ` · 教材 ${chapter.articleLength} 字` : ' · 无教材'}
+                  {chapter.figureCount > 0 ? ` · 图示 ${chapter.figureCount}` : ''}
+                </Tag>
+              ))}
+            </Space>
+          </div>
+
+          <div>
+            <Typography.Title level={5}>图示</Typography.Title>
+            <Space wrap>
+              {data.figures.length === 0 ? <Typography.Text type="secondary">无</Typography.Text> : null}
+              {data.figures.map(figure => (
+                <Tag key={figure.key} color={figure.needsReview ? 'gold' : undefined}>
+                  {figure.caption} · {figure.kind} · {figure.candidateCount} 候选
+                </Tag>
               ))}
             </Space>
           </div>

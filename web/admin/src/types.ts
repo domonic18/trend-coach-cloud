@@ -25,7 +25,8 @@ export interface CourseSummary extends Course {
   chapterCount: number
   knowledgePointCount: number
   segmentCount: number
-  articleCount: number
+  chapterArticleCount: number
+  figureCount: number
 }
 
 export interface ArticleMeta {
@@ -43,13 +44,14 @@ export interface KnowledgePoint {
   title: string
   position: number
   segmentCount: number
-  article: ArticleMeta | null
 }
 
 export interface Chapter {
   chapterId: string
   title: string
   position: number
+  article: ArticleMeta | null
+  figureCount: number
   knowledgePoints: KnowledgePoint[]
 }
 
@@ -123,12 +125,12 @@ export interface MediaAssetList {
   limit: number
 }
 
-export type PipelineJobKind = 'ingest' | 'generate'
+export type PipelineJobKind = 'ingest' | 'generate' | 'illustrate'
 export type PipelineJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
 
 export interface PipelineJob {
   jobId: string
-  assetId: string
+  assetId: string | null
   courseId: string
   kind: PipelineJobKind
   status: PipelineJobStatus
@@ -178,6 +180,15 @@ export interface TranscriptPage {
 
 export type GenerationStatus = 'draft' | 'applied' | 'discarded' | 'failed'
 
+export interface GenerationCounts {
+  chapters: number
+  knowledgePoints: number
+  chapterArticles: number
+  figures: number
+  segments: number
+  needsReview: number
+}
+
 export interface GenerationSummary {
   generationId: string
   assetId: string
@@ -185,18 +196,21 @@ export interface GenerationSummary {
   status: GenerationStatus
   promptVersion: string
   model: string
-  chapters: number
-  knowledgePoints: number
-  segments: number
-  needsReview: number
+  counts: GenerationCounts
   createdAt: number
-  updatedAt: number
   appliedAt: number | null
 }
 
 export interface GenerationPreview {
   generation: GenerationSummary
-  chapters: { key: string; title: string; position: number }[]
+  chapters: {
+    key: string
+    title: string
+    position: number
+    articleLength: number
+    hasArticle: boolean
+    figureCount: number
+  }[]
   knowledgePoints: {
     key: string
     chapterKey: string
@@ -205,33 +219,80 @@ export interface GenerationPreview {
     confidence: number
     needsReview: boolean
     reviewReasons: string[]
-    hasArticle: boolean
+  }[]
+  figures: {
+    key: string
+    chapterKey: string
+    kind: string
+    caption: string
+    candidateCount: number
+    needsReview: boolean
   }[]
   segments: { key: string; pointKey: string; title: string; startMs: number; endMs: number }[]
 }
 
-export interface AppliedContent {
-  chapters: Record<string, string>
-  knowledgePoints: Record<string, string>
-  segments: Record<string, string>
-}
-
 export interface GenerationApplyResult {
-  generation: GenerationSummary
-  applied: AppliedContent
+  generationId: string
   alreadyApplied: boolean
+  courseId: string
+  chapters: { chapterId: string; key: string }[]
+  knowledgePoints: { knowledgePointId: string; key: string }[]
+  figures: { figureId: string; key: string }[]
+  segments: { segmentId: string; key: string }[]
+  chapterArticles: number
+  figuresApplied: number
 }
 
 export interface CoursePublishResult {
   courseId: string
-  status: 'published'
-  articlesPublished: number
-  segmentsPublished: number
+  published: true
   indexed: boolean
   embedded: number
+  counts: {
+    chapters: number
+    knowledgePoints: number
+    chapterArticles: number
+    figures: number
+    segments: number
+  }
 }
 
-export type LlmPurpose = 'content' | 'embedding'
+export type FigureStatus = 'planned' | 'rendering' | 'ready' | 'failed' | 'published'
+export type FigureCandidateStatus = 'rendering' | 'ready' | 'failed'
+
+export interface FigureCandidate {
+  candidateId: string
+  status: FigureCandidateStatus
+  width: number | null
+  height: number | null
+  bytes: number | null
+  sourceSec: number | null
+  errorCode: string | null
+  previewUrl: string | null
+}
+
+export interface Figure {
+  figureId: string
+  chapterId: string
+  kind: 'keyframe' | 'generated'
+  caption: string
+  status: FigureStatus
+  selectedCandidateId: string | null
+  prompt: string | null
+  model: string | null
+  seed: number | null
+  reviewReasons: string[]
+  candidates: FigureCandidate[]
+}
+
+export interface FigureList {
+  figures: Figure[]
+  total: number
+  offset: number
+  limit: number
+}
+
+export type LlmPurpose = 'content' | 'embedding' | 'image'
 export type LlmProtocol = 'openai' | 'anthropic'
 export type AsrProtocol = 'minimax' | 'openai'
 export type ModelTestStatus = 'success' | 'failed'
@@ -250,6 +311,7 @@ export interface LlmModelConfig {
   isActive: boolean
   inputPriceMicrosPer1k: number | null
   outputPriceMicrosPer1k: number | null
+  imagePriceMicros: number
   lastTestedAt: number | null
   lastTestStatus: ModelTestStatus | null
   lastTestError: string | null
@@ -281,6 +343,9 @@ export type AiTaskKey =
   | 'content.outline'
   | 'content.points'
   | 'content.article'
+  | 'content.chapter_article'
+  | 'content.figure_plan'
+  | 'image.figure'
   | 'embedding.query'
   | 'embedding.segment'
   | 'asr.longform'

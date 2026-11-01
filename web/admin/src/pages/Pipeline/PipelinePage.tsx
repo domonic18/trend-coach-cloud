@@ -84,9 +84,10 @@ export function PipelinePage() {
       ])
       modal.success({
         title: '发布完成',
-        content: `已发布文章 ${result.articlesPublished} 篇、片段 ${result.segmentsPublished} 个；${
-          result.indexed ? `索引已更新（${result.embedded} 条）` : '未配置向量模型，仅词法检索'
-        }。`,
+        content: `已发布章节 ${result.counts.chapters} 章、教材 ${result.counts.chapterArticles} 篇、`
+          + `图示 ${result.counts.figures} 张、片段 ${result.counts.segments} 个；${
+            result.indexed ? `索引已更新（${result.embedded} 条）` : '未配置向量模型，仅词法检索'
+          }。`,
       })
     },
   })

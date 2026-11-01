@@ -20,6 +20,8 @@ const STATUS: Record<string, { color: string; label: string }> = {
   success: { color: 'green', label: '通过' },
   error: { color: 'red', label: '失败' },
   fallback: { color: 'gold', label: '已降级' },
+  planned: { color: 'default', label: '待生成' },
+  rendering: { color: 'processing', label: '生成中' },
 }
 
 export const STAGE_LABELS: Record<string, string> = {
@@ -29,6 +31,8 @@ export const STAGE_LABELS: Record<string, string> = {
   transcribe: '转写',
   structure: '结构提取',
   generate: '内容生成',
+  figure_plan: '图示规划',
+  figure_render: '图示渲染',
   finalize: '收尾',
   done: '完成',
 }

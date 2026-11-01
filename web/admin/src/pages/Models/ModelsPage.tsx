@@ -38,7 +38,7 @@ import {
 } from '../../api'
 import { PageHeader } from '../../components/PageHeader'
 import { StatusTag } from '../../components/StatusTag'
-import { errorText, formatDateTime, formatIso, formatPricePer1k } from '../../lib/format'
+import { errorText, formatDateTime, formatIso, formatPricePer1k, formatPricePerImage } from '../../lib/format'
 import { qk } from '../../lib/queryKeys'
 import type {
   AiConfigHealth,
@@ -50,6 +50,12 @@ import type {
 
 interface LlmFormValues extends LlmConfigInput {
   apiKey?: string
+}
+
+function purposeLabel(purpose: LlmPurpose): string {
+  if (purpose === 'embedding') return '向量检索'
+  if (purpose === 'image') return '图片生成'
+  return '内容生成'
 }
 
 export function ModelsPage() {
@@ -139,7 +145,7 @@ function LlmPanel() {
       width: 160,
       render: (_value, config) => (
         <div className="segment-cell">
-          <span>{config.purpose === 'embedding' ? '向量检索' : '内容生成'}</span>
+          <span>{purposeLabel(config.purpose)}</span>
           <Typography.Text type="secondary">{config.protocol}</Typography.Text>
         </div>
       ),
@@ -168,18 +174,20 @@ function LlmPanel() {
       ),
     },
     {
-      title: '价格 / 千 token',
+      title: '价格',
       key: 'price',
       width: 190,
       render: (_value, config) => (
-        config.inputPriceMicrosPer1k === null && config.outputPriceMicrosPer1k === null
-          ? <Typography.Text type="secondary">未配置</Typography.Text>
-          : (
-            <div className="segment-cell">
-              <span>入 {formatPricePer1k(config.inputPriceMicrosPer1k)}</span>
-              <span>出 {formatPricePer1k(config.outputPriceMicrosPer1k)}</span>
-            </div>
-          )
+        config.purpose === 'image'
+          ? <span>{formatPricePerImage(config.imagePriceMicros)}</span>
+          : config.inputPriceMicrosPer1k === null && config.outputPriceMicrosPer1k === null
+            ? <Typography.Text type="secondary">未配置</Typography.Text>
+            : (
+              <div className="segment-cell">
+                <span>入 {formatPricePer1k(config.inputPriceMicrosPer1k)}</span>
+                <span>出 {formatPricePer1k(config.outputPriceMicrosPer1k)}</span>
+              </div>
+            )
       ),
     },
     {
@@ -302,6 +310,7 @@ function LlmConfigModal({
         isActive: true,
         inputPriceMicrosPer1k: null,
         outputPriceMicrosPer1k: null,
+        imagePriceMicros: 120_000,
       })
       return
     }
@@ -317,6 +326,7 @@ function LlmConfigModal({
       isActive: config.isActive,
       inputPriceMicrosPer1k: config.inputPriceMicrosPer1k,
       outputPriceMicrosPer1k: config.outputPriceMicrosPer1k,
+      imagePriceMicros: config.imagePriceMicros,
     })
   }, [config, form, open])
 
@@ -334,6 +344,7 @@ function LlmConfigModal({
         isActive: values.isActive,
         inputPriceMicrosPer1k: values.inputPriceMicrosPer1k ?? null,
         outputPriceMicrosPer1k: values.outputPriceMicrosPer1k ?? null,
+        imagePriceMicros: values.imagePriceMicros ?? 120_000,
       }
       return config === null
         ? createLlmConfig(input as LlmConfigInput)
@@ -371,6 +382,7 @@ function LlmConfigModal({
               options={[
                 { value: 'content', label: '内容生成' },
                 { value: 'embedding', label: '向量检索' },
+                { value: 'image', label: '图片生成' },
               ]}
             />
           </Form.Item>
@@ -424,6 +436,13 @@ function LlmConfigModal({
             <InputNumber min={0} precision={0} style={{ width: 220 }} placeholder="例如 2000" />
           </Form.Item>
         </Space>
+        <Form.Item
+          name="imagePriceMicros"
+          label="图片单价（微美元/张）"
+          extra="仅图片生成用途生效；默认 120000，约 ¥0.12。图片预算按成功张数累计。"
+        >
+          <InputNumber min={0} precision={0} style={{ width: 220 }} placeholder="例如 120000" />
+        </Form.Item>
         <Space size={24}>
           <Form.Item name="isDefault" valuePropName="checked">
             <Checkbox>设为默认配置</Checkbox>
@@ -481,7 +500,7 @@ function BindingEditor({
     setFallback(binding.fallbackConfigId ?? '')
   }, [binding.primaryConfigId, binding.fallbackConfigId, binding.updatedAt])
 
-  const purposeLabel = binding.purpose === 'embedding' ? '向量检索' : '内容生成'
+  const purposeLabelText = purposeLabel(binding.purpose)
   const options = configs
     .filter(config => config.purpose === binding.purpose && config.isActive)
     .map(config => ({ value: config.configId, label: `${config.name} · ${config.model}` }))
@@ -509,7 +528,7 @@ function BindingEditor({
       <div className="binding-task">
         <Space size={6} wrap>
           <Typography.Text strong>{binding.label}</Typography.Text>
-          <Tag>{purposeLabel}</Tag>
+          <Tag>{purposeLabelText}</Tag>
         </Space>
         <Typography.Text type="secondary" code>{binding.taskKey}</Typography.Text>
       </div>

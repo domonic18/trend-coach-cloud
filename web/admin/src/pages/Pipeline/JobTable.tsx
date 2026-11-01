@@ -59,7 +59,8 @@ export function JobTable({
             <Typography.Text code>{jobId.slice(0, 12)}</Typography.Text>
           </Tooltip>
           <Typography.Text type="secondary">
-            {job.kind === 'ingest' ? '转写' : '内容生成'} · 尝试 {job.attempts}/{job.maxAttempts}
+            {job.kind === 'ingest' ? '转写' : job.kind === 'illustrate' ? '图示生成' : '内容生成'}
+            {' · '}尝试 {job.attempts}/{job.maxAttempts}
           </Typography.Text>
           {job.errorCode === null ? null : (
             <Typography.Text type="danger">错误：{job.errorCode}</Typography.Text>

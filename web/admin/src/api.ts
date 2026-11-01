@@ -15,13 +15,14 @@ import type {
   CoursePublishResult,
   CourseSummary,
   CourseTree,
+  Figure,
+  FigureList,
   LlmModelConfig,
   LlmProtocol,
   LlmPurpose,
   ModelTestResult,
   GenerationApplyResult,
   GenerationPreview,
-  GenerationSummary,
   MediaAsset,
   MediaAssetList,
   MediaAssetStatus,
@@ -93,12 +94,23 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const payload: unknown = await response.json().catch(() => undefined)
   if (!response.ok) {
     if (response.status === 401) notifyUnauthorized()
-    const message = typeof payload === 'object' && payload !== null && typeof (payload as { error?: unknown }).error === 'string'
-      ? (payload as { error: string }).error
-      : `请求失败（${response.status}）`
-    throw new ApiError(response.status, message)
+    throw new ApiError(response.status, errorMessage(payload, response.status))
   }
   return payload as T
+}
+
+/** 云端错误既可能是字符串，也可能是 { code, message }。 */
+function errorMessage(payload: unknown, status: number): string {
+  if (typeof payload === 'object' && payload !== null) {
+    const error = (payload as { error?: unknown }).error
+    if (typeof error === 'string') return error
+    if (typeof error === 'object' && error !== null) {
+      const { code, message } = error as { code?: unknown; message?: unknown }
+      if (typeof message === 'string') return message
+      if (typeof code === 'string') return code
+    }
+  }
+  return `请求失败（${status}）`
 }
 
 export async function login(username: string, password: string): Promise<SessionUser> {
@@ -181,22 +193,77 @@ export async function patchKnowledgePoint(
   await request('PATCH', `/v1/admin/content/knowledge-points/${encodeURIComponent(knowledgePointId)}`, input)
 }
 
-export async function getArticle(knowledgePointId: string): Promise<Article | null> {
+export async function getChapterArticle(
+  courseId: string,
+  chapterId: string,
+): Promise<Article | null> {
   return (await request<{ article: Article | null }>(
     'GET',
-    `/v1/admin/content/knowledge-points/${encodeURIComponent(knowledgePointId)}/article`,
+    `/v1/admin/content/courses/${encodeURIComponent(courseId)}/chapters/${encodeURIComponent(chapterId)}/article`,
   )).article
 }
 
-export async function putArticle(
-  knowledgePointId: string,
+export async function putChapterArticle(
+  courseId: string,
+  chapterId: string,
   input: { markdown: string; status: ContentStatus },
 ): Promise<Article> {
   return (await request<{ article: Article }>(
     'PUT',
-    `/v1/admin/content/knowledge-points/${encodeURIComponent(knowledgePointId)}/article`,
+    `/v1/admin/content/courses/${encodeURIComponent(courseId)}/chapters/${encodeURIComponent(chapterId)}/article`,
     input,
   )).article
+}
+
+export async function enqueueIllustrate(
+  courseId: string,
+  chapterIds?: string[],
+): Promise<PipelineJob> {
+  return (await request<{ job: PipelineJob }>(
+    'POST',
+    `/v1/admin/content/courses/${encodeURIComponent(courseId)}/illustrate`,
+    chapterIds === undefined ? {} : { chapterIds },
+  )).job
+}
+
+export async function listFigures(filters: {
+  courseId?: string
+  chapterId?: string
+  offset?: number
+  limit?: number
+}): Promise<FigureList> {
+  return request<FigureList>('GET', `/v1/admin/content/figures${queryString(filters)}`)
+}
+
+export async function selectFigure(figureId: string, candidateId: string): Promise<Figure> {
+  return (await request<{ figure: Figure }>(
+    'POST',
+    `/v1/admin/content/figures/${encodeURIComponent(figureId)}/select`,
+    { candidateId },
+  )).figure
+}
+
+export async function regenerateFigure(figureId: string): Promise<Figure> {
+  return (await request<{ figure: Figure }>(
+    'POST',
+    `/v1/admin/content/figures/${encodeURIComponent(figureId)}/regenerate`,
+  )).figure
+}
+
+export async function deleteFigure(figureId: string): Promise<void> {
+  await request<undefined>('DELETE', `/v1/admin/content/figures/${encodeURIComponent(figureId)}`)
+}
+
+/** 候选图接口要 Bearer，<img> 带不了请求头，只能用 fetch 转 object URL。 */
+export async function getFigureCandidateBlob(candidateId: string): Promise<string> {
+  const headers: Record<string, string> = {}
+  if (token !== null) headers.authorization = `Bearer ${token}`
+  const response = await fetch(`/v1/admin/content/figure-candidates/${encodeURIComponent(candidateId)}`, { headers })
+  if (!response.ok) {
+    if (response.status === 401) notifyUnauthorized()
+    throw new ApiError(response.status, `图片加载失败（${response.status}）`)
+  }
+  return URL.createObjectURL(await response.blob())
 }
 
 export async function listSegments(filters: {
@@ -438,11 +505,11 @@ export async function applyGeneration(generationId: string): Promise<GenerationA
   )
 }
 
-export async function discardGeneration(generationId: string): Promise<GenerationSummary> {
-  return (await request<{ generation: GenerationSummary }>(
+export async function discardGeneration(generationId: string): Promise<void> {
+  await request<{ discarded: true }>(
     'POST',
     `/v1/admin/content/generations/${encodeURIComponent(generationId)}/discard`,
-  )).generation
+  )
 }
 
 export async function publishCourse(courseId: string): Promise<CoursePublishResult> {
@@ -465,6 +532,7 @@ export interface LlmConfigInput {
   /** 微美元/千 token；null 表示未配置，成本估算不猜测。 */
   inputPriceMicrosPer1k?: number | null
   outputPriceMicrosPer1k?: number | null
+  imagePriceMicros?: number
 }
 
 export async function listLlmConfigs(): Promise<LlmModelConfig[]> {

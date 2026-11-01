@@ -1,4 +1,11 @@
-import { DatabaseOutlined, EditOutlined, FileTextOutlined, PlusOutlined, RocketOutlined } from '@ant-design/icons'
+import {
+  DatabaseOutlined,
+  EditOutlined,
+  FileTextOutlined,
+  PictureOutlined,
+  PlusOutlined,
+  RocketOutlined,
+} from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   App,
@@ -33,6 +40,7 @@ import { StatusTag } from '../../components/StatusTag'
 import { qk } from '../../lib/queryKeys'
 import type { Chapter, ContentStatus, CourseTree, KnowledgePoint } from '../../types'
 import { ArticleDrawer } from './ArticleDrawer'
+import { FiguresDrawer } from './FiguresDrawer'
 
 interface CourseInfoForm {
   title: string
@@ -55,7 +63,8 @@ export function CourseEditor({ courseId }: { courseId: string }) {
   const queryClient = useQueryClient()
   const { message, modal } = App.useApp()
   const [form] = Form.useForm<CourseInfoForm>()
-  const [articlePoint, setArticlePoint] = useState<KnowledgePoint | null>(null)
+  const [articleChapter, setArticleChapter] = useState<Chapter | null>(null)
+  const [figuresChapter, setFiguresChapter] = useState<Chapter | null>(null)
   const [chapterModal, setChapterModal] = useState(false)
   const [pointModal, setPointModal] = useState<{ chapterId: string } | null>(null)
   const [rename, setRename] = useState<EditableChapter | EditablePoint | null>(null)
@@ -96,9 +105,9 @@ export function CourseEditor({ courseId }: { courseId: string }) {
       await invalidate()
       modal.success({
         title: '发布完成',
-        content: `已发布 ${result.articlesPublished} 篇文章、${result.segmentsPublished} 个片段；${
-          result.indexed ? `索引已更新（${result.embedded} 条）` : '索引未更新'
-        }。`,
+        content: `已发布 ${result.counts.chapters} 章、${result.counts.chapterArticles} 篇教材、`
+          + `${result.counts.figures} 张图示、${result.counts.segments} 个片段；`
+          + `${result.indexed ? `索引已更新（${result.embedded} 条）` : '索引未更新'}。`,
       })
     },
   })
@@ -227,14 +236,39 @@ export function CourseEditor({ courseId }: { courseId: string }) {
             items={data.chapters.map((chapter, index) => ({
               key: chapter.chapterId,
               label: (
-                <Space>
+                <Space wrap>
                   <Typography.Text strong>{chapter.title}</Typography.Text>
                   <Tag bordered={false}>{chapter.chapterId}</Tag>
+                  {chapter.article === null ? (
+                    <Tag bordered={false}>无教材</Tag>
+                  ) : (
+                    <>
+                      <StatusTag value={chapter.article.status} />
+                      <Typography.Text type="secondary">v{chapter.article.version}</Typography.Text>
+                    </>
+                  )}
+                  <Typography.Text type="secondary">{chapter.figureCount} 张图示</Typography.Text>
                   <Typography.Text type="secondary">{chapter.knowledgePoints.length} 个知识点</Typography.Text>
                 </Space>
               ),
               extra: (
                 <Space onClick={event => event.stopPropagation()}>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<FileTextOutlined />}
+                    onClick={() => setArticleChapter(chapter)}
+                  >
+                    教材
+                  </Button>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<PictureOutlined />}
+                    onClick={() => setFiguresChapter(chapter)}
+                  >
+                    图示
+                  </Button>
                   <Button
                     type="text"
                     size="small"
@@ -261,15 +295,6 @@ export function CourseEditor({ courseId }: { courseId: string }) {
                     <List.Item
                       actions={[
                         <Button
-                          key="article"
-                          type="link"
-                          size="small"
-                          icon={<FileTextOutlined />}
-                          onClick={() => setArticlePoint(point)}
-                        >
-                          文章
-                        </Button>,
-                        <Button
                           key="rename"
                           type="link"
                           size="small"
@@ -279,19 +304,7 @@ export function CourseEditor({ courseId }: { courseId: string }) {
                       ]}
                     >
                       <List.Item.Meta
-                        title={
-                          <Space wrap>
-                            <span>{point.title}</span>
-                            {point.article === null ? (
-                              <Tag bordered={false}>无文章</Tag>
-                            ) : (
-                              <>
-                                <StatusTag value={point.article.status} />
-                                <Typography.Text type="secondary">v{point.article.version}</Typography.Text>
-                              </>
-                            )}
-                          </Space>
-                        }
+                        title={<span>{point.title}</span>}
                         description={
                           <Space size={8}>
                             <Typography.Text type="secondary">{point.knowledgePointId}</Typography.Text>
@@ -311,9 +324,16 @@ export function CourseEditor({ courseId }: { courseId: string }) {
 
       <ArticleDrawer
         courseId={courseId}
-        point={articlePoint}
-        open={articlePoint !== null}
-        onClose={() => setArticlePoint(null)}
+        chapter={articleChapter}
+        open={articleChapter !== null}
+        onClose={() => setArticleChapter(null)}
+      />
+
+      <FiguresDrawer
+        courseId={courseId}
+        chapter={figuresChapter}
+        open={figuresChapter !== null}
+        onClose={() => setFiguresChapter(null)}
       />
 
       <CreateModal

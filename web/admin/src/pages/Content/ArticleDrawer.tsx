@@ -1,22 +1,22 @@
-import { BoldOutlined, LinkOutlined, OrderedListOutlined, UnorderedListOutlined } from '@ant-design/icons'
+import { BoldOutlined, LinkOutlined, OrderedListOutlined, PictureOutlined, UnorderedListOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { App, Button, Drawer, Input, Select, Space, Spin, Tag, Tooltip, Typography } from 'antd'
 import { useEffect, useRef, useState } from 'react'
-import { getArticle, putArticle } from '../../api'
+import { getChapterArticle, listFigures, putChapterArticle } from '../../api'
 import { MarkdownPreview } from '../../lib/markdown'
 import { qk } from '../../lib/queryKeys'
-import type { ContentStatus, KnowledgePoint } from '../../types'
+import type { Chapter, ContentStatus } from '../../types'
 
 const MAX_LENGTH = 20_000
 
 export function ArticleDrawer({
   courseId,
-  point,
+  chapter,
   open,
   onClose,
 }: {
   courseId: string
-  point: KnowledgePoint | null
+  chapter: Chapter | null
   open: boolean
   onClose: () => void
 }) {
@@ -26,12 +26,18 @@ export function ArticleDrawer({
   const [status, setStatus] = useState<ContentStatus>('draft')
   const [dirty, setDirty] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
-  const pointId = point?.knowledgePointId ?? ''
+  const chapterId = chapter?.chapterId ?? ''
 
   const article = useQuery({
-    queryKey: qk.article(pointId),
-    queryFn: () => getArticle(pointId),
-    enabled: open && pointId !== '',
+    queryKey: qk.chapterArticle(courseId, chapterId),
+    queryFn: () => getChapterArticle(courseId, chapterId),
+    enabled: open && chapterId !== '',
+  })
+
+  const figures = useQuery({
+    queryKey: qk.figures(courseId, chapterId),
+    queryFn: () => listFigures({ courseId, chapterId, limit: 100 }),
+    enabled: open && chapterId !== '',
   })
 
   useEffect(() => {
@@ -39,22 +45,22 @@ export function ArticleDrawer({
     setMarkdown(article.data?.markdown ?? '')
     setStatus(article.data?.status ?? 'draft')
     setDirty(false)
-  }, [article.data, open, pointId])
+  }, [article.data, open, chapterId])
 
   useEffect(() => {
     if (!open) setDirty(false)
   }, [open])
 
   const save = useMutation({
-    mutationFn: () => putArticle(pointId, { markdown, status }),
+    mutationFn: () => putChapterArticle(courseId, chapterId, { markdown, status }),
     onSuccess: async () => {
       setDirty(false)
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: qk.article(pointId) }),
+        queryClient.invalidateQueries({ queryKey: qk.chapterArticle(courseId, chapterId) }),
         queryClient.invalidateQueries({ queryKey: qk.course(courseId) }),
         queryClient.invalidateQueries({ queryKey: qk.courses }),
       ])
-      void message.success('文章已保存')
+      void message.success('教材已保存')
       onClose()
     },
   })
@@ -93,8 +99,13 @@ export function ArticleDrawer({
     })
   }
 
-  const title = point?.title ?? '文章'
+  const insertFigure = (figureId: string, caption: string): void => {
+    insert(`![${caption}](figure:${figureId})`)
+  }
+
+  const title = chapter?.title ?? '章节教材'
   const meta = article.data
+  const readyFigures = (figures.data?.figures ?? []).filter(figure => figure.status !== 'failed')
 
   return (
     <Drawer
@@ -105,7 +116,7 @@ export function ArticleDrawer({
       title={
         <Space wrap>
           <span>{title}</span>
-          <Tag bordered={false}>{pointId}</Tag>
+          <Tag bordered={false}>{chapterId}</Tag>
         </Space>
       }
       extra={
@@ -151,6 +162,26 @@ export function ArticleDrawer({
               <Tooltip title="插入链接">
                 <Button size="small" type="text" icon={<LinkOutlined />} onClick={() => insert('[链接文本](https://)')} />
               </Tooltip>
+              <Tooltip title="插入图示">
+                <Select
+                  size="small"
+                  showSearch
+                  optionFilterProp="label"
+                  placeholder="插入图示"
+                  value={null}
+                  suffixIcon={<PictureOutlined />}
+                  style={{ width: 180 }}
+                  loading={figures.isLoading}
+                  options={readyFigures.map(figure => ({
+                    value: figure.figureId,
+                    label: figure.caption,
+                  }))}
+                  onChange={value => {
+                    const figure = readyFigures.find(entry => entry.figureId === value)
+                    if (figure !== undefined) insertFigure(figure.figureId, figure.caption)
+                  }}
+                />
+              </Tooltip>
               <span className="article-count">
                 {markdown.length} / {MAX_LENGTH}
               </span>
@@ -165,7 +196,7 @@ export function ArticleDrawer({
                 setMarkdown(event.target.value)
                 setDirty(true)
               }}
-              placeholder="使用 Markdown 编写知识点正文。"
+              placeholder="使用 Markdown 编写章节教材；图片只允许 ![说明](figure:<figureId>)。"
               autoSize={false}
             />
           </div>

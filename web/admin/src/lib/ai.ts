@@ -3,7 +3,10 @@ import type { AiRunSource, AiTaskKey } from '../types'
 export const AI_TASK_LABELS: Record<AiTaskKey, string> = {
   'content.outline': '内容大纲',
   'content.points': '知识点提取',
-  'content.article': '知识点文章',
+  'content.article': '知识点文章（旧）',
+  'content.chapter_article': '章节教材',
+  'content.figure_plan': '图示规划',
+  'image.figure': '图示生成',
   'embedding.query': '检索向量',
   'embedding.segment': '片段向量',
   'asr.longform': '语音转写',

@@ -873,3 +873,70 @@ body {
     justify-content: flex-end;
   }
 }
+
+.figure-card {
+  border: 1px solid var(--admin-border);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.figure-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.figure-candidates {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.figure-candidate {
+  border: 1px solid var(--admin-border);
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.figure-candidate.is-selected {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 1px #1677ff inset;
+}
+
+.figure-candidate-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 140px;
+  border: none;
+  background: rgba(0, 0, 0, 0.02);
+  border-radius: 6px;
+  cursor: pointer;
+  overflow: hidden;
+  padding: 0;
+}
+
+.figure-candidate-image:disabled {
+  cursor: default;
+}
+
+.figure-candidate-image img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.figure-candidate-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
