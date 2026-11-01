@@ -58,7 +58,10 @@ export interface PipelineConfig {
   generationMaxArticles: number
 }
 
+export type LlmProtocol = 'openai' | 'anthropic'
+
 export interface LlmConfig {
+  protocol: LlmProtocol
   baseUrl: string
   model: string
   apiKey?: string

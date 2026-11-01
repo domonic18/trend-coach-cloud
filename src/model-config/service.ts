@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import type { Pool } from 'pg'
 import { normalizeAsrBaseUrl } from '../asr/provider.js'
-import type { AsrConfig, LlmConfig, LlmTuning } from '../config.js'
+import type { AsrConfig, LlmConfig, LlmProtocol, LlmTuning } from '../config.js'
 import { badRequest, conflict, notFound } from '../errors.js'
 import { createEmbeddingProvider } from '../kb/embedding.js'
 import { createLlmClient, type LlmClient } from '../pipeline/llm.js'
@@ -11,6 +11,7 @@ export const LLM_PURPOSES = ['content', 'embedding'] as const
 export type LlmPurpose = (typeof LLM_PURPOSES)[number]
 
 export type AsrProtocol = 'minimax' | 'openai'
+export type { LlmProtocol }
 
 export const EMBEDDING_DIMENSION = 1024
 
@@ -18,7 +19,7 @@ export interface LlmConfigDto {
   configId: string
   name: string
   provider: string
-  protocol: 'openai'
+  protocol: LlmProtocol
   baseUrl: string
   model: string
   purpose: LlmPurpose
@@ -56,7 +57,7 @@ export interface ModelTestResult {
 export interface LlmConfigInput {
   name: string
   provider: string
-  protocol?: 'openai'
+  protocol?: LlmProtocol
   baseUrl: string
   model: string
   purpose: LlmPurpose
@@ -68,7 +69,7 @@ export interface LlmConfigInput {
 export interface LlmConfigPatch {
   name?: string
   provider?: string
-  protocol?: 'openai'
+  protocol?: LlmProtocol
   baseUrl?: string
   model?: string
   purpose?: LlmPurpose
@@ -138,6 +139,7 @@ function normalizeApiBase(raw: string): string {
   return raw.trim()
     .replace(/\/+$/, '')
     .replace(/\/(?:v1\/)?chat\/completions$/i, '')
+    .replace(/\/v1\/messages$/i, '')
     .replace(/\/embeddings$/i, '')
     .replace(/\/(?:v1\/)?audio\/transcriptions$/i, '')
     .replace(/\/(?:v1\/)?speech_to_text$/i, '')
@@ -154,6 +156,13 @@ function requireHttpUrl(raw: string): string {
     throw badRequest('baseUrl must be an absolute http(s) URL')
   }
   return normalizeApiBase(url.toString())
+}
+
+/** Anthropic Messages 没有 embeddings 端点，embedding 用途只能走 OpenAI 兼容协议。 */
+function requireProtocolForPurpose(protocol: LlmProtocol, purpose: LlmPurpose): void {
+  if (purpose === 'embedding' && protocol !== 'openai') {
+    throw badRequest('embedding config requires the openai protocol')
+  }
 }
 
 function errorDetail(error: unknown): string {
@@ -179,6 +188,8 @@ export class ModelConfigService {
 
   async createLlm(input: LlmConfigInput): Promise<LlmConfigDto> {
     const configId = `llmc_${randomBytes(8).toString('hex')}`
+    const protocol = input.protocol ?? 'openai'
+    requireProtocolForPurpose(protocol, input.purpose)
     const encrypted = input.apiKey === undefined || input.apiKey === ''
       ? null
       : encryptSecret(input.apiKey, this.options.encryptionKey)
@@ -197,12 +208,13 @@ export class ModelConfigService {
         `INSERT INTO llm_configs
            (config_id, name, provider, protocol, base_url, model, api_key_encrypted,
             purpose, is_default, is_active)
-         VALUES ($1, $2, $3, 'openai', $4, $5, $6, $7, $8, $9)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING *`,
         [
           configId,
           input.name,
           input.provider,
+          protocol,
           requireHttpUrl(input.baseUrl),
           input.model,
           encrypted,
@@ -224,6 +236,8 @@ export class ModelConfigService {
   async updateLlm(configId: string, patch: LlmConfigPatch): Promise<LlmConfigDto> {
     const existing = await this.getLlmRow(configId)
     const purpose = patch.purpose ?? (existing.purpose as LlmPurpose)
+    const protocol = patch.protocol ?? (existing.protocol as LlmProtocol)
+    requireProtocolForPurpose(protocol, purpose)
     const becomesDefault = patch.isDefault === true
     const isActive = patch.isActive ?? existing.is_active
     const client = await this.pool.connect()
@@ -243,12 +257,13 @@ export class ModelConfigService {
         `UPDATE llm_configs SET
            name = COALESCE($2, name),
            provider = COALESCE($3, provider),
-           base_url = COALESCE($4, base_url),
-           model = COALESCE($5, model),
-           api_key_encrypted = $6,
-           purpose = $7,
-           is_default = $8,
-           is_active = $9,
+           protocol = $4,
+           base_url = COALESCE($5, base_url),
+           model = COALESCE($6, model),
+           api_key_encrypted = $7,
+           purpose = $8,
+           is_default = $9,
+           is_active = $10,
            updated_at = now()
          WHERE config_id = $1
          RETURNING *`,
@@ -256,6 +271,7 @@ export class ModelConfigService {
           configId,
           patch.name ?? null,
           patch.provider ?? null,
+          protocol,
           patch.baseUrl === undefined ? null : requireHttpUrl(patch.baseUrl),
           patch.model ?? null,
           encrypted,
@@ -405,6 +421,7 @@ export class ModelConfigService {
       : this.decryptOrUndefined(row.api_key_encrypted)
     if (row.api_key_encrypted !== null && apiKey === undefined) return undefined
     const config: LlmConfig = {
+      protocol: row.protocol === 'anthropic' ? 'anthropic' : 'openai',
       baseUrl: row.base_url,
       model: row.model,
       ...(apiKey === undefined ? {} : { apiKey }),
@@ -448,7 +465,7 @@ export class ModelConfigService {
       configId: row.config_id,
       name: row.name,
       provider: row.provider,
-      protocol: 'openai',
+      protocol: row.protocol === 'anthropic' ? 'anthropic' : 'openai',
       baseUrl: row.base_url,
       model: row.model,
       purpose: row.purpose as LlmPurpose,
@@ -511,8 +528,13 @@ export class ModelConfigService {
       return { status: 'failed', detail: '已存密钥无法解密，请重新录入', testedAt }
     }
     const base = normalizeApiBase(row.base_url)
+    const anthropic = row.protocol === 'anthropic'
     const headers: Record<string, string> = { 'content-type': 'application/json' }
-    if (apiKey !== undefined) headers.authorization = `Bearer ${apiKey}`
+    if (apiKey !== undefined) {
+      headers.authorization = `Bearer ${apiKey}`
+      if (anthropic) headers['x-api-key'] = apiKey
+    }
+    if (anthropic) headers['anthropic-version'] = '2023-06-01'
 
     if (row.purpose === 'embedding') {
       let response: Response
@@ -546,7 +568,7 @@ export class ModelConfigService {
 
     let response: Response
     try {
-      response = await fetch(`${base}/chat/completions`, {
+      response = await fetch(`${base}${anthropic ? '/v1/messages' : '/chat/completions'}`, {
         method: 'POST',
         headers,
         body: JSON.stringify({

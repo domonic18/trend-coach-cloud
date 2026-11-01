@@ -19,9 +19,21 @@ export interface LlmClient {
   completeJson<T>(request: LlmRequest, parse: (value: unknown) => T): Promise<T>
 }
 
-/** OpenAI 兼容 /chat/completions；只接受 JSON 对象，拒绝截断输出。 */
+/**
+ * OpenAI 兼容走 /chat/completions，Anthropic 走 /v1/messages；
+ * 两者都只接受 JSON 对象，拒绝截断输出。
+ */
 export function createLlmClient(config: LlmConfig): LlmClient {
-  const endpoint = `${config.baseUrl}/chat/completions`
+  const anthropic = config.protocol === 'anthropic'
+  const endpoint = anthropic
+    ? `${config.baseUrl}/v1/messages`
+    : `${config.baseUrl}/chat/completions`
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (config.apiKey !== undefined) {
+    headers.authorization = `Bearer ${config.apiKey}`
+    if (anthropic) headers['x-api-key'] = config.apiKey
+  }
+  if (anthropic) headers['anthropic-version'] = '2023-06-01'
 
   return {
     async completeJson<T>(request: LlmRequest, parse: (value: unknown) => T): Promise<T> {
@@ -36,20 +48,25 @@ export function createLlmClient(config: LlmConfig): LlmClient {
       try {
         response = await fetch(endpoint, {
           method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            ...(config.apiKey === undefined ? {} : { authorization: `Bearer ${config.apiKey}` }),
-          },
-          body: JSON.stringify({
-            model: config.model,
-            temperature: config.temperature,
-            max_tokens: config.maxTokens,
-            response_format: { type: 'json_object' },
-            messages: [
-              { role: 'system', content: request.system },
-              { role: 'user', content: request.user },
-            ],
-          }),
+          headers,
+          body: JSON.stringify(anthropic
+            ? {
+                model: config.model,
+                temperature: config.temperature,
+                max_tokens: config.maxTokens,
+                system: request.system,
+                messages: [{ role: 'user', content: request.user }],
+              }
+            : {
+                model: config.model,
+                temperature: config.temperature,
+                max_tokens: config.maxTokens,
+                response_format: { type: 'json_object' },
+                messages: [
+                  { role: 'system', content: request.system },
+                  { role: 'user', content: request.user },
+                ],
+              }),
           signal: AbortSignal.any(signals),
         })
       } catch {
@@ -66,7 +83,7 @@ export function createLlmClient(config: LlmConfig): LlmClient {
       } catch {
         throw new LlmError('invalid_response')
       }
-      const content = extractContent(payload)
+      const content = anthropic ? extractAnthropicContent(payload) : extractContent(payload)
       if (content === null) throw new LlmError('invalid_response')
 
       let value: unknown
@@ -96,6 +113,22 @@ function extractContent(payload: unknown): string | null {
   if (typeof message !== 'object' || message === null) return null
   const content = (message as Record<string, unknown>).content
   return typeof content === 'string' ? content : null
+}
+
+function extractAnthropicContent(payload: unknown): string | null {
+  if (typeof payload !== 'object' || payload === null) return null
+  const record = payload as Record<string, unknown>
+  if (record.stop_reason === 'max_tokens') throw new LlmError('truncated')
+  const blocks = record.content
+  if (!Array.isArray(blocks)) return null
+  const text = blocks
+    .filter((block): block is { type: string; text: string } =>
+      typeof block === 'object' && block !== null
+      && (block as { type?: unknown }).type === 'text'
+      && typeof (block as { text?: unknown }).text === 'string')
+    .map(block => block.text)
+    .join('')
+  return text.length === 0 ? null : text
 }
 
 function stripFence(content: string): string {

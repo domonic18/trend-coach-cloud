@@ -1376,6 +1376,10 @@ components:
       type: string
       enum: [content, embedding]
 
+    LlmProtocol:
+      type: string
+      enum: [openai, anthropic]
+
     AsrProtocol:
       type: string
       enum: [minimax, openai]
@@ -1409,8 +1413,7 @@ components:
         provider:
           type: string
         protocol:
-          type: string
-          enum: [openai]
+          $ref: '#/components/schemas/LlmProtocol'
         baseUrl:
           type: string
         model:
@@ -1449,6 +1452,8 @@ components:
         provider:
           type: string
           maxLength: 32
+        protocol:
+          $ref: '#/components/schemas/LlmProtocol'
         baseUrl:
           type: string
           maxLength: 500
@@ -1476,6 +1481,8 @@ components:
         provider:
           type: string
           maxLength: 32
+        protocol:
+          $ref: '#/components/schemas/LlmProtocol'
         baseUrl:
           type: string
           maxLength: 500

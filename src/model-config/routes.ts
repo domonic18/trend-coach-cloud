@@ -11,12 +11,14 @@ import {
   type AsrProtocol,
   type LlmConfigInput,
   type LlmConfigPatch,
+  type LlmProtocol,
   type LlmPurpose,
 } from './service.js'
 
 const CONFIG_ID = /^llmc_[0-9a-f]{16}$/
 const PROVIDER = /^[A-Za-z0-9._-]{1,32}$/
 const PROTOCOLS: readonly AsrProtocol[] = ['minimax', 'openai']
+const LLM_PROTOCOLS: readonly LlmProtocol[] = ['openai', 'anthropic']
 
 export interface ModelConfigRouteDeps {
   models: ModelConfigService
@@ -42,6 +44,14 @@ function protocolField(value: unknown): AsrProtocol {
     throw badRequest('protocol must be minimax or openai')
   }
   return value as AsrProtocol
+}
+
+function optionalLlmProtocol(value: unknown): LlmProtocol | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !(LLM_PROTOCOLS as readonly string[]).includes(value)) {
+    throw badRequest('protocol must be openai or anthropic')
+  }
+  return value as LlmProtocol
 }
 
 function optionalBoolean(body: Record<string, unknown>, key: string): boolean | undefined {
@@ -84,9 +94,11 @@ function createInput(body: Record<string, unknown>): LlmConfigInput {
   const isDefault = optionalBoolean(body, 'isDefault')
   const isActive = optionalBoolean(body, 'isActive')
   const apiKey = optionalApiKey(body)
+  const protocol = optionalLlmProtocol(body.protocol)
   return {
     name: stringField(body, 'name', { max: 100 }),
     provider: stringField(body, 'provider', { max: 32, pattern: PROVIDER }),
+    ...(protocol === undefined ? {} : { protocol }),
     baseUrl: stringField(body, 'baseUrl', { max: 500 }),
     model: stringField(body, 'model', { max: 200 }),
     purpose: purposeField(body.purpose),
@@ -97,13 +109,13 @@ function createInput(body: Record<string, unknown>): LlmConfigInput {
 }
 
 function patchInput(body: Record<string, unknown>): LlmConfigPatch {
-  const protocol = body.protocol
-  if (protocol !== undefined && protocol !== 'openai') throw badRequest('protocol must be openai')
+  const protocol = optionalLlmProtocol(body.protocol)
   const name = optionalStringField(body, 'name', { max: 100 })
   const isDefault = optionalBoolean(body, 'isDefault')
   const isActive = optionalBoolean(body, 'isActive')
   return {
     ...connectionFields(body),
+    ...(protocol === undefined ? {} : { protocol }),
     ...(name === undefined ? {} : { name }),
     ...(body.purpose === undefined ? {} : { purpose: purposeField(body.purpose) }),
     ...(isDefault === undefined ? {} : { isDefault }),
