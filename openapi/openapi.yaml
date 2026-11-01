@@ -921,6 +921,283 @@ components:
           minimum: 1
           maximum: 60000
 
+    MediaAssetStatus:
+      type: string
+      enum: [awaiting_upload, uploaded, processing, ready, failed, archived]
+
+    MediaAsset:
+      type: object
+      additionalProperties: false
+      required:
+        [assetId, courseId, title, status, durationMs, sourceSizeBytes, errorCode, createdAt, updatedAt]
+      properties:
+        assetId:
+          type: string
+          pattern: '^asset_[0-9a-f]{16}$'
+        courseId:
+          type: string
+        title:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 200
+        status:
+          $ref: '#/components/schemas/MediaAssetStatus'
+        durationMs:
+          type: [integer, 'null']
+          minimum: 0
+        sourceSizeBytes:
+          type: [integer, 'null']
+          minimum: 0
+        errorCode:
+          type: [string, 'null']
+          maxLength: 64
+        createdAt:
+          type: integer
+        updatedAt:
+          type: integer
+
+    MediaAssetList:
+      type: object
+      additionalProperties: false
+      required: [assets, total, offset, limit]
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/MediaAsset'
+        total:
+          type: integer
+          minimum: 0
+        offset:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+
+    CreateMediaAssetRequest:
+      type: object
+      additionalProperties: false
+      required: [courseId, title]
+      properties:
+        courseId:
+          type: string
+          pattern: '^[A-Za-z0-9._-]{1,64}$'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+
+    PatchMediaAssetRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          type: string
+          enum: [archived]
+
+    IngestRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        language:
+          type: string
+          enum: [zh, en, auto]
+
+    PipelineJobStatus:
+      type: string
+      enum: [queued, running, succeeded, failed, canceled]
+
+    PipelineJobKind:
+      type: string
+      enum: [ingest, generate]
+
+    PipelineJobStage:
+      type: string
+      enum: [queued, probe, transcode, transcribe, structure, generate, finalize, done]
+
+    PipelineJob:
+      type: object
+      additionalProperties: false
+      required:
+        [jobId, assetId, courseId, kind, status, stage, progress, attempts, maxAttempts,
+         cancelRequested, errorCode, createdAt, startedAt, finishedAt]
+      properties:
+        jobId:
+          type: string
+          pattern: '^job_[0-9a-f]{16}$'
+        assetId:
+          type: string
+        courseId:
+          type: string
+        kind:
+          $ref: '#/components/schemas/PipelineJobKind'
+        status:
+          $ref: '#/components/schemas/PipelineJobStatus'
+        stage:
+          $ref: '#/components/schemas/PipelineJobStage'
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        attempts:
+          type: integer
+          minimum: 0
+        maxAttempts:
+          type: integer
+          minimum: 1
+        cancelRequested:
+          type: boolean
+        errorCode:
+          type: [string, 'null']
+          maxLength: 64
+        createdAt:
+          type: integer
+        startedAt:
+          type: [integer, 'null']
+        finishedAt:
+          type: [integer, 'null']
+
+    PipelineJobDetail:
+      type: object
+      additionalProperties: false
+      required:
+        [jobId, assetId, courseId, kind, status, stage, progress, attempts, maxAttempts,
+         cancelRequested, errorCode, createdAt, startedAt, finishedAt, result]
+      properties:
+        jobId:
+          type: string
+          pattern: '^job_[0-9a-f]{16}$'
+        assetId:
+          type: string
+        courseId:
+          type: string
+        kind:
+          $ref: '#/components/schemas/PipelineJobKind'
+        status:
+          $ref: '#/components/schemas/PipelineJobStatus'
+        stage:
+          $ref: '#/components/schemas/PipelineJobStage'
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        attempts:
+          type: integer
+          minimum: 0
+        maxAttempts:
+          type: integer
+          minimum: 1
+        cancelRequested:
+          type: boolean
+        errorCode:
+          type: [string, 'null']
+          maxLength: 64
+        createdAt:
+          type: integer
+        startedAt:
+          type: [integer, 'null']
+        finishedAt:
+          type: [integer, 'null']
+        result:
+          type: object
+          additionalProperties: false
+          required: [transcriptId, generationId]
+          properties:
+            transcriptId:
+              type: [string, 'null']
+            generationId:
+              type: [string, 'null']
+
+    PipelineJobList:
+      type: object
+      additionalProperties: false
+      required: [jobs, total, offset, limit]
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/PipelineJob'
+        total:
+          type: integer
+          minimum: 0
+        offset:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+
+    TranscriptMeta:
+      type: object
+      additionalProperties: false
+      required:
+        [transcriptId, assetId, status, language, durationMs, chunkCount, segmentCount, errorCode]
+      properties:
+        transcriptId:
+          type: string
+        assetId:
+          type: string
+        status:
+          type: string
+        language:
+          type: string
+        durationMs:
+          type: [integer, 'null']
+        chunkCount:
+          type: integer
+          minimum: 0
+        segmentCount:
+          type: integer
+          minimum: 0
+        errorCode:
+          type: [string, 'null']
+
+    TranscriptSegment:
+      type: object
+      additionalProperties: false
+      required: [idx, startMs, endMs, text]
+      properties:
+        idx:
+          type: integer
+          minimum: 0
+        startMs:
+          type: integer
+          minimum: 0
+        endMs:
+          type: integer
+          minimum: 1
+        text:
+          type: string
+          minLength: 1
+          maxLength: 4000
+
+    TranscriptPage:
+      type: object
+      additionalProperties: false
+      required: [transcript, segments, total, offset, limit]
+      properties:
+        transcript:
+          $ref: '#/components/schemas/TranscriptMeta'
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/TranscriptSegment'
+        total:
+          type: integer
+          minimum: 0
+        offset:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+
   responses:
     BadRequest:
       description: 入参或结构不合法
@@ -960,6 +1237,12 @@ components:
             $ref: '#/components/schemas/Error'
     PayloadTooLarge:
       description: 请求体或音频超过上限
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnsupportedMediaType:
+      description: 不支持的请求内容类型
       content:
         application/json:
           schema:
@@ -2348,3 +2631,465 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+
+  /v1/admin/content/media-assets:
+    get:
+      summary: 媒体素材列表（operator/admin）
+      description: 仅返回素材元数据；不含源文件路径、HLS 路径与签名地址。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: courseId
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/MediaAssetStatus'
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 100000
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: 素材列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaAssetList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    post:
+      summary: 创建媒体素材（operator/admin）
+      description: 课程必须处于 draft；新素材状态为 awaiting_upload。
+      security:
+        - sessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMediaAssetRequest'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [asset]
+                properties:
+                  asset:
+                    $ref: '#/components/schemas/MediaAsset'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/media-assets/{assetId}:
+    patch:
+      summary: 修改媒体素材（operator/admin）
+      description: 仅支持改标题或归档；归档后不再接受上传与处理。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: assetId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchMediaAssetRequest'
+      responses:
+        '200':
+          description: 已修改
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [asset]
+                properties:
+                  asset:
+                    $ref: '#/components/schemas/MediaAsset'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/media-assets/{assetId}/source:
+    put:
+      summary: 上传媒体源文件（operator/admin）
+      description: 流式写入 application/octet-stream；可选 x-file-sha256 校验；换源会清理旧转写。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: assetId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+        - name: x-file-sha256
+          in: header
+          required: false
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: 已上传
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [asset]
+                properties:
+                  asset:
+                    $ref: '#/components/schemas/MediaAsset'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/media-assets/{assetId}/ingest:
+    post:
+      summary: 入队视频处理任务（operator/admin）
+      description: 依次执行探测、转码、转写与落库；同一素材同一类型仅允许一个活动任务。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: assetId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestRequest'
+      responses:
+        '202':
+          description: 已入队
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [job]
+                properties:
+                  job:
+                    $ref: '#/components/schemas/PipelineJob'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/media-assets/{assetId}/transcript:
+    get:
+      summary: 查看转写片段（operator/admin）
+      description: 管理端唯一返回转写正文的接口；按 idx 升序分页。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: assetId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 100000
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        '200':
+          description: 转写分页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TranscriptPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/pipeline/jobs:
+    get:
+      summary: 处理任务列表（operator/admin）
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/PipelineJobStatus'
+        - name: kind
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/PipelineJobKind'
+        - name: courseId
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+        - name: assetId
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 100000
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: 任务列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PipelineJobList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/pipeline/jobs/{jobId}:
+    get:
+      summary: 处理任务详情（operator/admin）
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_[0-9a-f]{16}$'
+      responses:
+        '200':
+          description: 任务详情
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [job]
+                properties:
+                  job:
+                    $ref: '#/components/schemas/PipelineJobDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/pipeline/jobs/{jobId}/retry:
+    post:
+      summary: 重试失败或已取消任务（operator/admin）
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_[0-9a-f]{16}$'
+      responses:
+        '200':
+          description: 已重新入队
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [job]
+                properties:
+                  job:
+                    $ref: '#/components/schemas/PipelineJob'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/pipeline/jobs/{jobId}/cancel:
+    post:
+      summary: 取消排队或运行中的任务（operator/admin）
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_[0-9a-f]{16}$'
+      responses:
+        '200':
+          description: 已取消或已请求取消
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [job]
+                properties:
+                  job:
+                    $ref: '#/components/schemas/PipelineJob'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'

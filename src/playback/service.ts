@@ -32,7 +32,9 @@ export class PlaybackService {
     if (courseId === undefined) throw new HttpError(404, 'segment not found')
 
     const asset = await this.pool.query<{ hls_path: string }>(
-      'SELECT hls_path FROM media_assets WHERE course_id = $1 ORDER BY asset_id LIMIT 1',
+      `SELECT hls_path FROM media_assets
+       WHERE course_id = $1 AND status = 'ready' AND hls_path IS NOT NULL
+       ORDER BY created_at DESC, asset_id DESC LIMIT 1`,
       [courseId],
     )
     const hlsPath = asset.rows[0]?.hls_path

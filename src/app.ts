@@ -20,7 +20,7 @@ import { registerContentRoutes } from './content/routes.js'
 import { EventService } from './events/service.js'
 import { registerEventRoutes } from './events/routes.js'
 import { HttpError } from './errors.js'
-import { createMetrics } from './metrics.js'
+import { createMetrics, type Metrics } from './metrics.js'
 import { RateLimiter } from './rate-limit.js'
 import { createEmbeddingProvider } from './kb/embedding.js'
 import { KnowledgeService } from './kb/service.js'
@@ -30,6 +30,8 @@ import { PlaybackService } from './playback/service.js'
 import { registerPlaybackRoutes } from './playback/routes.js'
 import { ProgressService } from './progress/service.js'
 import { registerProgressRoutes } from './progress/routes.js'
+import { registerPipelineRoutes } from './pipeline/routes.js'
+import { createPipelineRuntime, type PipelineRuntime } from './pipeline/runtime.js'
 
 export interface BuildAppOptions {
   config: AppConfig
@@ -38,9 +40,23 @@ export interface BuildAppOptions {
   asr?: AsrProvider
   /** 测试用：收集已注册路由，与 OpenAPI 做一致性校验。 */
   onRoute?: (method: string, url: string) => void
+  /** 测试用：注入已装配的管线运行时（可带假处理器/假 ASR）。 */
+  pipeline?: PipelineRuntime
+  /** 测试用：与注入的管线运行时共用同一注册表。 */
+  metrics?: Metrics
+  /** 仅生产入口启动 worker；测试默认不启动，避免后台轮询干扰断言。 */
+  startPipeline?: boolean
 }
 
-export async function buildApp({ config, pool, onRoute, asr: injectedAsr }: BuildAppOptions): Promise<FastifyInstance> {
+export async function buildApp({
+  config,
+  pool,
+  onRoute,
+  asr: injectedAsr,
+  pipeline: injectedPipeline,
+  metrics: injectedMetrics,
+  startPipeline = false,
+}: BuildAppOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
       level: config.logLevel,
@@ -70,7 +86,7 @@ export async function buildApp({ config, pool, onRoute, asr: injectedAsr }: Buil
     return payload
   })
 
-  const metrics = createMetrics()
+  const metrics = injectedMetrics ?? createMetrics()
 
   app.addHook('onResponse', async (request, reply) => {
     const labels = {
@@ -144,6 +160,12 @@ export async function buildApp({ config, pool, onRoute, asr: injectedAsr }: Buil
   const progress = new ProgressService(pool)
   const content = new ContentService(pool, embed)
   const asr = injectedAsr ?? (config.asr === undefined ? undefined : createMiniMaxProvider(config.asr))
+  const pipeline = injectedPipeline ?? await createPipelineRuntime({
+    pool,
+    config,
+    metrics,
+    log: app.log,
+  })
 
   registerAuthRoutes(app, { auth, accounts, config, limiter })
   registerAccountRoutes(app, { accounts, config, limiter })
@@ -159,7 +181,11 @@ export async function buildApp({ config, pool, onRoute, asr: injectedAsr }: Buil
     limiter,
   })
   registerContentRoutes(app, { content, accounts })
+  await registerPipelineRoutes(app, { api: pipeline.api, accounts, config, limiter })
   if (config.mediaLocalDir !== undefined) registerMediaRoutes(app, { config, pool })
+
+  app.addHook('onClose', async () => pipeline.stop())
+  if (startPipeline) await pipeline.start()
 
   const adminDir = join(process.cwd(), 'dist', 'admin')
   if (existsSync(join(adminDir, 'index.html'))) {

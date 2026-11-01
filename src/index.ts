@@ -8,7 +8,7 @@ const pool = createPool(config.databaseUrl)
 
 try {
   const migrated = await runMigrations(pool)
-  const app = await buildApp({ config, pool })
+  const app = await buildApp({ config, pool, startPipeline: true })
   await app.listen({ host: config.host, port: config.port })
   app.log.info({ environment: config.env, port: config.port, migrated }, 'trend-coach-cloud started')
 
