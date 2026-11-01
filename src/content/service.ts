@@ -529,7 +529,7 @@ export class ContentService {
     if (input.startSec >= input.endSec) throw badRequest('startSec must be less than endSec')
     await this.requireKnowledgePointIn(input.knowledgePointId, input.courseId, input.chapterId)
 
-    const embed = await this.embedding?.resolve()
+    const embed = await this.embedding?.resolve('embedding.segment')
     const vector = embed === undefined ? null : toVectorLiteral(await embed(input.text))
     const { rows } = await this.pool.query<SegmentDbRow>(
       `INSERT INTO segments
@@ -579,7 +579,7 @@ export class ContentService {
     if (startSec >= endSec) throw badRequest('startSec must be less than endSec')
 
     const textChanged = input.text !== undefined && input.text !== current.text
-    const embed = textChanged ? await this.embedding?.resolve() : undefined
+    const embed = textChanged ? await this.embedding?.resolve('embedding.segment') : undefined
     const vector = embed === undefined
       ? null
       : toVectorLiteral(await embed(input.text as string))
@@ -604,7 +604,7 @@ export class ContentService {
   }
 
   async reindex(rawCourseId: string | undefined): Promise<{ embedded: number }> {
-    const embed = await this.embedding?.resolve()
+    const embed = await this.embedding?.resolve('embedding.segment')
     if (embed === undefined) throw conflict('embedding provider not configured')
     let courseId: string | undefined
     if (rawCourseId !== undefined) {

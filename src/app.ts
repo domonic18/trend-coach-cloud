@@ -1,10 +1,19 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { basename, join, sep } from 'node:path'
 import cors from '@fastify/cors'
 import fastifyStatic from '@fastify/static'
-import Fastify, { LogController, type FastifyError, type FastifyInstance } from 'fastify'
+import Fastify, {
+  LogController,
+  type FastifyError,
+  type FastifyInstance,
+  type FastifyReply,
+} from 'fastify'
 import type { Pool } from 'pg'
+import { AiRouter } from './ai/routing.js'
+import { registerAiRoutes } from './ai/routes.js'
+import { AiUsageService } from './ai/usage.js'
 import { AccountService } from './accounts/service.js'
 import { registerAccountRoutes } from './accounts/routes.js'
 import { createAsrProvider, type AsrProvider } from './asr/provider.js'
@@ -34,6 +43,7 @@ import { ProgressService } from './progress/service.js'
 import { registerProgressRoutes } from './progress/routes.js'
 import { registerPipelineRoutes } from './pipeline/routes.js'
 import { createPipelineRuntime, type PipelineRuntime } from './pipeline/runtime.js'
+import { registerPortalRoutes } from './portal/routes.js'
 
 export interface BuildAppOptions {
   config: AppConfig
@@ -128,10 +138,6 @@ export async function buildApp({
     reply.code(500).send({ error: 'internal error', requestId: request.id })
   })
 
-  app.setNotFoundHandler((request, reply) => {
-    reply.code(404).send({ error: 'not found', requestId: request.id })
-  })
-
   app.get('/health', async (_request, reply) => {
     try {
       await pool.query('SELECT 1')
@@ -163,8 +169,12 @@ export async function buildApp({
     asrTimeoutMs: config.asrTimeoutMs,
     llmTuning: config.llmTuning,
   })
-  // 每次检索/建索引时回数据库解析，后台保存后无需重启。
-  const embedding: EmbeddingResolver = { resolve: () => models.resolveEmbedding() }
+  const aiUsage = new AiUsageService(pool)
+  const aiRouter = new AiRouter({ pool, models, usage: aiUsage })
+  // 每次检索/建索引时回数据库解析，后台保存后无需重启；检索与建库分别计量。
+  const embedding: EmbeddingResolver = {
+    resolve: task => aiRouter.embeddingProvider(task ?? 'embedding.segment'),
+  }
   const kb = new KnowledgeService(pool, config, embedding)
   const playback = new PlaybackService(pool, config, auth)
   const events = new EventService(pool)
@@ -182,12 +192,15 @@ export async function buildApp({
     metrics,
     log: app.log,
     models,
+    ai: aiRouter,
     reindex: (courseId: string) => content.reindex(courseId),
   })
 
   registerAuthRoutes(app, { auth, accounts, config, limiter })
   registerAccountRoutes(app, { accounts, config, limiter })
+  registerPortalRoutes(app, { accounts, config, limiter, pool })
   registerModelConfigRoutes(app, { models, accounts, config, limiter })
+  registerAiRoutes(app, { pool, models, accounts, config, limiter })
   registerKbRoutes(app, { kb, auth, config, limiter })
   registerPlaybackRoutes(app, { playback, auth })
   registerEventRoutes(app, { events, auth, config, limiter })
@@ -208,7 +221,8 @@ export async function buildApp({
   if (startPipeline) await pipeline.start()
 
   const adminDir = join(process.cwd(), 'dist', 'admin')
-  if (existsSync(join(adminDir, 'index.html'))) {
+  const adminStatic = existsSync(join(adminDir, 'index.html'))
+  if (adminStatic) {
     await app.register(fastifyStatic, {
       root: adminDir,
       prefix: '/admin/',
@@ -224,6 +238,113 @@ export async function buildApp({
     })
     app.get('/admin', async (_request, reply) => reply.redirect('/admin/'))
   }
+
+  // 公开门户：预渲染产物按文件精确注册，不做通配，避免遮蔽 /v1。
+  const portalDir = join(process.cwd(), 'dist', 'portal')
+  const portalStatic = existsSync(join(portalDir, 'index.html'))
+  const portalRoutes = new Map<string, string>()
+  const portalPages = new Map<string, string>()
+
+  const readPortalPage = async (file: string): Promise<string | undefined> => {
+    const cached = portalPages.get(file)
+    if (cached !== undefined) return cached
+    try {
+      const html = await readFile(join(portalDir, file), 'utf8')
+      portalPages.set(file, html)
+      return html
+    } catch {
+      return undefined
+    }
+  }
+
+  if (portalStatic) {
+    try {
+      const raw: unknown = JSON.parse(await readFile(join(portalDir, 'routes.json'), 'utf8'))
+      if (typeof raw === 'object' && raw !== null) {
+        for (const [route, file] of Object.entries(raw)) {
+          if (
+            typeof file === 'string'
+            && file.endsWith('.html')
+            && !file.includes('..')
+            && !file.startsWith('/')
+          ) {
+            portalRoutes.set(route, file)
+          }
+        }
+      }
+    } catch {
+      app.log.warn('portal routes.json missing or invalid; deep links fall back to shell')
+    }
+
+    await app.register(fastifyStatic, {
+      root: portalDir,
+      prefix: '/',
+      wildcard: false,
+      decorateReply: false,
+      index: false,
+      cacheControl: false,
+      setHeaders: (reply: FastifyReply, filePath: string) => {
+        const name = filePath.split(sep).pop() ?? ''
+        if (name.endsWith('.html') || name === 'routes.json') {
+          reply.header('cache-control', 'no-store')
+        } else if (name === 'sitemap.xml' || name === 'robots.txt') {
+          reply.header('cache-control', 'public, max-age=3600')
+        } else {
+          reply.header('cache-control', 'public, max-age=31536000, immutable')
+        }
+      },
+    })
+
+    const downloadsDir = join(process.cwd(), 'dist', 'downloads')
+    if (existsSync(downloadsDir)) {
+      await app.register(fastifyStatic, {
+        root: downloadsDir,
+        prefix: '/downloads/',
+        wildcard: false,
+        decorateReply: false,
+        index: false,
+        cacheControl: false,
+        setHeaders: (reply: FastifyReply, filePath: string) => {
+          reply.header('cache-control', 'public, max-age=86400')
+          reply.header('content-disposition', `attachment; filename="${basename(filePath).replace(/"/g, '')}"`)
+        },
+      })
+    }
+  }
+
+  // 深链由前端路由处理；只接管浏览器导航，API 404 保持原样。
+  app.setNotFoundHandler(async (request, reply) => {
+    const pathname = (request.raw.url ?? '').split('?')[0] ?? ''
+    const acceptsHtml = (request.headers.accept ?? '').includes('text/html')
+    if (
+      adminStatic
+      && request.method === 'GET'
+      && pathname.startsWith('/admin/')
+      && !/\.[^/]+$/.test(pathname)
+      && acceptsHtml
+    ) {
+      return reply.header('cache-control', 'no-store').type('text/html').sendFile('index.html')
+    }
+    if (
+      portalStatic
+      && request.method === 'GET'
+      && acceptsHtml
+      && !/\.[^/]+$/.test(pathname)
+      && !pathname.startsWith('/v1/')
+      && !pathname.startsWith('/admin')
+    ) {
+      const normalized = pathname !== '/' ? pathname.replace(/\/+$/, '') : pathname
+      const matched = portalRoutes.get(normalized)
+      const file = matched ?? portalRoutes.get('_shell') ?? 'shell.html'
+      const html = await readPortalPage(file)
+      if (html !== undefined) {
+        reply.header('cache-control', 'no-store')
+        if (matched === undefined) reply.header('x-robots-tag', 'noindex')
+        return reply.type('text/html').send(html)
+      }
+    }
+    return reply.code(404).send({ error: 'not found', requestId: request.id })
+  })
 
   return app
 }

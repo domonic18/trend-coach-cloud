@@ -1,6 +1,8 @@
 import { constants } from 'node:fs'
 import { access, mkdir } from 'node:fs/promises'
 import type { Pool } from 'pg'
+import { AiRouter } from '../ai/routing.js'
+import { AiUsageService } from '../ai/usage.js'
 import { createLongFormAsr, type LongFormAsr } from '../asr/longform.js'
 import type { AppConfig } from '../config.js'
 import { serviceUnavailable } from '../errors.js'
@@ -35,6 +37,8 @@ export interface PipelineRuntimeInput {
   asr?: LongFormAsr
   generator?: GenerationHook
   llm?: LlmClient
+  /** 与 app 共用同一路由器，冷却状态与用量账本只有一份。 */
+  ai?: AiRouter
   reindex?: (courseId: string) => Promise<{ embedded: number }>
 }
 
@@ -109,10 +113,19 @@ export async function createPipelineRuntime(input: PipelineRuntimeInput): Promis
     return resolved === undefined ? undefined : { llm: resolved.client, model: resolved.model }
   }
 
+  // 测试注入 llm/generator 时走直连；生产走任务绑定 + 计量 + 主备切换。
+  const usage = input.models !== undefined && input.llm === undefined
+    ? new AiUsageService(input.pool)
+    : undefined
+  const ai = input.ai ?? (usage === undefined || input.models === undefined || input.generator !== undefined
+    ? undefined
+    : new AiRouter({ pool: input.pool, models: input.models, usage }))
+
   const generator = input.generator ?? createGenerationHook({
     pool: input.pool,
     config,
     resolveLlm,
+    ...(ai === undefined ? {} : { ai }),
   })
   const jobs = new JobQueue(input.pool, config.maxAttempts)
   const api = new PipelineService(input.pool, config, jobs, store, {
@@ -132,6 +145,7 @@ export async function createPipelineRuntime(input: PipelineRuntimeInput): Promis
     generator,
     log: input.log,
     metrics: input.metrics,
+    ...(usage === undefined ? {} : { usage }),
   })
 
   return {

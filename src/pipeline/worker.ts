@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { access } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Pool } from 'pg'
+import type { AiUsageService } from '../ai/usage.js'
 import type { PipelineConfig } from '../config.js'
 import { AsrError } from '../asr/provider.js'
 import type { LongFormAsr } from '../asr/longform.js'
@@ -50,6 +51,8 @@ export interface WorkerDeps {
   generator?: GenerationHook
   log: WorkerLogger
   metrics?: Metrics
+  /** 生产环境下 ASR 按分块记用量；测试未注入时跳过。 */
+  usage?: AiUsageService
 }
 
 interface AssetRow {
@@ -391,7 +394,7 @@ export class PipelineWorker {
         if (row === undefined) return
         try {
           assertNotCanceled(signal)
-          await this.transcribeChunk(row, job, language, signal, asr)
+          await this.transcribeChunk(row, job, language, signal, asr, resolved.model)
           completed += 1
           await onProgress('transcribe', 60 + Math.round((completed / total) * 35))
         } catch (error) {
@@ -417,10 +420,12 @@ export class PipelineWorker {
     language: Language,
     signal: AbortSignal,
     asr: LongFormAsr,
+    model: string,
   ): Promise<void> {
-    const { config, pool, processor } = this.deps
+    const { config, pool, processor, usage } = this.deps
     const startMs = milliseconds(row.start_ms)
     const endMs = milliseconds(row.end_ms)
+    const startedAt = Date.now()
 
     await pool.query(
       `UPDATE transcript_chunks SET status = 'processing', attempt = attempt + 1, updated_at = now()
@@ -447,8 +452,24 @@ export class PipelineWorker {
          WHERE chunk_id = $1`,
         [row.chunk_id, JSON.stringify(sentences)],
       )
+      await usage?.recordStandalone({
+        taskKey: 'asr.longform',
+        model,
+        status: 'success',
+        latencyMs: Date.now() - startedAt,
+        audioSeconds: (endMs - startMs) / 1000,
+        characters: sentences.reduce((sum, sentence) => sum + sentence.text.length, 0),
+      }).catch(() => undefined)
     } catch (error) {
       const failure = mapAsrError(error)
+      await usage?.recordStandalone({
+        taskKey: 'asr.longform',
+        model,
+        status: 'error',
+        errorCode: failure.code,
+        latencyMs: Date.now() - startedAt,
+        audioSeconds: (endMs - startMs) / 1000,
+      }).catch(() => undefined)
       await pool.query(
         `UPDATE transcript_chunks SET status = 'failed', error_code = $2, updated_at = now()
          WHERE chunk_id = $1`,

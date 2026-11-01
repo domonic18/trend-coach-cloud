@@ -11,6 +11,13 @@ export type UserRole = (typeof USER_ROLES)[number]
 export const USER_STATUSES = ['active', 'disabled'] as const
 export type UserStatus = (typeof USER_STATUSES)[number]
 
+export const SESSION_SCOPES = ['console', 'portal'] as const
+export type SessionScope = (typeof SESSION_SCOPES)[number]
+
+export const USERNAME_PATTERN = /^[a-z][a-z0-9._-]{2,31}$/
+export const PASSWORD_MIN = 10
+export const PASSWORD_MAX = 128
+
 const INVITE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
 export interface AdminUser {
@@ -39,6 +46,20 @@ export interface SessionResult {
   token: string
   expiresAt: number
   user: SessionUser
+}
+
+export interface PortalProfile extends SessionUser {
+  status: UserStatus
+  createdAt: number
+  passwordUpdatedAt: number | null
+  deviceCount: number
+}
+
+export interface UserDevice {
+  deviceId: string
+  status: 'active' | 'revoked'
+  firstAuthorizedAt: number
+  lastSeenAt: number
 }
 
 interface UserRow {
@@ -134,7 +155,8 @@ export class AccountService {
     })
   }
 
-  async login(username: string, password: string): Promise<SessionResult> {
+  /** 后台登录拒绝学员；门户登录通过 scope 放行，角色仍由路由守卫约束。 */
+  async login(username: string, password: string, scope: SessionScope = 'console'): Promise<SessionResult> {
     const { rows } = await this.pool.query<UserRow>(
       `SELECT user_id, username, display_name, role, status, password_hash
        FROM users WHERE username = $1`,
@@ -147,21 +169,45 @@ export class AccountService {
     }
     if (!(await verifyPassword(password, row.password_hash))) throw unauthorized('invalid credentials')
     if (row.status !== 'active' || row.password_hash === null) throw unauthorized('account disabled or not activated')
-    if (row.role === 'student') throw forbidden('console access requires operator role')
-    return this.issueSession(row)
+    if (row.role === 'student' && scope === 'console') throw forbidden('console access requires operator role')
+    return this.issueSession(row, scope)
   }
 
-  private async issueSession(row: UserRow): Promise<SessionResult> {
+  /** 开放注册只创建学员；后台账号仍由管理员创建。 */
+  async register(input: {
+    username: string
+    password: string
+    displayName?: string
+  }): Promise<SessionResult> {
+    const userId = `usr_${randomToken(8)}`
+    const { rows } = await this.pool.query<UserRow>(
+      `INSERT INTO users (user_id, username, display_name, role, password_hash, password_updated_at)
+       VALUES ($1, $2, $3, 'student', $4, now())
+       RETURNING user_id, username, display_name, role, status, password_hash`,
+      [userId, input.username, input.displayName ?? input.username, await hashPassword(input.password)],
+    ).catch(error => {
+      if (isUniqueViolation(error)) throw conflict('username already exists')
+      throw error
+    })
+    const row = rows[0]
+    if (row === undefined) throw new Error('registration failed')
+    return this.issueSession(row, 'portal')
+  }
+
+  private async issueSession(row: UserRow, scope: SessionScope): Promise<SessionResult> {
     const token = randomToken()
     const expiresAt = Date.now() + this.config.sessionTtlSec * 1000
     await this.pool.query(
-      'INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)',
-      [hashToken(token), row.user_id, new Date(expiresAt)],
+      'INSERT INTO sessions (token_hash, user_id, expires_at, scope) VALUES ($1, $2, $3, $4)',
+      [hashToken(token), row.user_id, new Date(expiresAt), scope],
     )
     return { token, expiresAt, user: { ...toSessionUser(row), role: row.role } }
   }
 
-  async authenticateSession(token: string): Promise<SessionPrincipal> {
+  async authenticateSession(
+    token: string,
+    { allowStudent = false }: { allowStudent?: boolean } = {},
+  ): Promise<SessionPrincipal> {
     const tokenHash = hashToken(token)
     const { rows } = await this.pool.query<UserRow & { expires_at: Date; revoked_at: Date | null }>(
       `SELECT s.expires_at, s.revoked_at,
@@ -175,9 +221,90 @@ export class AccountService {
       throw unauthorized('session invalid or expired')
     }
     if (row.status !== 'active') throw unauthorized('account disabled')
-    if (row.role === 'student') throw forbidden('console access requires operator role')
+    if (row.role === 'student' && !allowStudent) throw forbidden('console access requires operator role')
     await this.pool.query('UPDATE sessions SET last_seen_at = now() WHERE token_hash = $1', [tokenHash])
     return { ...toSessionUser(row), role: row.role, tokenHash }
+  }
+
+  async getProfile(userId: string): Promise<PortalProfile> {
+    const { rows } = await this.pool.query<{
+      user_id: string
+      username: string
+      display_name: string | null
+      role: UserRole
+      status: UserStatus
+      created_at: Date
+      password_updated_at: Date | null
+      device_count: number
+    }>(
+      `SELECT u.user_id, u.username, u.display_name, u.role, u.status, u.created_at,
+              u.password_updated_at, count(d.device_id)::int AS device_count
+       FROM users u LEFT JOIN devices d ON d.user_id = u.user_id
+       WHERE u.user_id = $1
+       GROUP BY u.user_id`,
+      [userId],
+    )
+    const row = rows[0]
+    if (row === undefined) throw notFound('user not found')
+    return {
+      userId: row.user_id,
+      username: row.username ?? row.user_id,
+      displayName: row.display_name,
+      role: row.role,
+      status: row.status,
+      createdAt: row.created_at.getTime(),
+      passwordUpdatedAt: row.password_updated_at?.getTime() ?? null,
+      deviceCount: Number(row.device_count),
+    }
+  }
+
+  async updateProfile(userId: string, displayName: string): Promise<PortalProfile> {
+    const { rowCount } = await this.pool.query(
+      'UPDATE users SET display_name = $2 WHERE user_id = $1',
+      [userId, displayName],
+    )
+    if ((rowCount ?? 0) === 0) throw notFound('user not found')
+    return this.getProfile(userId)
+  }
+
+  async listDevices(userId: string): Promise<UserDevice[]> {
+    const { rows } = await this.pool.query<{
+      device_id: string
+      status: 'active' | 'revoked'
+      first_authorized_at: Date
+      last_seen_at: Date
+    }>(
+      `SELECT device_id, status, first_authorized_at, last_seen_at
+       FROM devices WHERE user_id = $1 ORDER BY last_seen_at DESC, device_id`,
+      [userId],
+    )
+    return rows.map(row => ({
+      deviceId: row.device_id,
+      status: row.status,
+      firstAuthorizedAt: row.first_authorized_at.getTime(),
+      lastSeenAt: row.last_seen_at.getTime(),
+    }))
+  }
+
+  /** 解绑只吊销该设备的 refresh/access token，不影响用户其他设备与会话。 */
+  async revokeDevice(userId: string, deviceId: string): Promise<void> {
+    await withTransaction(this.pool, async client => {
+      const { rows } = await client.query<{ user_id: string }>(
+        'SELECT user_id FROM devices WHERE device_id = $1 FOR UPDATE',
+        [deviceId],
+      )
+      const device = rows[0]
+      if (device === undefined) throw notFound('device not found')
+      if (device.user_id !== userId) throw forbidden('device belongs to another account')
+      await client.query(
+        "UPDATE devices SET status = 'revoked' WHERE device_id = $1 AND status = 'active'",
+        [deviceId],
+      )
+      await client.query(
+        'UPDATE tokens SET revoked_at = now() WHERE device_id = $1 AND revoked_at IS NULL',
+        [deviceId],
+      )
+    })
   }
 
   async revokeSession(tokenHash: string): Promise<void> {

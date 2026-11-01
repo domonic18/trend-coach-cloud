@@ -110,7 +110,7 @@ export class KnowledgeService {
   async search(input: SearchInput): Promise<SearchResult> {
     const window = Math.max(input.topK * RECALL_FACTOR, MIN_RECALL_WINDOW)
     const lexical = await this.lexicalRecall(input, window)
-    const embed = await this.embedding?.resolve()
+    const embed = await this.embedding?.resolve('embedding.query')
     const vector = embed === undefined ? [] : await this.vectorRecall(embed, input, window)
     // 召回阈值只负责捞候选，引用置信阈值负责过滤单个 trigram 级别的偶然命中。
     const confident = [lexical, vector].map(list =>

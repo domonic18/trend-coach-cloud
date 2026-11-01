@@ -5,6 +5,7 @@ import type { AsrConfig, LlmConfig, LlmProtocol, LlmTuning } from '../config.js'
 import { badRequest, conflict, notFound } from '../errors.js'
 import { createEmbeddingProvider, postEmbeddingRequest } from '../kb/embedding.js'
 import { createLlmClient, type LlmClient } from '../pipeline/llm.js'
+import { taskPurpose, type LlmTaskKey } from '../ai/tasks.js'
 import { decryptSecret, encryptSecret, maskSecret } from './crypto.js'
 
 export const LLM_PURPOSES = ['content', 'embedding'] as const
@@ -27,6 +28,8 @@ export interface LlmConfigDto {
   apiKeyMasked: string | null
   isDefault: boolean
   isActive: boolean
+  inputPriceMicrosPer1k: number | null
+  outputPriceMicrosPer1k: number | null
   lastTestedAt: number | null
   lastTestStatus: 'success' | 'failed' | null
   lastTestError: string | null
@@ -64,6 +67,8 @@ export interface LlmConfigInput {
   apiKey?: string
   isDefault?: boolean
   isActive?: boolean
+  inputPriceMicrosPer1k?: number | null
+  outputPriceMicrosPer1k?: number | null
 }
 
 export interface LlmConfigPatch {
@@ -76,6 +81,8 @@ export interface LlmConfigPatch {
   apiKey?: string
   isDefault?: boolean
   isActive?: boolean
+  inputPriceMicrosPer1k?: number | null
+  outputPriceMicrosPer1k?: number | null
 }
 
 export interface AsrConfigPatch {
@@ -98,6 +105,8 @@ interface LlmRow {
   purpose: string
   is_default: boolean
   is_active: boolean
+  input_price_micros_per_1k: number | null
+  output_price_micros_per_1k: number | null
   last_tested_at: Date | null
   last_test_status: 'success' | 'failed' | null
   last_test_error: string | null
@@ -125,9 +134,16 @@ export interface ModelConfigOptions {
 }
 
 export interface ResolvedLlm {
+  configId: string
+  provider: string
   client: LlmClient
   config: LlmConfig
   model: string
+}
+
+export interface ResolvedTaskLlm {
+  primary?: ResolvedLlm
+  fallback?: ResolvedLlm
 }
 
 function toMillis(value: Date | null): number | null {
@@ -207,8 +223,8 @@ export class ModelConfigService {
       const { rows } = await client.query<LlmRow>(
         `INSERT INTO llm_configs
            (config_id, name, provider, protocol, base_url, model, api_key_encrypted,
-            purpose, is_default, is_active)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            purpose, is_default, is_active, input_price_micros_per_1k, output_price_micros_per_1k)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING *`,
         [
           configId,
@@ -221,6 +237,8 @@ export class ModelConfigService {
           input.purpose,
           isDefault,
           input.isActive !== false,
+          input.inputPriceMicrosPer1k ?? null,
+          input.outputPriceMicrosPer1k ?? null,
         ],
       )
       await client.query('COMMIT')
@@ -264,6 +282,8 @@ export class ModelConfigService {
            purpose = $8,
            is_default = $9,
            is_active = $10,
+           input_price_micros_per_1k = $11,
+           output_price_micros_per_1k = $12,
            updated_at = now()
          WHERE config_id = $1
          RETURNING *`,
@@ -278,6 +298,12 @@ export class ModelConfigService {
           purpose,
           becomesDefault ? true : (isActive ? existing.is_default && purpose === existing.purpose : false),
           isActive,
+          patch.inputPriceMicrosPer1k === undefined
+            ? existing.input_price_micros_per_1k
+            : patch.inputPriceMicrosPer1k,
+          patch.outputPriceMicrosPer1k === undefined
+            ? existing.output_price_micros_per_1k
+            : patch.outputPriceMicrosPer1k,
         ],
       )
       await client.query('COMMIT')
@@ -415,7 +441,33 @@ export class ModelConfigService {
       [purpose],
     )
     const row = rows[0]
-    if (row === undefined) return undefined
+    return row === undefined ? undefined : this.toResolvedLlm(row)
+  }
+
+  /** 任务绑定优先；绑定失效（停用/用途不符）时回落默认模型，保证既有部署不受影响。 */
+  async resolveTaskModels(taskKey: LlmTaskKey): Promise<ResolvedTaskLlm> {
+    const purpose = taskPurpose(taskKey)
+    const { rows } = await this.pool.query<{
+      primary_config_id: string
+      fallback_config_id: string | null
+    }>(
+      'SELECT primary_config_id, fallback_config_id FROM llm_task_bindings WHERE task_key = $1',
+      [taskKey],
+    )
+    const binding = rows[0]
+    if (binding !== undefined) {
+      const primary = await this.resolveConfig(binding.primary_config_id, purpose)
+      const fallback = binding.fallback_config_id === null
+        ? undefined
+        : await this.resolveConfig(binding.fallback_config_id, purpose)
+      if (primary !== undefined) return { primary, ...(fallback === undefined ? {} : { fallback }) }
+      if (fallback !== undefined) return { primary: fallback }
+    }
+    const primary = await this.resolveLlm(purpose)
+    return primary === undefined ? {} : { primary }
+  }
+
+  private toResolvedLlm(row: LlmRow): ResolvedLlm | undefined {
     const apiKey = row.api_key_encrypted === null
       ? undefined
       : this.decryptOrUndefined(row.api_key_encrypted)
@@ -427,7 +479,22 @@ export class ModelConfigService {
       ...(apiKey === undefined ? {} : { apiKey }),
       ...this.options.llmTuning,
     }
-    return { client: createLlmClient(config), config, model: row.model }
+    return {
+      configId: row.config_id,
+      provider: row.provider,
+      client: createLlmClient(config),
+      config,
+      model: row.model,
+    }
+  }
+
+  private async resolveConfig(configId: string, purpose: LlmPurpose): Promise<ResolvedLlm | undefined> {
+    const { rows } = await this.pool.query<LlmRow>(
+      'SELECT * FROM llm_configs WHERE config_id = $1 AND is_active AND purpose = $2',
+      [configId, purpose],
+    )
+    const row = rows[0]
+    return row === undefined ? undefined : this.toResolvedLlm(row)
   }
 
   async resolveEmbedding(): Promise<((text: string) => Promise<number[]>) | undefined> {
@@ -475,6 +542,8 @@ export class ModelConfigService {
         : plain === undefined ? '[无法解密，请重新录入]' : maskSecret(plain),
       isDefault: row.is_default,
       isActive: row.is_active,
+      inputPriceMicrosPer1k: row.input_price_micros_per_1k,
+      outputPriceMicrosPer1k: row.output_price_micros_per_1k,
       lastTestedAt: toMillis(row.last_tested_at),
       lastTestStatus: row.last_test_status,
       lastTestError: row.last_test_error,

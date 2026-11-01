@@ -3,9 +3,12 @@ import { serviceUnavailable } from '../errors.js'
 
 export const EMBEDDING_DIM = 1024
 
+/** 检索与建索引分开计量与绑定，失败时各自切换备用模型。 */
+export type EmbeddingTask = 'embedding.query' | 'embedding.segment'
+
 /** 按当前后台配置解析；未配置或已停用时返回 undefined，调用方退化为纯词法。 */
 export interface EmbeddingResolver {
-  resolve(): Promise<((text: string) => Promise<number[]>) | undefined>
+  resolve(task?: EmbeddingTask): Promise<((text: string) => Promise<number[]>) | undefined>
 }
 
 /**
@@ -30,19 +33,41 @@ export async function postEmbeddingRequest(
   return response.status === 400 || response.status === 422 ? send(body) : response
 }
 
+/** 供计量与故障切换判断，只暴露状态码与 token 数，不含请求/响应体。 */
+export interface EmbeddingAttempt {
+  status: number | 'network'
+  inputTokens?: number
+}
+
 /** OpenAI 兼容的 /embeddings 端点；维度必须与迁移中的 halfvec(1024) 一致。 */
 export function createEmbeddingProvider(
   config: EmbeddingConfig,
+  onAttempt?: (attempt: EmbeddingAttempt) => void,
 ): (text: string) => Promise<number[]> {
   return async (text: string) => {
     const response = await postEmbeddingRequest(config, { model: config.model, input: text }, 5_000)
       .catch(() => undefined)
-    if (response === undefined || !response.ok) throw serviceUnavailable('embedding service unavailable')
-    const payload: unknown = await response.json().catch(() => undefined)
+    if (response === undefined) {
+      onAttempt?.({ status: 'network' })
+      throw serviceUnavailable('embedding service unavailable')
+    }
+    const payload: unknown = response.ok ? await response.json().catch(() => undefined) : undefined
+    onAttempt?.({ status: response.status, ...embeddingTokens(payload) })
+    if (!response.ok) throw serviceUnavailable('embedding service unavailable')
     const embedding = extractEmbedding(payload)
     if (embedding === undefined) throw serviceUnavailable('embedding response invalid')
     return embedding
   }
+}
+
+function embeddingTokens(payload: unknown): { inputTokens?: number } {
+  if (typeof payload !== 'object' || payload === null) return {}
+  const usage = (payload as { usage?: unknown }).usage
+  if (typeof usage !== 'object' || usage === null) return {}
+  const tokens = (usage as { prompt_tokens?: unknown }).prompt_tokens
+  return typeof tokens === 'number' && Number.isFinite(tokens) && tokens >= 0
+    ? { inputTokens: tokens }
+    : {}
 }
 
 function extractEmbedding(payload: unknown): number[] | undefined {

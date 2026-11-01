@@ -1,0 +1,16 @@
+{
+  "dshVersion": "0.2.1-rc.5",
+  "webAppPackage": "@deepseek-ai/dsh-web-app",
+  "plugin": {
+    "name": "dsh-plugin-trend-coach",
+    "version": "0.1.0",
+    "fileName": "dsh-plugin-trend-coach-0.1.0.tgz",
+    "sha256": null,
+    "sizeBytes": null,
+    "publishedAt": "2026-11-01",
+    "notes": [
+      "首个公开版本：课程体系、知识检索、片段定位与伴学问答。",
+      "需要 dsh 0.2.1-rc.5；Web UI 需额外安装 @deepseek-ai/dsh-web-app。"
+    ]
+  }
+}

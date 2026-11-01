@@ -9,10 +9,18 @@ export class LlmError extends Error {
   }
 }
 
+/** 只提取数字，provider 原始响应体不落库。 */
+export interface LlmUsage {
+  inputTokens?: number
+  outputTokens?: number
+  cachedTokens?: number
+}
+
 export interface LlmRequest {
   system: string
   user: string
   signal?: AbortSignal
+  onUsage?: (usage: LlmUsage) => void
 }
 
 export interface LlmClient {
@@ -83,6 +91,10 @@ export function createLlmClient(config: LlmConfig): LlmClient {
       } catch {
         throw new LlmError('invalid_response')
       }
+      if (request.onUsage !== undefined) {
+        const usage = extractUsage(payload, anthropic)
+        if (usage !== undefined) request.onUsage(usage)
+      }
       const content = anthropic ? extractAnthropicContent(payload) : extractContent(payload)
       if (content === null) throw new LlmError('invalid_response')
 
@@ -98,6 +110,39 @@ export function createLlmClient(config: LlmConfig): LlmClient {
         throw new LlmError('invalid_response')
       }
     },
+  }
+}
+
+function count(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/** OpenAI 用 prompt_tokens/completion_tokens，Anthropic 用 input_tokens/output_tokens。 */
+function extractUsage(payload: unknown, anthropic: boolean): LlmUsage | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined
+  const usage = (payload as { usage?: unknown }).usage
+  if (typeof usage !== 'object' || usage === null) return undefined
+  const record = usage as Record<string, unknown>
+  if (anthropic) {
+    const inputTokens = count(record.input_tokens)
+    const outputTokens = count(record.output_tokens)
+    const cachedTokens = count(record.cache_read_input_tokens)
+    return {
+      ...(inputTokens === undefined ? {} : { inputTokens }),
+      ...(outputTokens === undefined ? {} : { outputTokens }),
+      ...(cachedTokens === undefined ? {} : { cachedTokens }),
+    }
+  }
+  const details = record.prompt_tokens_details
+  const cachedTokens = typeof details === 'object' && details !== null
+    ? count((details as Record<string, unknown>).cached_tokens)
+    : undefined
+  const inputTokens = count(record.prompt_tokens)
+  const outputTokens = count(record.completion_tokens)
+  return {
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(cachedTokens === undefined ? {} : { cachedTokens }),
   }
 }
 

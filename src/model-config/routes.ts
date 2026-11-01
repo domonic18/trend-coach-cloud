@@ -77,6 +77,17 @@ function optionalApiKey(body: Record<string, unknown>): string | undefined {
   return value
 }
 
+/** 价格单位为「微美元/千 token」；null 表示未配置，成本估算不猜测。 */
+function optionalPrice(body: Record<string, unknown>, key: string): number | null | undefined {
+  const value = body[key]
+  if (value === undefined) return undefined
+  if (value === null) return null
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 1_000_000_000) {
+    throw badRequest(`${key} must be a non-negative integer`)
+  }
+  return value
+}
+
 function connectionFields(body: Record<string, unknown>): ConnectionFields {
   const result: ConnectionFields = {}
   const provider = optionalStringField(body, 'provider', { max: 32, pattern: PROVIDER })
@@ -95,6 +106,8 @@ function createInput(body: Record<string, unknown>): LlmConfigInput {
   const isActive = optionalBoolean(body, 'isActive')
   const apiKey = optionalApiKey(body)
   const protocol = optionalLlmProtocol(body.protocol)
+  const inputPrice = optionalPrice(body, 'inputPriceMicrosPer1k')
+  const outputPrice = optionalPrice(body, 'outputPriceMicrosPer1k')
   return {
     name: stringField(body, 'name', { max: 100 }),
     provider: stringField(body, 'provider', { max: 32, pattern: PROVIDER }),
@@ -105,6 +118,8 @@ function createInput(body: Record<string, unknown>): LlmConfigInput {
     ...(apiKey === undefined ? {} : { apiKey }),
     ...(isDefault === undefined ? {} : { isDefault }),
     ...(isActive === undefined ? {} : { isActive }),
+    ...(inputPrice === undefined ? {} : { inputPriceMicrosPer1k: inputPrice }),
+    ...(outputPrice === undefined ? {} : { outputPriceMicrosPer1k: outputPrice }),
   }
 }
 
@@ -113,6 +128,8 @@ function patchInput(body: Record<string, unknown>): LlmConfigPatch {
   const name = optionalStringField(body, 'name', { max: 100 })
   const isDefault = optionalBoolean(body, 'isDefault')
   const isActive = optionalBoolean(body, 'isActive')
+  const inputPrice = optionalPrice(body, 'inputPriceMicrosPer1k')
+  const outputPrice = optionalPrice(body, 'outputPriceMicrosPer1k')
   return {
     ...connectionFields(body),
     ...(protocol === undefined ? {} : { protocol }),
@@ -120,6 +137,8 @@ function patchInput(body: Record<string, unknown>): LlmConfigPatch {
     ...(body.purpose === undefined ? {} : { purpose: purposeField(body.purpose) }),
     ...(isDefault === undefined ? {} : { isDefault }),
     ...(isActive === undefined ? {} : { isActive }),
+    ...(inputPrice === undefined ? {} : { inputPriceMicrosPer1k: inputPrice }),
+    ...(outputPrice === undefined ? {} : { outputPriceMicrosPer1k: outputPrice }),
   }
 }
 

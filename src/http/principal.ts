@@ -30,6 +30,14 @@ export async function requireSession(
   return principal
 }
 
+/** 门户允许学员登录；后台仍要求 operator/admin，不能共用这个入口。 */
+export function requirePortalSession(
+  request: FastifyRequest,
+  accounts: AccountService,
+): Promise<SessionPrincipal> {
+  return accounts.authenticateSession(bearerToken(request), { allowStudent: true })
+}
+
 export function clientIp(request: FastifyRequest): string {
   return request.ip
 }

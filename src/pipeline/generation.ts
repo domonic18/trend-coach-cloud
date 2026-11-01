@@ -1,4 +1,7 @@
 import type { Pool } from 'pg'
+import type { AiRouter } from '../ai/routing.js'
+import type { LlmTaskKey } from '../ai/tasks.js'
+import type { AiRunHandle } from '../ai/usage.js'
 import type { PipelineConfig } from '../config.js'
 import { assertSafeMarkdown, MAX_ARTICLE } from '../content/service.js'
 import { codePointLength } from '../http/validation.js'
@@ -47,6 +50,8 @@ export interface GenerationDeps {
   pool: Pool
   config: PipelineConfig
   resolveLlm: () => Promise<ResolvedContentLlm | undefined>
+  /** 生产环境注入：按任务绑定模型、计量并支持主备切换；缺省走单一模型直连。 */
+  ai?: AiRouter
 }
 
 interface GenerationWindow {
@@ -320,6 +325,41 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
     const resolved = await deps.resolveLlm()
     if (resolved === undefined) throw new PipelineFailure(PIPELINE_ERRORS.llmUnavailable, false)
     const { llm, model } = resolved
+    const ai = deps.ai
+
+    const call = async <T>(
+      taskKey: LlmTaskKey,
+      request: PromptRequest,
+      parse: (value: unknown) => T,
+      handle: AiRunHandle | undefined,
+    ): Promise<{ value: T; model: string }> => {
+      if (ai === undefined) {
+        return { value: await ask(llm, request, parse, signal), model }
+      }
+      try {
+        return await ai.completeJson(handle, taskKey, { ...request, signal }, parse)
+      } catch (error) {
+        throw mapLlmError(error)
+      }
+    }
+
+    /** 每个阶段一条运行记录：失败只标该阶段，不影响其他阶段已产生的用量。 */
+    const withRun = async <T>(
+      taskKey: LlmTaskKey,
+      run: (handle: AiRunHandle | undefined) => Promise<T>,
+    ): Promise<T> => {
+      if (ai === undefined) return run(undefined)
+      const handle = await ai.startRun(taskKey, 'pipeline', job.jobId)
+      try {
+        const result = await run(handle)
+        await ai.finishRun(handle, 'succeeded')
+        return result
+      } catch (error) {
+        const code = error instanceof PipelineFailure ? error.code : 'internal'
+        await ai.finishRun(handle, 'failed', { errorCode: code }).catch(() => undefined)
+        throw error
+      }
+    }
 
     const { rows: transcriptRows } = await pool.query<TranscriptRow>(
       'SELECT transcript_id, status FROM media_transcripts WHERE asset_id = $1',
@@ -358,12 +398,12 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
 
     await progress('structure', 5)
     const durationMs = Math.max(0, (segments[segments.length - 1]?.endMs ?? 0) - (segments[0]?.startMs ?? 0))
-    const outline = await ask(
-      llm,
+    const outline = (await withRun('content.outline', handle => call(
+      'content.outline',
       outlinePrompt(buildOutlineDigest(segments), durationMs),
       parseChapterResponse,
-      signal,
-    )
+      handle,
+    ))).value
 
     const chapterDrafts: ChapterDraft[] = []
     const chapterByTitle = new Map<string, string>()
@@ -378,12 +418,17 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
     const chapterTitles = chapterDrafts.map(chapter => chapter.title)
     await progress('structure', 25)
 
-    const windowPoints = await mapLimit(
+    const windowPoints = await withRun('content.points', handle => mapLimit(
       windows,
       config.llmConcurrency,
       signal,
-      window => ask(llm, pointPrompt(window.segments, chapterTitles), parsePointResponse, signal),
-    )
+      async window => (await call(
+        'content.points',
+        pointPrompt(window.segments, chapterTitles),
+        parsePointResponse,
+        handle,
+      )).value,
+    ))
     await progress('structure', 45)
 
     const points: PointDraft[] = []
@@ -478,44 +523,52 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
     await progress('generate', 60)
 
     let completed = 0
-    await mapLimit(points, config.llmConcurrency, signal, async point => {
-      const relevant = pointsInRange(
-        segments,
-        Math.max(0, point.startMs - ARTICLE_CONTEXT_MS),
-        point.endMs + ARTICLE_CONTEXT_MS,
-      )
-      const input = truncateText(relevant.map(segment => segment.text).join('\n'), ARTICLE_INPUT_MAX_CHARS)
-      let markdown: string | null = null
-      for (let attempt = 0; attempt < 2 && markdown === null; attempt += 1) {
-        if (signal.aborted) throw new JobCanceledError()
-        try {
-          const candidate = await ask(
-            llm,
-            articlePrompt(point.title, [{ startMs: point.startMs, endMs: point.endMs, text: input }]),
-            parseArticleResponse,
-            signal,
-          )
-          if (codePointLength(candidate) > MAX_ARTICLE) throw new Error('article too long')
-          assertSafeMarkdown(candidate)
-          markdown = candidate
-        } catch (error) {
-          if (error instanceof JobCanceledError || signal.aborted) throw new JobCanceledError()
+    let generatedModel = model
+    await withRun('content.article', handle => mapLimit(
+      points,
+      config.llmConcurrency,
+      signal,
+      async point => {
+        const relevant = pointsInRange(
+          segments,
+          Math.max(0, point.startMs - ARTICLE_CONTEXT_MS),
+          point.endMs + ARTICLE_CONTEXT_MS,
+        )
+        const input = truncateText(relevant.map(segment => segment.text).join('\n'), ARTICLE_INPUT_MAX_CHARS)
+        let markdown: string | null = null
+        for (let attempt = 0; attempt < 2 && markdown === null; attempt += 1) {
+          if (signal.aborted) throw new JobCanceledError()
+          try {
+            const result = await call(
+              'content.article',
+              articlePrompt(point.title, [{ startMs: point.startMs, endMs: point.endMs, text: input }]),
+              parseArticleResponse,
+              handle,
+            )
+            const candidate = result.value
+            if (codePointLength(candidate) > MAX_ARTICLE) throw new Error('article too long')
+            assertSafeMarkdown(candidate)
+            markdown = candidate
+            generatedModel = result.model
+          } catch (error) {
+            if (error instanceof JobCanceledError || signal.aborted) throw new JobCanceledError()
+          }
         }
-      }
-      if (markdown === null) {
-        point.articleMarkdown = null
-        point.needsReview = true
-        point.reviewReasons.push(REVIEW_REASONS.articleInvalid)
-      } else {
-        point.articleMarkdown = markdown
-        if (codePointLength(markdown) < ARTICLE_MIN_CHARS) {
+        if (markdown === null) {
+          point.articleMarkdown = null
           point.needsReview = true
-          point.reviewReasons.push(REVIEW_REASONS.articleShort)
+          point.reviewReasons.push(REVIEW_REASONS.articleInvalid)
+        } else {
+          point.articleMarkdown = markdown
+          if (codePointLength(markdown) < ARTICLE_MIN_CHARS) {
+            point.needsReview = true
+            point.reviewReasons.push(REVIEW_REASONS.articleShort)
+          }
         }
-      }
-      completed += 1
-      await progress('generate', 60 + Math.round((completed / points.length) * 30))
-    })
+        completed += 1
+        await progress('generate', 60 + Math.round((completed / points.length) * 30))
+      },
+    ))
 
     await progress('finalize', 95)
     if (signal.aborted) throw new JobCanceledError()
@@ -534,7 +587,7 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
       })),
       segments: segmentDrafts,
     }
-    await writeGeneration(deps, job, transcript.transcript_id, payload, model)
+    await writeGeneration(deps, job, transcript.transcript_id, payload, generatedModel)
     await progress('finalize', 100)
   }
 }

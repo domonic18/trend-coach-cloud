@@ -113,6 +113,9 @@ export interface AppConfig {
   rateLimitCatalogPerMinute: number
   rateLimitContentPerMinute: number
   rateLimitModelConfigPerMinute: number
+  rateLimitPortalPerMinute: number
+  rateLimitRegisterPerMinute: number
+  rateLimitAiPerMinute: number
 }
 
 type Env = Record<string, string | undefined>
@@ -331,5 +334,8 @@ export function loadConfig(env: Env = process.env): AppConfig {
     rateLimitCatalogPerMinute: int(env, 'RATE_LIMIT_CATALOG_PER_MINUTE', 240),
     rateLimitContentPerMinute: int(env, 'RATE_LIMIT_CONTENT_PER_MINUTE', 300),
     rateLimitModelConfigPerMinute: int(env, 'RATE_LIMIT_MODEL_CONFIG_PER_MINUTE', 30),
+    rateLimitPortalPerMinute: int(env, 'RATE_LIMIT_PORTAL_PER_MINUTE', 120),
+    rateLimitRegisterPerMinute: int(env, 'RATE_LIMIT_REGISTER_PER_MINUTE', 5),
+    rateLimitAiPerMinute: int(env, 'RATE_LIMIT_AI_PER_MINUTE', 120),
   }
 }

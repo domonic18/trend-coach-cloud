@@ -4,11 +4,16 @@ import { badRequest, tooManyRequests } from '../errors.js'
 import { clientIp, requireSession } from '../http/principal.js'
 import { asObject, optionalStringField, stringField } from '../http/validation.js'
 import type { RateLimiter } from '../rate-limit.js'
-import { USER_ROLES, USER_STATUSES, type AccountService, type UserRole, type UserStatus } from './service.js'
-
-const USERNAME = /^[a-z][a-z0-9._-]{2,31}$/
-const PASSWORD_MIN = 10
-const PASSWORD_MAX = 128
+import {
+  PASSWORD_MAX,
+  PASSWORD_MIN,
+  USERNAME_PATTERN,
+  USER_ROLES,
+  USER_STATUSES,
+  type AccountService,
+  type UserRole,
+  type UserStatus,
+} from './service.js'
 
 export interface AccountRouteDeps {
   accounts: AccountService
@@ -17,7 +22,7 @@ export interface AccountRouteDeps {
 }
 
 function usernameField(body: Record<string, unknown>): string {
-  return stringField(body, 'username', { min: 3, max: 32, pattern: USERNAME })
+  return stringField(body, 'username', { min: 3, max: 32, pattern: USERNAME_PATTERN })
 }
 
 function passwordField(body: Record<string, unknown>, key = 'password'): string {
