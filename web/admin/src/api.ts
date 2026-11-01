@@ -1,4 +1,12 @@
 import type {
+  AiBindingsResponse,
+  AiHealthResponse,
+  AiRunDetail,
+  AiRunPage,
+  AiTaskBinding,
+  AiTaskKey,
+  AiUsageEventPage,
+  AiUsageSummary,
   Article,
   AsrModelConfig,
   AsrProtocol,
@@ -43,6 +51,21 @@ export class ApiError extends Error {
   }
 }
 
+type UnauthorizedListener = () => void
+const unauthorizedListeners = new Set<UnauthorizedListener>()
+
+export function onUnauthorized(listener: UnauthorizedListener): () => void {
+  unauthorizedListeners.add(listener)
+  return () => {
+    unauthorizedListeners.delete(listener)
+  }
+}
+
+function notifyUnauthorized(): void {
+  clearToken()
+  for (const listener of unauthorizedListeners) listener()
+}
+
 export function hasToken(): boolean {
   return token !== null
 }
@@ -69,7 +92,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   })
   const payload: unknown = await response.json().catch(() => undefined)
   if (!response.ok) {
-    if (response.status === 401) clearToken()
+    if (response.status === 401) notifyUnauthorized()
     const message = typeof payload === 'object' && payload !== null && typeof (payload as { error?: unknown }).error === 'string'
       ? (payload as { error: string }).error
       : `请求失败（${response.status}）`
@@ -324,7 +347,7 @@ export function uploadMediaSource(
         resolve((payload as { asset: MediaAsset }).asset)
         return
       }
-      if (xhr.status === 401) clearToken()
+      if (xhr.status === 401) notifyUnauthorized()
       const message = typeof payload === 'object' && payload !== null
         && typeof (payload as { error?: unknown }).error === 'string'
         ? (payload as { error: string }).error
@@ -439,6 +462,9 @@ export interface LlmConfigInput {
   apiKey?: string
   isDefault?: boolean
   isActive?: boolean
+  /** 微美元/千 token；null 表示未配置，成本估算不猜测。 */
+  inputPriceMicrosPer1k?: number | null
+  outputPriceMicrosPer1k?: number | null
 }
 
 export async function listLlmConfigs(): Promise<LlmModelConfig[]> {
@@ -495,4 +521,68 @@ export async function patchAsrConfig(input: {
 
 export async function testAsrConfig(): Promise<ModelTestResult> {
   return request<ModelTestResult>('POST', '/v1/admin/model-configs/asr/test')
+}
+
+export interface AiUsageQuery {
+  from: string
+  to: string
+  task?: '' | AiTaskKey
+}
+
+export interface AiEventQuery extends AiUsageQuery {
+  model?: string
+  cursor?: string | null
+  limit?: number
+}
+
+export interface AiRunQuery extends AiUsageQuery {
+  status?: '' | 'running' | 'succeeded' | 'failed'
+  source?: '' | 'pipeline' | 'admin'
+  cursor?: string | null
+  limit?: number
+}
+
+function queryString(params: object): string {
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue
+    if (typeof value === 'string' || typeof value === 'number') search.set(key, String(value))
+  }
+  const encoded = search.toString()
+  return encoded === '' ? '' : `?${encoded}`
+}
+
+export async function getAiUsageSummary(query: AiUsageQuery): Promise<AiUsageSummary> {
+  return request<AiUsageSummary>('GET', `/v1/admin/ai/usage/summary${queryString(query)}`)
+}
+
+export async function listAiUsageEvents(query: AiEventQuery): Promise<AiUsageEventPage> {
+  return request<AiUsageEventPage>('GET', `/v1/admin/ai/usage/events${queryString(query)}`)
+}
+
+export async function listAiRuns(query: AiRunQuery): Promise<AiRunPage> {
+  return request<AiRunPage>('GET', `/v1/admin/ai/runs${queryString(query)}`)
+}
+
+export async function getAiRun(runId: string): Promise<AiRunDetail> {
+  return request<AiRunDetail>('GET', `/v1/admin/ai/runs/${encodeURIComponent(runId)}`)
+}
+
+export async function getAiBindings(): Promise<AiBindingsResponse> {
+  return request<AiBindingsResponse>('GET', '/v1/admin/ai/bindings')
+}
+
+export async function putAiBinding(
+  taskKey: string,
+  input: { primaryConfigId: string | null; fallbackConfigId: string | null },
+): Promise<AiTaskBinding> {
+  return request<AiTaskBinding>(
+    'PUT',
+    `/v1/admin/ai/bindings/${encodeURIComponent(taskKey)}`,
+    input,
+  )
+}
+
+export async function getAiHealth(): Promise<AiHealthResponse> {
+  return request<AiHealthResponse>('GET', '/v1/admin/ai/health')
 }

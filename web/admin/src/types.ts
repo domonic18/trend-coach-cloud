@@ -248,6 +248,8 @@ export interface LlmModelConfig {
   apiKeyMasked: string | null
   isDefault: boolean
   isActive: boolean
+  inputPriceMicrosPer1k: number | null
+  outputPriceMicrosPer1k: number | null
   lastTestedAt: number | null
   lastTestStatus: ModelTestStatus | null
   lastTestError: string | null
@@ -273,4 +275,165 @@ export interface ModelTestResult {
   status: ModelTestStatus
   detail: string
   testedAt: number
+}
+
+export type AiTaskKey =
+  | 'content.outline'
+  | 'content.points'
+  | 'content.article'
+  | 'embedding.query'
+  | 'embedding.segment'
+  | 'asr.longform'
+export type AiUsageStatus = 'success' | 'error' | 'fallback'
+export type AiRunStatus = 'running' | 'succeeded' | 'failed'
+export type AiRunSource = 'pipeline' | 'admin'
+
+export interface AiUsageTotals {
+  requests: number
+  errors: number
+  fallbacks: number
+  inputTokens: number
+  outputTokens: number
+  cachedTokens: number
+  audioSeconds: number
+  characters: number
+  avgLatencyMs: number
+  costMicros: number | null
+}
+
+export interface AiUsageDailyPoint {
+  date: string
+  requests: number
+  inputTokens: number
+  outputTokens: number
+  costMicros: number | null
+}
+
+export interface AiUsageByTask {
+  taskKey: AiTaskKey
+  label: string
+  requests: number
+  errors: number
+  inputTokens: number
+  outputTokens: number
+  audioSeconds: number
+  characters: number
+  costMicros: number | null
+}
+
+export interface AiUsageByModel {
+  configId: string | null
+  provider: string | null
+  model: string | null
+  requests: number
+  errors: number
+  inputTokens: number
+  outputTokens: number
+  costMicros: number | null
+}
+
+export interface AiUsageSummary {
+  from: string
+  to: string
+  totals: AiUsageTotals
+  daily: AiUsageDailyPoint[]
+  byTask: AiUsageByTask[]
+  byModel: AiUsageByModel[]
+}
+
+export interface AiUsageEvent {
+  usageId: string
+  runId: string | null
+  taskKey: AiTaskKey
+  label: string
+  provider: string | null
+  model: string | null
+  configId: string | null
+  inputTokens: number
+  outputTokens: number
+  cachedTokens: number
+  audioSeconds: number
+  characters: number
+  latencyMs: number
+  status: AiUsageStatus
+  errorCode: string | null
+  createdAt: string
+}
+
+export interface AiUsageEventPage {
+  events: AiUsageEvent[]
+  nextCursor: string | null
+}
+
+export interface AiRun {
+  runId: string
+  taskKey: AiTaskKey
+  label: string
+  source: AiRunSource
+  sourceId: string | null
+  status: AiRunStatus
+  primaryConfigId: string | null
+  fallbackUsed: boolean
+  startedAt: string
+  finishedAt: string | null
+  durationMs: number | null
+  errorCode: string | null
+}
+
+export interface AiRunPage {
+  runs: AiRun[]
+  nextCursor: string | null
+}
+
+export interface AiRunStep {
+  stepId: string
+  seq: number
+  taskKey: AiTaskKey
+  configId: string | null
+  provider: string | null
+  model: string | null
+  attempt: number
+  status: AiUsageStatus
+  latencyMs: number
+  usageId: string | null
+  errorCode: string | null
+  createdAt: string
+}
+
+export interface AiRunDetail extends AiRun {
+  summary: unknown
+  steps: AiRunStep[]
+}
+
+export interface AiTaskBinding {
+  taskKey: AiTaskKey
+  label: string
+  purpose: LlmPurpose
+  primaryConfigId: string | null
+  fallbackConfigId: string | null
+  updatedAt: string | null
+}
+
+export interface AiBindingsResponse {
+  bindings: AiTaskBinding[]
+  configs: LlmModelConfig[]
+}
+
+export interface AiConfigHealth {
+  configId: string
+  name: string
+  provider: string
+  model: string
+  purpose: LlmPurpose
+  isActive: boolean
+  consecutiveFailures: number
+  cooldownUntil: string | null
+  coolingDown: boolean
+  lastError: string | null
+  lastFailureAt: string | null
+  lastSuccessAt: string | null
+}
+
+export interface AiHealthResponse {
+  configs: AiConfigHealth[]
 }

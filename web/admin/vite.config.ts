@@ -11,6 +11,18 @@ export default defineConfig({
   build: {
     outDir: fileURLToPath(new URL('../../dist/admin', import.meta.url)),
     emptyOutDir: true,
+    chunkSizeWarningLimit: 1200,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ['react', 'react-dom', 'react-router-dom'],
+          query: ['@tanstack/react-query'],
+          antd: ['antd'],
+          icons: ['@ant-design/icons'],
+          markdown: ['react-markdown', 'remark-gfm'],
+        },
+      },
+    },
   },
   server: {
     port: 5173,
