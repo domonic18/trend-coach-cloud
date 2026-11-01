@@ -173,6 +173,22 @@ test('005 迁移创建模型配置表与唯一默认约束', async () => {
   )
 })
 
+test('006 迁移允许 anthropic 协议并拒绝未知协议', async () => {
+  await pool.query(
+    `INSERT INTO llm_configs (config_id, name, provider, protocol, base_url, model, purpose)
+     VALUES ('llmc_0000000000000005', 'anth', 'anthropic', 'anthropic',
+             'https://api.anthropic.com', 'm', 'content')`,
+  )
+  await rejectsWithCode(
+    pool.query(
+      `INSERT INTO llm_configs (config_id, name, provider, protocol, base_url, model, purpose)
+       VALUES ('llmc_0000000000000006', 'bad', 'openai', 'gemini',
+               'https://api.example.com', 'm', 'content')`,
+    ),
+    '23514',
+  )
+})
+
 test('转写块拒绝非正时间范围', async () => {
   await pool.query(
     `INSERT INTO media_transcripts (transcript_id, asset_id, model)

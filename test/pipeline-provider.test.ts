@@ -14,6 +14,8 @@ interface StubRequest {
   method: string | undefined
   url: string | undefined
   authorization: string | undefined
+  apiKey: string | undefined
+  anthropicVersion: string | undefined
   contentType: string | undefined
   body: Buffer
 }
@@ -37,6 +39,10 @@ async function startStub(
       method: request.method,
       url: request.url,
       authorization: request.headers.authorization,
+      apiKey: typeof request.headers['x-api-key'] === 'string' ? request.headers['x-api-key'] : undefined,
+      anthropicVersion: typeof request.headers['anthropic-version'] === 'string'
+        ? request.headers['anthropic-version']
+        : undefined,
       contentType: request.headers['content-type'],
       body,
     })
@@ -66,6 +72,7 @@ function asrConfig(baseUrl: string): AsrConfig {
 
 function llmConfig(baseUrl: string, overrides: Partial<LlmConfig> = {}): LlmConfig {
   return {
+    protocol: 'openai',
     baseUrl,
     model: 'm1-model',
     apiKey: 'test-llm-key',
@@ -213,6 +220,62 @@ test('LLM 请求体符合 OpenAI 兼容约定并解析 JSON', async () => {
     ])
   } finally {
     await stub.close()
+  }
+})
+
+test('LLM Anthropic Messages 请求与响应解析', async () => {
+  const stub = await startStub((_request, _body, response) => {
+    jsonResponse(response, {
+      content: [
+        { type: 'text', text: '```json\n{"ok":true,' },
+        { type: 'text', text: '"items":[1,2]}\n```' },
+      ],
+      stop_reason: 'end_turn',
+    })
+  })
+  try {
+    const llm = createLlmClient(llmConfig(stub.url, {
+      protocol: 'anthropic',
+      baseUrl: stub.url,
+      apiKey: 'test-anthropic-key',
+    }))
+    const parsed = await llm.completeJson(
+      { system: 'system', user: 'user' },
+      value => value as { ok: boolean; items: number[] },
+    )
+    assert.deepEqual(parsed, { ok: true, items: [1, 2] })
+
+    const request = stub.requests[0]
+    assert.equal(request?.url, '/v1/messages')
+    assert.equal(request?.authorization, 'Bearer test-anthropic-key')
+    assert.equal(request?.apiKey, 'test-anthropic-key')
+    assert.equal(request?.anthropicVersion, '2023-06-01')
+    const body = JSON.parse(request?.body.toString('utf8') ?? '{}') as Record<string, unknown>
+    assert.equal(body.model, 'm1-model')
+    assert.equal(body.max_tokens, 256)
+    assert.equal(body.system, 'system')
+    assert.equal(body.response_format, undefined)
+    assert.deepEqual(body.messages, [{ role: 'user', content: 'user' }])
+  } finally {
+    await stub.close()
+  }
+})
+
+test('LLM Anthropic 截断与空内容映射为错误', async () => {
+  for (const item of [
+    { payload: { content: [{ type: 'text', text: '{"ok":true}' }], stop_reason: 'max_tokens' }, kind: 'truncated' },
+    { payload: { content: [], stop_reason: 'end_turn' }, kind: 'invalid_response' },
+  ]) {
+    const stub = await startStub((_request, _body, response) => jsonResponse(response, item.payload))
+    try {
+      const llm = createLlmClient(llmConfig(stub.url, { protocol: 'anthropic', baseUrl: stub.url }))
+      await assert.rejects(
+        llm.completeJson({ system: 's', user: 'u' }, value => value),
+        (error: unknown) => error instanceof LlmError && error.kind === item.kind,
+      )
+    } finally {
+      await stub.close()
+    }
   }
 })
 

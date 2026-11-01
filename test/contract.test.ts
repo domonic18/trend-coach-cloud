@@ -2072,6 +2072,64 @@ test('模型配置：仅管理员可读，密钥加密落库且只回显掩码',
   assert.deepEqual(defaults.map(config => config.configId), [secondId])
   assert.equal(list.body.includes('sk-second-key-654321'), false)
 
+  const anthropic = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/model-configs/llm',
+    headers: adminHeaders(),
+    payload: {
+      name: 'anthropic-content',
+      provider: 'anthropic',
+      protocol: 'anthropic',
+      baseUrl: 'https://api.anthropic.com/v1/messages',
+      model: 'claude-test',
+      purpose: 'content',
+      apiKey: 'sk-ant-contract-123456',
+    },
+  })
+  assert.equal(anthropic.statusCode, 201, anthropic.body)
+  const anthropicBody = anthropic.json() as { configId: string; protocol: string; baseUrl: string }
+  assert.equal(anthropicBody.protocol, 'anthropic')
+  assert.equal(anthropicBody.baseUrl, 'https://api.anthropic.com')
+
+  const switchedProtocol = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/model-configs/llm/${anthropicBody.configId}`,
+    headers: adminHeaders(),
+    payload: { protocol: 'openai' },
+  })
+  assert.equal(switchedProtocol.statusCode, 200, switchedProtocol.body)
+  assert.equal((switchedProtocol.json() as { protocol: string }).protocol, 'openai')
+
+  const badProtocol = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/model-configs/llm',
+    headers: adminHeaders(),
+    payload: {
+      name: 'bad-protocol',
+      provider: 'openai',
+      protocol: 'gemini',
+      baseUrl: 'https://api.example.com',
+      model: 'm',
+      purpose: 'content',
+    },
+  })
+  assert.equal(badProtocol.statusCode, 400)
+
+  const anthropicEmbedding = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/model-configs/llm',
+    headers: adminHeaders(),
+    payload: {
+      name: 'bad-embedding',
+      provider: 'anthropic',
+      protocol: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      model: 'm',
+      purpose: 'embedding',
+    },
+  })
+  assert.equal(anthropicEmbedding.statusCode, 400)
+
   const patched = await app.inject({
     method: 'PATCH',
     url: `/v1/admin/model-configs/llm/${first.configId}`,
