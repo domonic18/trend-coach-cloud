@@ -230,3 +230,46 @@ export interface CoursePublishResult {
   indexed: boolean
   embedded: number
 }
+
+export type LlmPurpose = 'content' | 'embedding'
+export type AsrProtocol = 'minimax' | 'openai'
+export type ModelTestStatus = 'success' | 'failed'
+
+export interface LlmModelConfig {
+  configId: string
+  name: string
+  provider: string
+  protocol: 'openai'
+  baseUrl: string
+  model: string
+  purpose: LlmPurpose
+  apiKeyConfigured: boolean
+  apiKeyMasked: string | null
+  isDefault: boolean
+  isActive: boolean
+  lastTestedAt: number | null
+  lastTestStatus: ModelTestStatus | null
+  lastTestError: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface AsrModelConfig {
+  provider: string
+  protocol: AsrProtocol
+  baseUrl: string
+  model: string
+  apiKeyConfigured: boolean
+  apiKeyMasked: string | null
+  enabled: boolean
+  lastTestedAt: number | null
+  lastTestStatus: ModelTestStatus | null
+  lastTestError: string | null
+  updatedAt: number
+}
+
+export interface ModelTestResult {
+  status: ModelTestStatus
+  detail: string
+  testedAt: number
+}

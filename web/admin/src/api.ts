@@ -1,10 +1,15 @@
 import type {
   Article,
+  AsrModelConfig,
+  AsrProtocol,
   ContentStatus,
   Course,
   CoursePublishResult,
   CourseSummary,
   CourseTree,
+  LlmModelConfig,
+  LlmPurpose,
+  ModelTestResult,
   GenerationApplyResult,
   GenerationPreview,
   GenerationSummary,
@@ -421,4 +426,71 @@ export async function publishCourse(courseId: string): Promise<CoursePublishResu
     'POST',
     `/v1/admin/content/courses/${encodeURIComponent(courseId)}/publish`,
   )
+}
+
+export interface LlmConfigInput {
+  name: string
+  provider: string
+  baseUrl: string
+  model: string
+  purpose: LlmPurpose
+  apiKey?: string
+  isDefault?: boolean
+  isActive?: boolean
+}
+
+export async function listLlmConfigs(): Promise<LlmModelConfig[]> {
+  return request<LlmModelConfig[]>('GET', '/v1/admin/model-configs/llm')
+}
+
+export async function createLlmConfig(input: LlmConfigInput): Promise<LlmModelConfig> {
+  return request<LlmModelConfig>('POST', '/v1/admin/model-configs/llm', input)
+}
+
+export async function patchLlmConfig(
+  configId: string,
+  input: Partial<LlmConfigInput>,
+): Promise<LlmModelConfig> {
+  return request<LlmModelConfig>(
+    'PATCH',
+    `/v1/admin/model-configs/llm/${encodeURIComponent(configId)}`,
+    input,
+  )
+}
+
+export async function deleteLlmConfig(configId: string): Promise<void> {
+  await request<undefined>('DELETE', `/v1/admin/model-configs/llm/${encodeURIComponent(configId)}`)
+}
+
+export async function setDefaultLlmConfig(configId: string): Promise<LlmModelConfig> {
+  return request<LlmModelConfig>(
+    'POST',
+    `/v1/admin/model-configs/llm/${encodeURIComponent(configId)}/set-default`,
+  )
+}
+
+export async function testLlmConfig(configId: string): Promise<ModelTestResult> {
+  return request<ModelTestResult>(
+    'POST',
+    `/v1/admin/model-configs/llm/${encodeURIComponent(configId)}/test`,
+  )
+}
+
+export async function getAsrConfig(): Promise<AsrModelConfig> {
+  return request<AsrModelConfig>('GET', '/v1/admin/model-configs/asr')
+}
+
+export async function patchAsrConfig(input: {
+  provider?: string
+  protocol?: AsrProtocol
+  baseUrl?: string
+  model?: string
+  apiKey?: string
+  enabled?: boolean
+}): Promise<AsrModelConfig> {
+  return request<AsrModelConfig>('PATCH', '/v1/admin/model-configs/asr', input)
+}
+
+export async function testAsrConfig(): Promise<ModelTestResult> {
+  return request<ModelTestResult>('POST', '/v1/admin/model-configs/asr/test')
 }

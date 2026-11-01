@@ -141,6 +141,32 @@ input.narrow {
   width: 90px;
 }
 
+.field input.wide,
+input.wide {
+  width: 280px;
+}
+
+.inline-form {
+  margin: 12px 0;
+  background: #fbfcfe;
+}
+
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #334155;
+}
+
+.ok {
+  color: #15803d;
+}
+
+.bad {
+  color: #b91c1c;
+}
+
 .point {
   display: flex;
   flex-wrap: wrap;
