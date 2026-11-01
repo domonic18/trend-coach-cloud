@@ -226,13 +226,16 @@ test('OpenAPI 与注册路由双向一致', async () => {
   const registered = new Set(
     routes
       .map(route => route.replace(/:([A-Za-z0-9_]+)/g, '{$1}'))
-      // HEAD 由 GET 自动注册；/device、/media/*、/metrics 与 /admin 静态资源是运维入口，不对外发布契约。
+      // HEAD 由 GET 自动注册；/device、/media/*、/metrics、/admin 与门户静态资源是运维入口，不对外发布契约。
       .filter(route => !route.startsWith('HEAD '))
       .filter(route => route !== 'OPTIONS *')
       .filter(route => !route.endsWith(' /device'))
       .filter(route => !route.includes(' /media/'))
       .filter(route => !route.includes(' /admin'))
-      .filter(route => route !== 'GET /metrics'),
+      .filter(route => route !== 'GET /metrics')
+      .filter(route => !/^GET \/(assets\/|downloads\/)/.test(route))
+      .filter(route => !/^GET \/.*\.html$/.test(route))
+      .filter(route => !['GET /routes.json', 'GET /sitemap.xml', 'GET /robots.txt', 'GET /favicon.ico'].includes(route)),
   )
   assert.deepEqual([...registered].sort(), [...documented].sort())
 })
