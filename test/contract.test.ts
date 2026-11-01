@@ -27,6 +27,7 @@ const STUDENT_PASSWORD = 'student-password-1234'
 
 const pool = createPool(DATABASE_URL)
 let mediaDir = ''
+let figureDir = ''
 let app: FastifyInstance
 let routes: string[] = []
 let mainGrant: Grant
@@ -49,6 +50,7 @@ function env(overrides: Record<string, string> = {}): Record<string, string> {
     MEDIA_SIGNING_SECRET: MEDIA_SECRET,
     MEDIA_LOCAL_DIR: mediaDir,
     MEDIA_BASE_URL,
+    PIPELINE_FIGURE_DIR: figureDir,
     SEARCH_MIN_SIMILARITY: '0.01',
     RATE_LIMIT_SEARCH_PER_MINUTE: '1000',
     RATE_LIMIT_DEVICE_CODE_PER_MINUTE: '1000',
@@ -150,6 +152,7 @@ async function userIdFor(deviceId: string): Promise<string> {
 
 before(async () => {
   mediaDir = await mkdtemp(join(tmpdir(), 'trend-coach-media-'))
+  figureDir = await mkdtemp(join(tmpdir(), 'trend-coach-figures-'))
   await mkdir(join(mediaDir, 'hls'), { recursive: true })
   await writeFile(join(mediaDir, 'hls', 'index.m3u8'), [
     '#EXTM3U',
@@ -189,6 +192,7 @@ after(async () => {
   await app.close()
   await pool.end()
   await rm(mediaDir, { recursive: true, force: true })
+  await rm(figureDir, { recursive: true, force: true })
 })
 
 test('GET /health 报告数据库可用', async () => {
@@ -689,7 +693,6 @@ test('内容管理：角色边界、课程结构、文章版本与片段校验',
       title: '知识点一',
       position: 1,
       segmentCount: 0,
-      article: null,
     },
   })
 
@@ -728,9 +731,10 @@ test('内容管理：角色边界、课程结构、文章版本与片段校验',
   assert.equal(patchedCourse.statusCode, 200, patchedCourse.body)
   assert.equal((patchedCourse.json() as { course: { status: string } }).course.status, 'published')
 
+  const articleUrl = `/v1/admin/content/courses/${courseId}/chapters/${chapterId}/article`
   const noArticle = await app.inject({
     method: 'GET',
-    url: `/v1/admin/content/knowledge-points/${pointId}/article`,
+    url: articleUrl,
     headers: operatorHeaders,
   })
   assert.equal(noArticle.statusCode, 200)
@@ -738,7 +742,7 @@ test('内容管理：角色边界、课程结构、文章版本与片段校验',
 
   const firstArticle = await app.inject({
     method: 'PUT',
-    url: `/v1/admin/content/knowledge-points/${pointId}/article`,
+    url: articleUrl,
     headers: operatorHeaders,
     payload: { markdown: '# 标题\n\n正文', status: 'published' },
   })
@@ -750,7 +754,7 @@ test('内容管理：角色边界、课程结构、文章版本与片段校验',
 
   const secondArticle = await app.inject({
     method: 'PUT',
-    url: `/v1/admin/content/knowledge-points/${pointId}/article`,
+    url: articleUrl,
     headers: operatorHeaders,
     payload: { markdown: '# 标题\n\n正文（改）', status: 'draft' },
   })
@@ -767,7 +771,7 @@ test('内容管理：角色边界、课程结构、文章版本与片段校验',
   ]) {
     const unsafe = await app.inject({
       method: 'PUT',
-      url: `/v1/admin/content/knowledge-points/${pointId}/article`,
+      url: articleUrl,
       headers: operatorHeaders,
       payload: { markdown, status: 'draft' },
     })
@@ -776,11 +780,19 @@ test('内容管理：角色边界、课程结构、文章版本与片段校验',
 
   const tooLongArticle = await app.inject({
     method: 'PUT',
-    url: `/v1/admin/content/knowledge-points/${pointId}/article`,
+    url: articleUrl,
     headers: operatorHeaders,
     payload: { markdown: 'a'.repeat(20001), status: 'draft' },
   })
   assert.equal(tooLongArticle.statusCode, 400)
+
+  const externalImage = await app.inject({
+    method: 'PUT',
+    url: articleUrl,
+    headers: operatorHeaders,
+    payload: { markdown: '![外链](https://example.com/a.png)', status: 'draft' },
+  })
+  assert.equal(externalImage.statusCode, 400)
 
   const badRange = await app.inject({
     method: 'POST',
@@ -946,12 +958,17 @@ test('内容管理：角色边界、课程结构、文章版本与片段校验',
   assert.equal(tree.statusCode, 200, tree.body)
   const treeBody = tree.json() as {
     course: { status: string }
-    chapters: { knowledgePoints: { segmentCount: number; article: { version: number; status: string } | null }[] }[]
+    chapters: {
+      article: { version: number; status: string } | null
+      figureCount: number
+      knowledgePoints: { segmentCount: number }[]
+    }[]
   }
   assert.equal(treeBody.course.status, 'published')
   assert.equal(treeBody.chapters[0]?.knowledgePoints[0]?.segmentCount, 1)
-  assert.equal(treeBody.chapters[0]?.knowledgePoints[0]?.article?.version, 2)
-  assert.equal(treeBody.chapters[0]?.knowledgePoints[0]?.article?.status, 'draft')
+  assert.equal(treeBody.chapters[0]?.article?.version, 2)
+  assert.equal(treeBody.chapters[0]?.article?.status, 'draft')
+  assert.equal(treeBody.chapters[0]?.figureCount, 0)
 
   const courses = await app.inject({
     method: 'GET',
@@ -966,7 +983,8 @@ test('内容管理：角色边界、课程结构、文章版本与片段校验',
       chapterCount: number
       knowledgePointCount: number
       segmentCount: number
-      articleCount: number
+      chapterArticleCount: number
+      figureCount: number
     }[]
   }).courses.find(item => item.courseId === courseId)
   assert.deepEqual(summary, {
@@ -976,7 +994,8 @@ test('内容管理：角色边界、课程结构、文章版本与片段校验',
     chapterCount: 1,
     knowledgePointCount: 1,
     segmentCount: 1,
-    articleCount: 1,
+    chapterArticleCount: 1,
+    figureCount: 0,
   })
 
   const reindex = await app.inject({
@@ -1527,11 +1546,22 @@ test('体系：课程列表与课程树', async () => {
   })
   assert.equal(detail.statusCode, 200, detail.body)
   const course = detail.json() as {
+    contractVersion: number
     courseId: string
-    chapters: { chapterId: string; knowledgePoints: Record<string, unknown>[] }[]
+    chapters: {
+      chapterId: string
+      hasArticle: boolean
+      figureCount: number
+      knowledgePoints: Record<string, unknown>[]
+    }[]
   }
+  assert.equal(course.contractVersion, 2)
   assert.equal(course.courseId, 'TC-101')
   assert.deepEqual(course.chapters.map(chapter => chapter.chapterId), ['M1', 'M2', 'M3'])
+  for (const chapter of course.chapters) {
+    assert.equal(chapter.hasArticle, true)
+    assert.equal(chapter.figureCount, 0)
+  }
   const points = course.chapters.flatMap(chapter => chapter.knowledgePoints)
   assert.equal(points.length, 6)
   for (const point of points) {
@@ -1558,7 +1588,7 @@ test('体系：课程列表与课程树', async () => {
   assert.equal(missing.statusCode, 404)
 })
 
-test('体系：知识点详情、文章与相邻知识点', async () => {
+test('体系：知识点详情只返回定位与相邻知识点', async () => {
   const response = await app.inject({
     method: 'GET',
     url: '/v1/catalog/knowledge-points/KP-1.1',
@@ -1570,7 +1600,6 @@ test('体系：知识点详情、文章与相邻知识点', async () => {
     courseId: string
     chapterId: string
     title: string
-    article: { markdown: string; version: number; publishedAt: number } | null
     segmentId?: string
     adjacentKnowledgePoints: { knowledgePointId: string; title: string }[]
   }
@@ -1578,10 +1607,7 @@ test('体系：知识点详情、文章与相邻知识点', async () => {
   assert.equal(detail.courseId, 'TC-101')
   assert.equal(detail.chapterId, 'M1')
   assert.equal(detail.segmentId, SEGMENT_ID)
-  assert.ok(detail.article !== null)
-  assert.match(detail.article.markdown, /趋势/)
-  assert.equal(detail.article.version, 1)
-  assert.ok(detail.article.publishedAt > 0)
+  assert.equal('article' in detail, false)
   assert.ok(detail.adjacentKnowledgePoints.length <= 5)
   assert.ok(detail.adjacentKnowledgePoints.some(point => point.knowledgePointId === 'KP-1.2'))
   for (const point of detail.adjacentKnowledgePoints) {
@@ -1601,18 +1627,167 @@ test('体系：知识点详情、文章与相邻知识点', async () => {
     headers: authHeaders(mainGrant),
   })
   assert.equal(missing.statusCode, 404)
+})
 
-  await pool.query("UPDATE articles SET status = 'draft' WHERE knowledge_point_id = 'KP-1.1'")
+test('体系：章节教材、图示签名与相邻章节', async () => {
+  const response = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/courses/TC-101/chapters/M1',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(response.statusCode, 200, response.body)
+  const chapter = response.json() as {
+    chapterId: string
+    courseId: string
+    title: string
+    article: { markdown: string; version: number; publishedAt: number } | null
+    figures: Record<string, unknown>
+    adjacentChapters: { chapterId: string; title: string }[]
+  }
+  assert.deepEqual(Object.keys(chapter).sort(), [
+    'adjacentChapters', 'article', 'chapterId', 'courseId', 'figures', 'title',
+  ])
+  assert.equal(chapter.chapterId, 'M1')
+  assert.equal(chapter.courseId, 'TC-101')
+  assert.equal(chapter.title, '第一章 趋势认知')
+  assert.ok(chapter.article !== null)
+  assert.match(chapter.article.markdown, /趋势/)
+  assert.equal(chapter.article.version, 1)
+  assert.ok(chapter.article.publishedAt > 0)
+  assert.deepEqual(chapter.figures, {})
+  assert.ok(chapter.adjacentChapters.length <= 5)
+  assert.ok(chapter.adjacentChapters.some(entry => entry.chapterId === 'M2'))
+  for (const entry of chapter.adjacentChapters) {
+    assert.deepEqual(Object.keys(entry).sort(), ['chapterId', 'title'])
+  }
+
+  const invalid = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/courses/TC-101/chapters/bad%20id',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(invalid.statusCode, 400)
+
+  const missing = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/courses/TC-101/chapters/M9',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(missing.statusCode, 404)
+
+  const missingCourse = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/courses/NOPE/chapters/M1',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(missingCourse.statusCode, 404)
+
+  await pool.query(
+    "UPDATE chapter_articles SET status = 'draft' WHERE course_id = 'TC-101' AND chapter_id = 'M1'",
+  )
   try {
     const draft = await app.inject({
       method: 'GET',
-      url: '/v1/catalog/knowledge-points/KP-1.1',
+      url: '/v1/catalog/courses/TC-101/chapters/M1',
       headers: authHeaders(mainGrant),
     })
     assert.equal(draft.statusCode, 200)
     assert.equal((draft.json() as { article: unknown }).article, null)
   } finally {
-    await pool.query("UPDATE articles SET status = 'published' WHERE knowledge_point_id = 'KP-1.1'")
+    await pool.query(
+      "UPDATE chapter_articles SET status = 'published' WHERE course_id = 'TC-101' AND chapter_id = 'M1'",
+    )
+  }
+})
+
+test('体系：章节图示只下发已选且已发布的签名地址', async () => {
+  const figureId = 'fig_test0001'
+  const candidateId = 'cand_test0001'
+  await mkdir(join(figureDir, figureId), { recursive: true })
+  await writeFile(join(figureDir, figureId, `${candidateId}.jpg`), Buffer.alloc(2048, 3))
+  await pool.query(
+    `INSERT INTO figures (figure_id, course_id, chapter_id, kind, caption, status)
+     VALUES ($1, 'TC-101', 'M1', 'keyframe', '均线交叉示意', 'planned')`,
+    [figureId],
+  )
+  await pool.query(
+    `INSERT INTO figure_candidates
+       (candidate_id, figure_id, rel_path, width, height, bytes, status)
+     VALUES ($1, $2, $3, 1600, 900, 2048, 'ready')`,
+    [candidateId, figureId, `${figureId}/${candidateId}.jpg`],
+  )
+  await pool.query(
+    `UPDATE figures SET selected_candidate_id = $1, status = 'published', published_at = now()
+     WHERE figure_id = $2`,
+    [candidateId, figureId],
+  )
+  const original = await pool.query<{ markdown: string }>(
+    "SELECT markdown FROM chapter_articles WHERE course_id = 'TC-101' AND chapter_id = 'M1'",
+  )
+  const markdown = original.rows[0]?.markdown
+  assert.ok(markdown !== undefined)
+  await pool.query(
+    "UPDATE chapter_articles SET markdown = $1 WHERE course_id = 'TC-101' AND chapter_id = 'M1'",
+    [`${markdown}\n\n![均线交叉示意](figure:${figureId})\n`],
+  )
+  try {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/catalog/courses/TC-101/chapters/M1',
+      headers: authHeaders(mainGrant),
+    })
+    assert.equal(response.statusCode, 200, response.body)
+    const chapter = response.json() as {
+      figures: Record<string, { url: string; width: number; height: number; alt: string; caption?: string }>
+    }
+    const figure = chapter.figures[figureId]
+    assert.ok(figure !== undefined)
+    assert.equal(figure.width, 1600)
+    assert.equal(figure.height, 900)
+    assert.equal(figure.alt, '均线交叉示意')
+    assert.equal(figure.caption, '均线交叉示意')
+    const url = new URL(figure.url)
+    assert.equal(url.origin, 'http://127.0.0.1:3939')
+    assert.equal(url.pathname, `/media/figures/${figureId}/${candidateId}.jpg`)
+    assert.ok(Number(url.searchParams.get('expires')) > Math.floor(Date.now() / 1000))
+    assert.ok((url.searchParams.get('sig') ?? '') !== '')
+
+    const image = await app.inject({ method: 'GET', url: `${url.pathname}${url.search}` })
+    assert.equal(image.statusCode, 200)
+    assert.equal(image.headers['content-type'], 'image/jpeg')
+    assert.equal(image.headers['cache-control'], 'private, max-age=600')
+    assert.equal(image.rawPayload.length, 2048)
+
+    const tampered = new URL(figure.url)
+    tampered.searchParams.set('sig', 'bad-signature')
+    const denied = await app.inject({ method: 'GET', url: `${tampered.pathname}${tampered.search}` })
+    assert.equal(denied.statusCode, 403)
+
+    const switched = new URL(figure.url)
+    switched.pathname = `/media/figures/fig_other/${candidateId}.jpg`
+    const switchedResponse = await app.inject({
+      method: 'GET',
+      url: `${switched.pathname}${switched.search}`,
+    })
+    assert.equal(switchedResponse.statusCode, 403)
+
+    await pool.query(
+      "UPDATE chapter_articles SET markdown = $1 WHERE course_id = 'TC-101' AND chapter_id = 'M1'",
+      [`${markdown}\n\n![缺失](figure:fig_missing)\n`],
+    )
+    const broken = await app.inject({
+      method: 'GET',
+      url: '/v1/catalog/courses/TC-101/chapters/M1',
+      headers: authHeaders(mainGrant),
+    })
+    assert.equal(broken.statusCode, 500)
+  } finally {
+    await pool.query(
+      "UPDATE chapter_articles SET markdown = $1 WHERE course_id = 'TC-101' AND chapter_id = 'M1'",
+      [markdown],
+    )
+    await pool.query('DELETE FROM figures WHERE figure_id = $1', [figureId])
+    await rm(join(figureDir, figureId), { recursive: true, force: true })
   }
 })
 
@@ -2187,8 +2362,52 @@ test('模型配置：仅管理员可读，密钥加密落库且只回显掩码',
   })
   assert.equal(missingTest.statusCode, 404)
 
+  const image = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/model-configs/llm',
+    headers: adminHeaders(),
+    payload: {
+      name: 'ark-image',
+      provider: 'ark',
+      baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      model: 'doubao-seedream-5-0-260128',
+      purpose: 'image',
+      apiKey: 'ark-contract-key-123456',
+      isDefault: true,
+      imagePriceMicros: 150000,
+    },
+  })
+  assert.equal(image.statusCode, 201, image.body)
+  const imageBody = image.json() as { configId: string; purpose: string; imagePriceMicros: number; isDefault: boolean }
+  assert.equal(imageBody.purpose, 'image')
+  assert.equal(imageBody.imagePriceMicros, 150000)
+  assert.equal(imageBody.isDefault, true)
+  assert.equal(image.body.includes('ark-contract-key-123456'), false)
+
+  const defaultImagePrice = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/model-configs/llm',
+    headers: adminHeaders(),
+    payload: {
+      name: 'ark-image-default-price',
+      provider: 'ark',
+      baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      model: 'doubao-seedream-5-0-260128',
+      purpose: 'image',
+    },
+  })
+  assert.equal(defaultImagePrice.statusCode, 201, defaultImagePrice.body)
+  assert.equal((defaultImagePrice.json() as { imagePriceMicros: number }).imagePriceMicros, 120000)
+
   for (const payload of [
-    { name: 'x', provider: 'openai', baseUrl: 'https://api.example.com', model: 'm', purpose: 'image' },
+    {
+      name: 'x',
+      provider: 'anthropic',
+      protocol: 'anthropic',
+      baseUrl: 'https://api.example.com',
+      model: 'm',
+      purpose: 'image',
+    },
     { name: 'x', provider: 'openai', baseUrl: 'not-a-url', model: 'm', purpose: 'content' },
     { name: '', provider: 'openai', baseUrl: 'https://api.example.com', model: 'm', purpose: 'content' },
     { name: 'x', provider: 'bad provider', baseUrl: 'https://api.example.com', model: 'm', purpose: 'content' },
@@ -2202,12 +2421,19 @@ test('模型配置：仅管理员可读，密钥加密落库且只回显掩码',
     assert.equal(invalid.statusCode, 400, JSON.stringify(payload))
   }
 
-  const deleted = await app.inject({
-    method: 'DELETE',
-    url: `/v1/admin/model-configs/llm/${secondId}`,
-    headers: adminHeaders(),
-  })
-  assert.equal(deleted.statusCode, 204)
+  for (const configId of [
+    (defaultImagePrice.json() as { configId: string }).configId,
+    imageBody.configId,
+    secondId,
+  ]) {
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/v1/admin/model-configs/llm/${configId}`,
+      headers: adminHeaders(),
+    })
+    assert.equal(removed.statusCode, 204)
+  }
+
   const afterDelete = await app.inject({
     method: 'GET',
     url: `/v1/admin/model-configs/llm/${secondId}`,

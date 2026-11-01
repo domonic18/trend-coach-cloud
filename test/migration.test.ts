@@ -161,7 +161,7 @@ test('005 迁移创建模型配置表与唯一默认约束', async () => {
   await rejectsWithCode(
     pool.query(
       `INSERT INTO llm_configs (config_id, name, provider, base_url, model, purpose)
-       VALUES ('llmc_0000000000000004', 'bad', 'openai', 'https://api.example.com/v1', 'x', 'image')`,
+       VALUES ('llmc_0000000000000004', 'bad', 'openai', 'https://api.example.com/v1', 'x', 'video')`,
     ),
     '23514',
   )
@@ -212,4 +212,101 @@ test('转写块拒绝非正时间范围', async () => {
     ),
     '23505',
   )
+})
+
+test('008 迁移创建章节教材与图示表并扩展图片用途', async () => {
+  const tables = await pool.query<{ table_name: string }>(
+    `SELECT table_name FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = ANY($1)`,
+    [['chapter_articles', 'figures', 'figure_candidates']],
+  )
+  assert.deepEqual(
+    tables.rows.map(row => row.table_name).sort(),
+    ['chapter_articles', 'figure_candidates', 'figures'],
+  )
+
+  const image = await pool.query<{ image_price_micros: number }>(
+    `INSERT INTO llm_configs (config_id, name, provider, base_url, model, purpose)
+     VALUES ('llmc_0000000000000007', 'image', 'volcengine',
+             'https://ark.cn-beijing.volces.com/api/v3', 'doubao-seedream', 'image')
+     RETURNING image_price_micros`,
+  )
+  assert.equal(image.rows[0]?.image_price_micros, 120000)
+
+  await pool.query(
+    `INSERT INTO chapters (course_id, chapter_id, title)
+     VALUES ('course-pipeline', 'ch01', '第一章')
+     ON CONFLICT (course_id, chapter_id) DO NOTHING`,
+  )
+  await rejectsWithCode(
+    pool.query(
+      `INSERT INTO chapter_articles (course_id, chapter_id, markdown)
+       VALUES ('course-pipeline', 'ch01', '')`,
+    ),
+    '23514',
+  )
+  await pool.query(
+    `INSERT INTO chapter_articles (course_id, chapter_id, markdown, status, published_at)
+     VALUES ('course-pipeline', 'ch01', '# 章节', 'published', now())`,
+  )
+
+  await rejectsWithCode(
+    pool.query(
+      `INSERT INTO figures (figure_id, course_id, chapter_id, kind, caption)
+       VALUES ('fig_m8bad001', 'course-pipeline', 'ch01', 'keyframe', '')`,
+    ),
+    '23514',
+  )
+  await pool.query(
+    `INSERT INTO figures (figure_id, course_id, chapter_id, kind, caption, status)
+     VALUES ('fig_m8test001', 'course-pipeline', 'ch01', 'generated', '示意', 'planned')`,
+  )
+  await rejectsWithCode(
+    pool.query(
+      `INSERT INTO figure_candidates (candidate_id, figure_id, rel_path, width, height, bytes)
+       VALUES ('cand_m8test001', 'fig_m8test001', 'fig_m8test001/cand_m8test001.jpg', 799, 900, 2048)`,
+    ),
+    '23514',
+  )
+  await pool.query(
+    `INSERT INTO figure_candidates (candidate_id, figure_id, rel_path, width, height, bytes, status)
+     VALUES ('cand_m8test001', 'fig_m8test001', 'fig_m8test001/cand_m8test001.jpg', 1600, 900, 2048, 'ready')`,
+  )
+  await rejectsWithCode(
+    pool.query(
+      `UPDATE figures SET status = 'published', published_at = now() WHERE figure_id = 'fig_m8test001'`,
+    ),
+    '23514',
+  )
+  await pool.query(
+    `UPDATE figures SET selected_candidate_id = 'cand_m8test001',
+            status = 'published', published_at = now()
+     WHERE figure_id = 'fig_m8test001'`,
+  )
+
+  await pool.query(
+    `INSERT INTO pipeline_jobs (job_id, asset_id, course_id, kind, stage)
+     VALUES ('job_8899aabbccddeeff', 'asset-new', 'course-pipeline', 'illustrate', 'figure_plan')`,
+  )
+  await rejectsWithCode(
+    pool.query(
+      `INSERT INTO pipeline_jobs (job_id, asset_id, course_id, kind, stage)
+       VALUES ('job_ffeeddccbbaa9988', 'asset-new', 'course-pipeline', 'illustrate', 'figure_render')`,
+    ),
+    '23505',
+  )
+
+  const usage = await pool.query<{ images: number }>(
+    `INSERT INTO ai_usage_events (task_key, status) VALUES ('figure.render', 'success')
+     RETURNING images`,
+  )
+  assert.equal(usage.rows[0]?.images, 0)
+
+  const columns = await pool.query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'content_generations'
+       AND column_name = ANY($1)`,
+    [['chapter_articles', 'figures']],
+  )
+  assert.deepEqual(columns.rows.map(row => row.column_name).sort(), ['chapter_articles', 'figures'])
 })

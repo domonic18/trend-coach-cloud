@@ -380,11 +380,14 @@ test('任务绑定：purpose 校验、禁用配置与运营只读', async () => 
     bindings: { taskKey: string; purpose: string; primaryConfigId: string | null; fallbackConfigId: string | null }[]
     configs: { configId: string }[]
   }
-  assert.equal(body.bindings.length, 5)
+  assert.equal(body.bindings.length, 7)
   const article = body.bindings.find(binding => binding.taskKey === 'content.article')
   assert.equal(article?.primaryConfigId, primaryConfig.configId)
   assert.equal(article?.fallbackConfigId, fallbackConfig.configId)
   assert.equal(article?.purpose, 'content')
+  const figurePlan = body.bindings.find(binding => binding.taskKey === 'content.figure_plan')
+  assert.equal(figurePlan?.purpose, 'content')
+  assert.equal(figurePlan?.primaryConfigId, null)
 
   const created = await app.inject({
     method: 'PUT',
