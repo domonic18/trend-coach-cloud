@@ -3,7 +3,7 @@ import type { Pool } from 'pg'
 import { normalizeAsrBaseUrl } from '../asr/provider.js'
 import type { AsrConfig, LlmConfig, LlmProtocol, LlmTuning } from '../config.js'
 import { badRequest, conflict, notFound } from '../errors.js'
-import { createEmbeddingProvider } from '../kb/embedding.js'
+import { createEmbeddingProvider, postEmbeddingRequest } from '../kb/embedding.js'
 import { createLlmClient, type LlmClient } from '../pipeline/llm.js'
 import { decryptSecret, encryptSecret, maskSecret } from './crypto.js'
 
@@ -539,12 +539,11 @@ export class ModelConfigService {
     if (row.purpose === 'embedding') {
       let response: Response
       try {
-        response = await fetch(`${base}/embeddings`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ model: row.model, input: ['ping'] }),
-          signal: AbortSignal.timeout(15_000),
-        })
+        response = await postEmbeddingRequest(
+          { baseUrl: base, model: row.model, ...(apiKey === undefined ? {} : { apiKey }) },
+          { model: row.model, input: ['ping'] },
+          15_000,
+        )
       } catch (error) {
         return { status: 'failed', detail: errorDetail(error), testedAt }
       }

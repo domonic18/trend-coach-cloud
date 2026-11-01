@@ -8,20 +8,35 @@ export interface EmbeddingResolver {
   resolve(): Promise<((text: string) => Promise<number[]>) | undefined>
 }
 
+/**
+ * 显式请求 1024 维：部分模型（如智谱 embedding-3）默认更高维，不传会与 halfvec(1024) 不符。
+ * 不支持 dimensions 参数的模型会以 4xx 拒绝，此时重试一次不带该参数。
+ */
+export async function postEmbeddingRequest(
+  config: EmbeddingConfig,
+  body: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<Response> {
+  const send = (payload: Record<string, unknown>) => fetch(`${config.baseUrl}/embeddings`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(config.apiKey === undefined ? {} : { authorization: `Bearer ${config.apiKey}` }),
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  const response = await send({ ...body, dimensions: EMBEDDING_DIM })
+  return response.status === 400 || response.status === 422 ? send(body) : response
+}
+
 /** OpenAI 兼容的 /embeddings 端点；维度必须与迁移中的 halfvec(1024) 一致。 */
 export function createEmbeddingProvider(
   config: EmbeddingConfig,
 ): (text: string) => Promise<number[]> {
   return async (text: string) => {
-    const response = await fetch(`${config.baseUrl}/embeddings`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(config.apiKey === undefined ? {} : { authorization: `Bearer ${config.apiKey}` }),
-      },
-      body: JSON.stringify({ model: config.model, input: text }),
-      signal: AbortSignal.timeout(5_000),
-    }).catch(() => undefined)
+    const response = await postEmbeddingRequest(config, { model: config.model, input: text }, 5_000)
+      .catch(() => undefined)
     if (response === undefined || !response.ok) throw serviceUnavailable('embedding service unavailable')
     const payload: unknown = await response.json().catch(() => undefined)
     const embedding = extractEmbedding(payload)

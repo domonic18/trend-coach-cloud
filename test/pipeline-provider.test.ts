@@ -7,6 +7,8 @@ import { after, before, test } from 'node:test'
 import { AsrError } from '../src/asr/provider.js'
 import { createMiniMaxLongFormAsr } from '../src/asr/longform.js'
 import type { AsrConfig, LlmConfig } from '../src/config.js'
+import { HttpError } from '../src/errors.js'
+import { createEmbeddingProvider } from '../src/kb/embedding.js'
 import { LlmError, createLlmClient } from '../src/pipeline/llm.js'
 import { makeWav } from './asr-fixtures.js'
 
@@ -314,5 +316,70 @@ test('LLM 错误映射与输入上限', async () => {
     assert.equal(stub.requests.length, 0)
   } finally {
     await stub.close()
+  }
+})
+
+test('embedding 请求显式声明 1024 维并解析向量', async () => {
+  const stub = await startStub((_request, _body, response) => {
+    jsonResponse(response, { data: [{ embedding: Array.from({ length: 1024 }, () => 0.5) }] })
+  })
+  try {
+    const embed = createEmbeddingProvider({ baseUrl: stub.url, model: 'embedding-3', apiKey: 'embed-key' })
+    const vector = await embed('趋势交易')
+    assert.equal(vector.length, 1024)
+
+    const request = stub.requests[0]
+    assert.equal(request?.url, '/embeddings')
+    assert.equal(request?.authorization, 'Bearer embed-key')
+    const body = JSON.parse(request?.body.toString('utf8') ?? '{}') as Record<string, unknown>
+    assert.equal(body.model, 'embedding-3')
+    assert.equal(body.dimensions, 1024)
+  } finally {
+    await stub.close()
+  }
+})
+
+test('embedding 模型不支持 dimensions 时回退一次', async () => {
+  const stub = await startStub((_request, body, response) => {
+    const parsed = JSON.parse(body.toString('utf8') || '{}') as Record<string, unknown>
+    if (parsed.dimensions !== undefined) {
+      jsonResponse(response, { error: { message: 'Unrecognized request argument: dimensions' } }, 400)
+      return
+    }
+    jsonResponse(response, { data: [{ embedding: Array.from({ length: 1024 }, () => 0.25) }] })
+  })
+  try {
+    const embed = createEmbeddingProvider({ baseUrl: stub.url, model: 'text-embedding-ada-002' })
+    const vector = await embed('趋势交易')
+    assert.equal(vector.length, 1024)
+    assert.equal(stub.requests.length, 2)
+    const first = JSON.parse(stub.requests[0]?.body.toString('utf8') ?? '{}') as Record<string, unknown>
+    const second = JSON.parse(stub.requests[1]?.body.toString('utf8') ?? '{}') as Record<string, unknown>
+    assert.equal(first.dimensions, 1024)
+    assert.equal(second.dimensions, undefined)
+  } finally {
+    await stub.close()
+  }
+})
+
+test('embedding 维度不符或上游失败映射为 503', async () => {
+  const short = await startStub((_request, _body, response) => {
+    jsonResponse(response, { data: [{ embedding: [0.1, 0.2] }] })
+  })
+  try {
+    const embed = createEmbeddingProvider({ baseUrl: short.url, model: 'm' })
+    await assert.rejects(embed('x'), (error: unknown) => error instanceof HttpError && error.statusCode === 503)
+  } finally {
+    await short.close()
+  }
+
+  const down = await startStub((_request, _body, response) => {
+    jsonResponse(response, { error: 'rate limited' }, 429)
+  })
+  try {
+    const embed = createEmbeddingProvider({ baseUrl: down.url, model: 'm' })
+    await assert.rejects(embed('x'), (error: unknown) => error instanceof HttpError && error.statusCode === 503)
+  } finally {
+    await down.close()
   }
 })
