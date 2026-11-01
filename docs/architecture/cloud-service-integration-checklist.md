@@ -1,6 +1,6 @@
 # 云端服务对接清单
 
-本文用于启动**独立的云端服务仓库**，供 `dsh-plugin-trend-coach` 插件对接。接口口径以 PRD v0.3 §6 与架构 v0.4 §6、§7.5、§9、§10、§12 为准；冲突时先改那两份文档，再同步本文。
+本文用于启动**独立的云端服务仓库**，供 `dsh-plugin-trend-coach` 插件对接。接口口径以 PRD v0.5 §6 与架构 v0.6 §6、§7、§9、§10、§12 为准；冲突时先改那两份文档，再同步本文。v0.3 新增门户与 AI 运营接口（§3.11、§3.12）。
 
 ## 1. 边界
 
@@ -15,6 +15,8 @@
 | 鉴权指标事件接收（M2） | 第三方分析 SDK |
 | 语音转写（M4.2，MiniMax ASR，仅语音→文字） | 学员侧生成式推理 |
 | 视频→课程管线（M1）：上传、转码、长音频转写、切分、文章草稿、人工发布 | 多码率 ABR、对象存储、断点续传、自动发布 |
+| 公开门户、自助注册/登录与个人中心（M7） | 邮件/短信验证、找回密码、客服工单 |
+| AI 用量、运行链路、任务级主备绑定与自动切换（M7） | 学员侧推理、第三方分析 SDK |
 
 **不耦合 ai-invest**：不进其库、不调其服务、不共享代码与数据；只借鉴 PostgreSQL halfvec + pg_trgm + RRF 的技术选型（PRD D2）。
 
@@ -23,7 +25,7 @@
 ## 2. 通用约定
 
 - 传输：HTTPS，`Content-Type: application/json`；响应必须是 JSON 对象，否则插件整体失败。
-- 鉴权：业务接口携带 `Authorization: Bearer <accessToken>` 与 `x-device-id: <deviceId>`；缺失/过期 `401`，设备不匹配 `403`。
+- 鉴权：业务接口携带 `Authorization: Bearer <accessToken>` 与 `x-device-id: <deviceId>`；缺失/过期 `401`，设备不匹配 `403`。门户接口用门户会话 Bearer（无 `x-device-id`）；后台接口用后台会话 Bearer。门户会话 `scope=portal`，不可访问 `/v1/admin/*`。
 - 时间：`expiresAt` 为毫秒时间戳；`startSec/endSec` 为整数秒。
 - ID：`segmentId` 形如 `seg-[A-Za-z0-9._-]+` 且 ≤80；`courseId` ≤64 且仅 `[A-Za-z0-9._-]`；`chapterId/knowledgePointId` 非空且稳定。
 - 错误：HTTP 状态码承载语义（`400/401/403/404/429/5xx`），响应体建议 `{ "error": "string" }`（待冻结）；不得返回 HTML 错误页。
@@ -553,6 +555,164 @@ POST  /v1/admin/content/courses/{courseId}/publish
 | ASR 未启用/无 key | 转写阶段 `503`；其他管线阶段正常 |
 | 更换 `CREDENTIAL_ENCRYPTION_KEY` 后读取 | 掩码显示「无法解密，请重新录入」，不泄露密文 |
 
+### 3.11 公开门户与自助账号（M7）
+
+```http
+POST   /v1/portal/auth/register        # 公开；用户名 + 密码注册，自动登录
+POST   /v1/portal/auth/login           # 公开；任意非禁用账号
+GET    /v1/portal/auth/session         # 门户会话
+DELETE /v1/portal/auth/session         # 注销当前门户会话
+GET    /v1/portal/me                   # 资料
+PATCH  /v1/portal/me                   # 修改显示名
+POST   /v1/portal/me/password          # 改密（吊销其他会话）
+GET    /v1/portal/me/devices           # 本人设备列表
+DELETE /v1/portal/me/devices/{deviceId} # 解绑本人设备
+GET    /v1/portal/releases             # 公开；发布清单
+GET    /v1/portal/stats                # 公开；已发布内容计数
+```
+
+```jsonc
+// POST /v1/portal/auth/register → 201
+{ "username": "stu01", "password": "至少 10 个字符", "displayName": "可选" }
+// 响应与登录相同
+{ "token": "string", "expiresAt": 1760000000000,
+  "user": { "userId": "usr_...", "username": "stu01", "displayName": "学员一号", "role": "student" } }
+
+// POST /v1/portal/auth/login → 200（同上）
+{ "username": "stu01", "password": "..." }
+
+// GET /v1/portal/auth/session → { "user": { ...PortalProfile } }
+// GET /v1/portal/me → { "profile": { ...PortalProfile } }
+{ "userId": "usr_...", "username": "stu01", "displayName": "学员一号",
+  "role": "student", "status": "active", "createdAt": 1760000000000,
+  "passwordUpdatedAt": 1760000000000, "deviceCount": 1 }
+
+// PATCH /v1/portal/me → { "profile": { ... } }
+{ "displayName": "新显示名" }
+
+// POST /v1/portal/me/password → { "updated": true }
+{ "currentPassword": "...", "newPassword": "..." }
+
+// GET /v1/portal/me/devices → { "devices": [...] }
+{ "devices": [{ "deviceId": "dev-...", "status": "active",
+                "firstAuthorizedAt": 1760000000000, "lastSeenAt": 1760000000000 }] }
+// DELETE /v1/portal/me/devices/{deviceId} → { "revoked": true }
+
+// GET /v1/portal/releases → 200（max-age=60；清单缺失时 plugin=null）
+{ "dshVersion": "0.2.1-rc.5", "webAppPackage": "@deepseek-ai/dsh-web-app",
+  "plugin": { "name": "dsh-plugin-trend-coach", "version": "0.1.0",
+              "fileName": "dsh-plugin-trend-coach-0.1.0.tgz",
+              "sha256": "64 位 hex", "sizeBytes": 123456,
+              "publishedAt": "2026-11-01T00:00:00Z", "notes": ["修复 ..."] } }
+
+// GET /v1/portal/stats → 200（max-age=60）
+{ "courses": 2, "knowledgePoints": 24, "segments": 30, "articles": 24 }
+```
+
+- 注册只创建 `student`；`username` 3–32、小写字母开头、`[a-z0-9._-]`；密码 10–128；`displayName` 1–200。
+- 用户名已存在 `409`；参数非法 `400`；登录失败统一 `401`，不区分账号是否存在或密码错误。
+- 限流：注册按 IP `RATE_LIMIT_REGISTER_PER_MINUTE`（默认 5）；登录按 IP 与用户名各 `RATE_LIMIT_LOGIN_PER_MINUTE`（默认 10）；其他门户接口按 IP `RATE_LIMIT_PORTAL_PER_MINUTE`（默认 120）；超限 `429`。
+- 门户会话 `scope=portal`，默认 12 小时；改密吊销该用户其他会话；设备解绑只吊销该设备令牌，非本人设备 `403`，设备不存在 `404`。
+- 公开接口不返回内部路径、源文件名或密钥；`releases` 清单格式错误 `503`，文件缺失返回空版本。
+- 门户静态页与下载不属于 OpenAPI；预渲染 HTML 与 SPA 壳 `no-store`，未知前端路径带 `x-robots-tag: noindex`。
+
+**验收用例**
+
+| 用例 | 期望 |
+|---|---|
+| 注册新用户名 / 重复用户名 / 弱密码 | `201` 自动登录 / `409` / `400` |
+| 登录成功 / 密码错误 / 禁用账号 / 超限 | `200` / `401` / `401` / `429` |
+| 学员门户令牌访问 `/v1/admin/*` | `401/403`；门户接口正常 |
+| 改密 / 设备解绑 | 其他会话失效；只能解绑本人设备 |
+| 发布清单缺失 / 统计 | `plugin=null` 或计数；`max-age=60` |
+| 门户页深链刷新 / 未知路径 / `/v1/nope` | 预渲染 HTML / 壳 + `noindex` / JSON `404` |
+
+### 3.12 AI 运营（M7）
+
+全部接口位于 `/v1/admin/ai/*`，使用后台会话（`Authorization: Bearer <session token>`，不带 `x-device-id`）。读接口 operator/admin 可用，绑定写接口仅 admin；按账号限流 `RATE_LIMIT_AI_PER_MINUTE`（默认 120）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/usage/summary?from&to&task` | 总量、按日、按任务、按模型、成本估算 |
+| GET | `/usage/events?from&to&task&model&cursor&limit` | 用量明细，游标分页 |
+| GET | `/runs?from&to&task&status&source&cursor&limit` | 运行列表 |
+| GET | `/runs/{runId}` | 运行详情与步骤链 |
+| GET | `/bindings` | 全任务绑定与可选模型 |
+| PUT | `/bindings/{taskKey}` | 设置主/备；仅 admin |
+| GET | `/health` | 配置失败次数、冷却与最近错误 |
+
+```jsonc
+// GET /v1/admin/ai/usage/summary
+{ "from": "2026-10-25T00:00:00.000Z", "to": "2026-11-01T00:00:00.000Z",
+  "totals": { "requests": 120, "errors": 3, "fallbacks": 2,
+              "inputTokens": 1000, "outputTokens": 500, "cachedTokens": 0,
+              "audioSeconds": 0, "characters": 0,
+              "avgLatencyMs": 850, "costMicros": 12345 },
+  "daily": [{ "date": "2026-10-25", "requests": 10, "inputTokens": 0,
+              "outputTokens": 0, "costMicros": 0 }],
+  "byTask": [{ "taskKey": "content.article", "label": "文章生成",
+               "requests": 10, "errors": 0, "inputTokens": 0, "outputTokens": 0,
+               "audioSeconds": 0, "characters": 0, "costMicros": 0 }],
+  "byModel": [{ "configId": "llmc_...", "provider": "minimax", "model": "...",
+                "requests": 10, "errors": 0, "inputTokens": 0,
+                "outputTokens": 0, "costMicros": 0 }] }
+
+// GET /v1/admin/ai/usage/events → { "events": [...], "nextCursor": "123 | null" }
+{ "usageId": "123", "runId": "uuid | null", "taskKey": "content.article",
+  "label": "文章生成", "provider": "...", "model": "...", "configId": "llmc_... | null",
+  "inputTokens": 0, "outputTokens": 0, "cachedTokens": 0,
+  "audioSeconds": 0, "characters": 0, "latencyMs": 800,
+  "status": "success|error|fallback", "errorCode": null,
+  "createdAt": "2026-11-01T00:00:00.000Z" }
+
+// GET /v1/admin/ai/runs → { "runs": [...], "nextCursor": "1760000000000:uuid | null" }
+{ "runId": "uuid", "taskKey": "content.outline", "label": "章节大纲",
+  "source": "pipeline|admin", "sourceId": "job_... | null",
+  "status": "running|succeeded|failed", "primaryConfigId": "llmc_... | null",
+  "fallbackUsed": false, "startedAt": "...", "finishedAt": "... | null",
+  "durationMs": 1000, "errorCode": null }
+
+// GET /v1/admin/ai/runs/{runId} → 上述字段 + summary + steps
+{ ..., "summary": {}, "steps": [{ "stepId": "1", "seq": 0, "taskKey": "...",
+  "configId": "llmc_... | null", "provider": "...", "model": "...",
+  "attempt": 1, "status": "success|error", "latencyMs": 800,
+  "usageId": "123 | null", "errorCode": null, "createdAt": "..." }] }
+
+// GET /v1/admin/ai/bindings
+{ "bindings": [{ "taskKey": "content.article", "label": "文章生成",
+                 "purpose": "content", "primaryConfigId": "llmc_... | null",
+                 "fallbackConfigId": "llmc_... | null", "updatedAt": "..." }],
+  "configs": [{ ...LlmModelConfig }] }
+
+// PUT /v1/admin/ai/bindings/{taskKey}（primaryConfigId=null 删除绑定）
+{ "primaryConfigId": "llmc_...", "fallbackConfigId": "llmc_... | null" }
+
+// GET /v1/admin/ai/health
+{ "configs": [{ "configId": "llmc_...", "name": "...", "provider": "...",
+                "model": "...", "purpose": "content|embedding", "isActive": true,
+                "consecutiveFailures": 0, "cooldownUntil": null,
+                "coolingDown": false, "lastError": null,
+                "lastFailureAt": null, "lastSuccessAt": "..." }] }
+```
+
+- `from/to` 为 ISO 时间，缺省为最近 7 天；`from > to` 或格式非法 `400`；`limit` 1–200（默认 50）。
+- 任务键：`content.outline|content.points|content.article|embedding.query|embedding.segment|asr.longform`；绑定只接受 LLM 任务（ASR 不可绑定，`400`）。
+- 绑定校验：主/备必须与任务用途一致且启用，主备相同 `400`，停用配置 `409`，配置不存在 `404`；未绑定回落同用途默认启用模型。
+- 主模型 429/5xx/网络/超时切备用，仅单跳；两次调用都记用量，运行标 `fallbackUsed=true`，失败配置进入 60s 冷却。
+- 成本为微美元；任一参与计费的模型单价缺失时该聚合 `costMicros=null`，前端显示「未配置价格」。
+- 日志与响应不含 prompt、回答、密钥或完整上游响应。
+
+**验收用例**
+
+| 用例 | 期望 |
+|---|---|
+| operator / admin 读用量与运行 | `200`；学员/未登录 `401/403` |
+| operator 写绑定 | `403`；admin `200` |
+| 绑定主备同用途且启用 | 保存后下一次调用生效 |
+| 主模型 429 → 备用 | 自动切换；`fallbackUsed=true`；健康进入冷却 |
+| 价格缺失 / 已配置 | `costMicros=null` / 按 token × 单价估算 |
+| 用量与运行一致性 | 每次尝试在 steps 中可见，并关联 `usageId` |
+
 ## 4. 数据与内容前置
 
 - M1 内容管线可产出带时间戳转写、章节/知识点切分、片段与文章草稿，经人工审核发布；真实样片与 ASR/内容 LLM/embedding 已完成验收。
@@ -615,18 +775,29 @@ POST  /v1/admin/content/courses/{courseId}/publish
 | 管线 | 取消 / 重试 / 心跳恢复 | 终态正确；无重复 active job；成功转写块复用 |
 | 管线 | 学员令牌访问管线接口 | `403`；未登录 `401` |
 | 管线 | 管线/ASR/LLM 未配置 | 对应接口 `503`，服务可启动 |
+| 门户 | 注册 / 重复用户名 / 弱密码 | `201` 自动登录 / `409` / `400` |
+| 门户 | 登录 / 禁用 / 限流 | `200` / `401` / `429` |
+| 门户 | 改密 / 设备解绑 / 越权 | 其他会话失效；仅本人设备；非本人 `403` |
+| 门户 | 学员门户令牌访问后台 | `401/403` |
+| 门户 | 公开页深链 / 未知路径 / API 404 | 预渲染 HTML / 壳 + `noindex` / JSON `404` |
+| AI | 用量汇总与明细 | token/延迟/模型一致；分页游标可用 |
+| AI | 运行与步骤 | 主备尝试可见；`fallbackUsed` 正确 |
+| AI | 绑定与权限 | operator 只读；admin 可写；主备校验生效 |
+| AI | 主模型 429 | 切备用并冷却；冷却期直接走备用 |
+| AI | 成本 | 价格缺失 `null`；配置后按微美元估算 |
 
 ## 7. 交付物
 
 1. 服务骨架与部署说明（staging / production），有效 TLS 证书。
 2. OpenAPI 3 文档，字段与本文一致；契约变更先改 PRD §6 与架构 §6。
-3. 数据库 schema 与迁移（课程、章节、知识点、片段、文章、进度、账号/会话/邀请码、用户/设备、令牌、事件、管线任务/转写/生成）。
-4. 学员接口（设备码、检索、片段、播放会话、体系/进度、事件、语音转写）与后台接口（账号、内容管理、视频管线）。
-5. 鉴权中间件（Bearer + `x-device-id`）、限流（含 ASR 与管线按账号限流）、错误码映射、日志脱敏。
+3. 数据库 schema 与迁移（课程、章节、知识点、片段、文章、进度、账号/会话/邀请码、用户/设备、令牌、事件、管线任务/转写/生成、AI 用量/运行/绑定/健康）。
+4. 学员接口（设备码、检索、片段、播放会话、体系/进度、事件、语音转写）、门户接口（注册/登录/个人中心/发布清单/统计）与后台接口（账号、内容管理、视频管线、模型配置、AI 运营）。
+5. 鉴权中间件（Bearer + `x-device-id`、门户 `scope`、后台角色）、限流（含 ASR、门户、AI 与管线按账号限流）、错误码映射、日志脱敏。
 6. 签名 HLS 下发与 CORS/Range 配置；管线 HLS 目录与媒体根一致。
 7. 最小联调数据集（真实课程 + 加密样片 + 2–5 分钟建课样片）与测试账号。
-8. 契约测试与 CI：覆盖第 6 节全部用例；至少一个与插件 mock 对齐的响应夹具；管线假 provider E2E 与可选真实 ffmpeg 用例。
-9. 指标看板与告警：检索 P95、错误分桶、429/5xx、带宽与并发。
+8. 契约测试与 CI：覆盖第 6 节全部用例；至少一个与插件 mock 对齐的响应夹具；管线假 provider E2E、门户静态/认证测试、AI 计量与切换测试、可选真实 ffmpeg 用例。
+9. 指标看板与告警：检索 P95、错误分桶、429/5xx、带宽与并发、AI 用量/降级/成本。
+10. 门户构建与静态托管产物（`dist/portal`、`routes.json`、`sitemap.xml`、`robots.txt`）与下载目录（`dist/downloads`、`content/releases.json`）。
 
 ## 8. 待冻结事项
 
@@ -644,3 +815,7 @@ POST  /v1/admin/content/courses/{courseId}/publish
 | 长音频切块与重试 | ≤480s/块、3 次重试、30s 分组；真实时间戳字段待联调 | 计费与对齐精度 |
 | 源视频与转写留存 | 默认保留，不自动清理；按版权授权人工归档 | 存储与合规 |
 | 多码率与对象存储 | 本期单码率本地存储；`MediaStore` 预留 | 带宽与扩容 |
+| 门户内容维护 | 仓库 Markdown + 构建期预渲染，无 CMS | 内容更新需重新构建 |
+| 门户会话 | 令牌存 `sessionStorage`，无刷新令牌 | 新标签页需重新登录 |
+| 客服/联系入口 | 本期不做，后续单独立项 | 门户支持路径 |
+| AI 限流与冷却 | 单实例内存 + DB 健康记录 | 横向扩容前需共享存储 |

@@ -1,8 +1,8 @@
 # 项目结构
 
-版本：v0.9（2026-11-01）
+版本：v1.0（2026-11-01）
 
-本仓库已进入 M1 实现阶段：单进程模块化单体（Fastify + PostgreSQL/pgvector），业务接口、鉴权、媒体签名、体系与进度、账号与后台登录、内容管理与 React 管理端、语音转写、视频→课程管线、模型配置（数据库）与契约测试已落地。管线覆盖流式上传、ffmpeg HLS、长音频转写、切分、文章草稿与人工发布；模型连接与密钥由后台「模型配置」录入并加密存库，不再走环境变量（ASR、content LLM 与 1024 维 embedding 均已真实链路验证）。本文件描述现状与已确定的目标结构，避免后续实现随意扩散。
+本仓库已进入 M7 实现阶段：单进程模块化单体（Fastify + PostgreSQL/pgvector），业务接口、鉴权、媒体签名、体系与进度、账号与后台登录、内容管理与 React 管理端、语音转写、视频→课程管线、模型配置（数据库）、公开门户与自助账号、AI 用量与任务级模型路由，以及契约测试已落地。管线覆盖流式上传、ffmpeg HLS、长音频转写、切分、文章草稿与人工发布；模型连接与密钥由后台「模型配置」录入并加密存库，不再走环境变量（ASR、content LLM 与 1024 维 embedding 均已真实链路验证）。本文件描述现状与已确定的目标结构，避免后续实现随意扩散。
 
 ## 1. 当前结构
 
@@ -19,7 +19,9 @@ trend-coach-cloud/
 │   ├── 002_catalog_progress.sql               # 文章、学习进度
 │   ├── 003_accounts.sql                       # 账号、后台会话、邀请码
 │   ├── 004_pipeline.sql                       # 素材状态、任务、转写、生成
-│   └── 005_model_config.sql                   # LLM 多渠道配置、ASR 单行配置
+│   ├── 005_model_config.sql                   # LLM 多渠道配置、ASR 单行配置
+│   ├── 006_llm_protocol.sql                   # 内容 LLM 协议（openai/anthropic）
+│   └── 007_portal_ai_ops.sql                  # 会话 scope、AI 用量/运行/绑定/健康、价格字段
 ├── data/
 │   └── seed.json                              # 本地/CI 种子数据（不含真实版权内容）
 ├── workspace/                                 # 运行期持久化数据（已 gitignore，不入库）
@@ -33,7 +35,8 @@ trend-coach-cloud/
 │   ├── seed.ts                                # npm run seed
 │   ├── backup.sh / restore.sh                 # 备份与覆盖式恢复（需显式确认）
 │   ├── restore-drill.sh                       # 备份导入独立演练库，不触碰业务库
-│   └── load-test.mjs                          # 零依赖压测（P95/错误率阈值）
+│   ├── load-test.mjs                          # 零依赖压测（P95/错误率阈值）
+│   └── prerender-portal.mjs                   # 门户客户端 + SSR 构建与逐路由预渲染
 ├── openapi/
 │   └── openapi.yaml                           # 唯一对外契约源
 ├── src/
@@ -63,17 +66,25 @@ trend-coach-cloud/
 │   │   ├── crypto.ts                          # 密钥派生、密文加解密、掩码
 │   │   ├── service.ts                         # LLM 多渠道/ASR 单行 CRUD 与运行时解析
 │   │   └── routes.ts                          # /v1/admin/model-configs/*（仅 admin）
+│   ├── ai/                                    # AI 任务键、用量记账、任务模型解析、降级与后台 AI 路由
+│   ├── portal/                                # /v1/portal/*：注册/登录/资料/改密/设备/发布清单/统计
 │   └── events/                                # 事件鉴权、白名单、同意、幂等
+├── content/
+│   └── releases.json                          # 插件发布清单（下载文件放 dist/downloads，不入库）
 ├── web/
-│   └── admin/                                 # React + Vite 管理端；含「视频建课」「模型配置」页
+│   ├── admin/                                 # React 18 + Vite + Ant Design 管理端；深色/浅色控制台、概览与内容/管线/模型/账号/AI 页
+│   └── portal/                                # React 18 + Vite + Ant Design 门户；content/*.md、entry-server.tsx 预渲染入口
 ├── test/
 │   ├── unit.test.ts                           # 配置、校验、RRF、Range、签名、事件白名单、密钥加解密
-│   ├── migration.test.ts                      # 管线与模型配置表/列/约束/索引
+│   ├── migration.test.ts                      # 管线、模型配置、门户与 AI 运营表/列/约束/索引
 │   ├── pipeline-unit.test.ts                  # 切块、时间戳合并、锚定、ID
 │   ├── pipeline-provider.test.ts              # 长音频 ASR 与 LLM 假上游
 │   ├── pipeline-ffmpeg.test.ts                # RUN_FFMPEG_TESTS=1 时跑真实 ffmpeg
 │   ├── pipeline-e2e.test.ts                   # 假处理器 ingest→生成→apply→发布
-│   └── contract.test.ts                       # 逐接口契约 + OpenAPI 一致性（含模型配置）
+│   ├── portal.test.ts                         # 注册/登录/限流/设备解绑/越权
+│   ├── portal-static.test.ts                  # 预渲染深链、SPA 壳、缓存头与 /v1 404
+│   ├── ai-usage.test.ts                       # 用量记账、绑定校验、fallback 与冷却
+│   └── contract.test.ts                       # 逐接口契约 + OpenAPI 一致性（含模型配置、门户与 AI）
 └── docs/                                      # 本文档体系
 ```
 
@@ -93,7 +104,7 @@ workspace/pipeline/hls/hls/<assetId>/{index.m3u8,seg_00000.ts}
 deploy/           # staging/production 部署与密钥注入说明（不含密钥）
 ```
 
-账号与后台登录已在 `src/accounts/` 落地；内容管理与 React 管理端已在 `src/content/` 与 `web/admin/` 落地；视频管线已在 `src/pipeline/` 落地。`dist/admin` 为构建产物，仅在存在 `index.html` 时由服务端静态托管于 `/admin/`。
+账号与后台登录已在 `src/accounts/` 落地；内容管理与 React 管理端已在 `src/content/` 与 `web/admin/` 落地；视频管线已在 `src/pipeline/` 落地；门户与 AI 运营已在 `src/portal/`、`src/ai/`、`web/portal/` 落地。`dist/server`、`dist/admin` 与 `dist/portal` 为构建产物：前者在存在 `index.html` 时由服务端静态托管于 `/admin/`，后者由预渲染脚本生成精确路由文件、`routes.json`、`sitemap.xml` 与 `robots.txt`。后台与门户的 HTML 与 API 404 语义分离：`/admin/*` 深链回落后台 `index.html`，门户未知前端路径回落门户壳并 `noindex`，`/v1/*` 未命中保持 JSON `404`。管理端与门户均使用 React Router、TanStack Query 与 Ant Design，页面按路由懒加载；令牌只存 `sessionStorage`。
 
 ## 3. 放置规则
 
@@ -106,6 +117,10 @@ deploy/           # staging/production 部署与密钥注入说明（不含密�
 | 管线任务与生成 | `src/pipeline/`；任务表见 `004_pipeline.sql`，不把业务状态塞进 `options` |
 | 模型连接与密钥 | `src/model-config/`；表见 `005_model_config.sql`（`006_llm_protocol.sql` 放开 anthropic）；密钥只存 AES-256-GCM 密文，不读环境变量、不回显明文；content 支持 openai 兼容与 anthropic Messages，embedding 仅 openai |
 | 源视频与 HLS | `workspace/pipeline/{storage,hls}`（已 gitignore）；容器内由 `/data` 单挂载点提供，两目录必须同卷 |
+| 门户页面与内容 | `web/portal/src/pages/`（页面）与 `web/portal/content/*.md`（正文）；不做 CMS |
+| 门户接口 | `src/portal/routes.ts`；只接受 `scope=portal` 会话，公开接口不返回内部路径 |
+| 门户发布清单与下载 | `content/releases.json` 入库；`dist/downloads/` 构建/部署时提供，已 gitignore |
+| AI 用量与路由 | `src/ai/{tasks,usage,routing,routes}.ts`；表见 `007_portal_ai_ops.sql`，不把 prompt/正文写入用量 |
 | 契约测试夹具 | `data/seed.json`，与插件 `spike/fixtures.json` 的响应形状对齐 |
 | 文档 | `docs/<类别>/`，索引见 `docs/ai-context/docs-overview.md` |
 
@@ -119,7 +134,10 @@ deploy/           # staging/production 部署与密钥注入说明（不含密�
 - 生成内容只写 `draft`；`publish` 是唯一进入学员可见性的入口，配置 embedding 时必须先成功 `reindex`。
 - 源路径、HLS 路径、SHA、转写正文、provider 响应不进管理端列表/预览响应与日志。
 - 模型配置接口只在 `/v1/admin/model-configs/*`，仅 admin；响应只含掩码，密文与明文都不进日志。
-- ASR/内容 LLM/embedding 在每次使用时按用途从数据库解析，后台保存后立即生效，无需重启。
+- 门户接口只在 `/v1/portal/*`，门户会话 `scope=portal` 不得进入 `/v1/admin/*`；后台会话也不用于门户个人中心以外的后台能力。
+- AI 后台接口只在 `/v1/admin/ai/*`：运营/管理员可读，绑定写仅 admin；用量只记数字与模型标识。
+- 门户静态托管只挂精确文件（`wildcard:false`），`setNotFoundHandler` 仅处理 HTML GET，避免遮蔽 `/v1`；预渲染内容必须确定性。
+- ASR/内容 LLM/embedding 在每次使用时按用途从数据库解析，后台保存后立即生效，无需重启；任务绑定优先于默认配置。
 - 任何新增接口先改文档与 OpenAPI，再写实现与契约测试。
 
 ## 5. 与插件仓库的关系

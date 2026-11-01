@@ -1,6 +1,6 @@
 # trend-coach-cloud
 
-`dsh-plugin-trend-coach` 的云端服务仓库：提供课程知识检索、片段元数据、签名 HLS 播放会话、设备码授权、后台账号与内容管理、指标事件接收、语音转写（M4.2，MiniMax ASR），以及视频→课程管线（M1：上传、转码、带时间戳转写、切分、文章草稿与人工发布）。
+`dsh-plugin-trend-coach` 的云端服务仓库：提供课程知识检索、片段元数据、签名 HLS 播放会话、设备码授权、后台账号与内容管理、指标事件接收、语音转写（M4.2，MiniMax ASR）、视频→课程管线（M1），以及公开门户与自助账号、AI 用量与任务级模型路由（M7）。
 
 ## 边界
 
@@ -9,12 +9,15 @@
 | 知识库检索（Top-K 片段） | 大模型推理 / API Key 托管 |
 | 片段元数据与权威起止秒 | 全库正文下发 |
 | 签名 HLS 播放会话 | 直链 / 可下载源站地址 |
-| 设备码授权与令牌轮换 | 学员自助注册（短信后置） |
+| 设备码授权与令牌轮换 | 邮件/短信验证、找回密码 |
+| 公开门户：体系、功能、安装向导、版本下载、FAQ（预渲染） | 内容 CMS、客服/工单 |
+| 学员自助注册、登录、个人中心与设备解绑 | 学员侧生成式推理 |
 | 后台账号管理（operator/admin 会话） | 第三方分析 SDK |
-| 内容管理 API 与 React 控制台（课程/章节/知识点/文章/片段） | 召回评估看板、插件版本与灰度 |
+| 内容管理 API 与 React 控制台（概览、课程内容、片段、视频建课、模型与账号） | 召回评估看板、插件版本与灰度 |
 | 视频→课程管线：流式上传、单码率 HLS、长音频转写、章节/知识点/片段切分、文章草稿、人工审核发布 | 多码率 ABR、对象存储、断点续传 |
+| AI 用量、运行链路、任务级主备绑定与自动切换 | 学员接口推理、成本对账平台 |
 | 鉴权指标事件接收 | 明文令牌落盘 |
-| 语音转写（仅语音→文字，密钥在云端） | 学员侧生成式推理 |
+| 语音转写（仅语音→文字，密钥在云端） | 多供应商自动切换 |
 
 不耦合 `ai-invest`：独立实现，只借鉴 PostgreSQL halfvec + pg_trgm + RRF 的技术选型。
 
@@ -70,6 +73,22 @@
 | `PUT /v1/events/consent` | 修改指标上报同意状态（可撤回） |
 | `POST /v1/events` | 接收白名单指标事件（需同意） |
 | `POST /v1/asr/transcribe` | 语音转写（WAV ≤60s，转发 MiniMax；音频不落盘） |
+| `POST /v1/portal/auth/register` | 学员自助注册并自动登录 |
+| `POST /v1/portal/auth/login` | 门户登录 |
+| `GET/DELETE /v1/portal/auth/session` | 查询 / 注销门户会话 |
+| `GET/PATCH /v1/portal/me` | 个人资料与显示名 |
+| `POST /v1/portal/me/password` | 修改门户密码（吊销其他会话） |
+| `GET /v1/portal/me/devices` | 本人设备列表 |
+| `DELETE /v1/portal/me/devices/{deviceId}` | 解绑本人设备 |
+| `GET /v1/portal/releases` | 插件发布清单（公开） |
+| `GET /v1/portal/stats` | 已发布内容计数（公开） |
+| `GET /v1/admin/ai/usage/summary` | AI 用量汇总、趋势、按任务/模型与成本 |
+| `GET /v1/admin/ai/usage/events` | AI 调用明细（游标分页） |
+| `GET /v1/admin/ai/runs` | AI 运行列表 |
+| `GET /v1/admin/ai/runs/{runId}` | AI 运行详情与步骤链 |
+| `GET /v1/admin/ai/bindings` | 任务模型绑定与可选模型 |
+| `PUT /v1/admin/ai/bindings/{taskKey}` | 设置任务主/备模型（admin） |
+| `GET /v1/admin/ai/health` | 模型健康与冷却状态 |
 
 本地还提供 `GET /device` 授权页与 `GET /media/*` 媒体代理，仅开发使用，不进入对外契约。`GET /metrics` 为 Prometheus 指标，需 `Authorization: Bearer $METRICS_TOKEN`，同样不进入对外契约。
 
@@ -79,7 +98,7 @@
 
 | 文档 | 内容 |
 |---|---|
-| [需求文档](docs/requirements/product-requirements.md) | 范围、功能 C1–C10、NFR、验收、里程碑 |
+| [需求文档](docs/requirements/product-requirements.md) | 范围、功能 C1–C12、NFR、验收、里程碑 |
 | [架构设计](docs/architecture/architecture-design.md) | 组件、数据模型、检索、鉴权、媒体、安全、ADR |
 | [对接清单](docs/architecture/cloud-service-integration-checklist.md) | 逐接口字段、边界与验收用例 |
 | [项目规范](docs/conventions/project-conventions.md) | API、安全、测试、文档与提交约定 |
@@ -108,9 +127,12 @@ npm run migrate        # 建表与索引
 npm run seed           # 种子课程与片段
 npm run dev            # http://127.0.0.1:3939
 npm run dev:admin      # 管理端开发服务器 http://127.0.0.1:5173/admin/（/v1 代理到 3939）
+npm run dev:portal     # 门户开发服务器 http://127.0.0.1:5174/（/v1 代理到 3939）
 ```
 
-管理端（React + Vite）在 `web/admin/`：`npm run build` 会同时编译服务端与前端，产物落在 `dist/admin`，由服务端在 `/admin/` 静态托管；未构建前端时 `/admin/` 返回 404，API 不受影响。开发服务器可用 `ADMIN_DEV_API` 改变代理目标。登录会话令牌只存 `sessionStorage`，不使用 Cookie。
+管理端（React 18 + Vite + Ant Design）在 `web/admin/`：`npm run build` 会同时编译服务端与前端，服务端产物在 `dist/server`，前端落在 `dist/admin`，由服务端在 `/admin/` 静态托管；未构建前端时 `/admin/` 返回 404，API 不受影响。控制台默认深色并可切换浅色，支持 `/admin/courses` 等深链刷新；开发服务器可用 `ADMIN_DEV_API` 改变代理目标。登录会话令牌只存 `sessionStorage`，不使用 Cookie。
+
+门户（React 18 + Vite + Ant Design）在 `web/portal/`，内容为 `web/portal/content/*.md`。`npm run build` 会先构建客户端，再程序化 SSR 逐路由预渲染到 `dist/portal`，同时生成 `routes.json`、`sitemap.xml` 与 `robots.txt`；`npm run build:portal` 可单独重建门户。`PUBLIC_BASE_URL` 决定 canonical 与 sitemap 的绝对地址。发布清单 `content/releases.json` 由 `/v1/portal/releases` 读取，下载文件放在 `dist/downloads/`，服务端以 `attachment` 提供。门户静态页与后台深链均由服务端托管，未知前端路径回落门户壳；`/v1/*` 未命中仍返回 JSON `404`。
 
 授权与联调：
 
@@ -145,16 +167,18 @@ scripts/backup.sh                # 备份（可配 cron）
 ## 目录
 
 ```
-src/            # Fastify 服务：accounts/auth/content/kb/playback/events/media/asr/pipeline/http
+src/            # Fastify 服务：accounts/auth/content/kb/playback/events/media/asr/pipeline/model-config/ai/portal/http
 web/admin/      # React + Vite 管理端源码（构建产物 dist/admin）
-migrations/     # SQL 迁移（启动时自动执行；004 为视频管线）
+web/portal/     # React + Vite 门户源码与 Markdown 内容（预渲染产物 dist/portal）
+content/        # 发布清单 content/releases.json（下载文件放 dist/downloads）
+migrations/     # SQL 迁移（启动时自动执行；004 管线、005/006 模型配置、007 门户与 AI 运营）
 data/seed.json  # 本地种子数据（与插件 mock 对齐）
 openapi/        # OpenAPI 3.1 契约
-test/           # 单元、契约与管线 E2E
+test/           # 单元、契约、管线 E2E、门户静态与 AI 计量测试
 docs/           # 需求、架构、规范、部署与监控
 docker/         # 本地数据库初始化
 deploy/         # Caddy 与可选监控模板（不随 Compose 启动）
-scripts/        # migrate/seed 与备份恢复入口
+scripts/        # migrate/seed、预渲染、压测与备份恢复入口
 ```
 
-当前为 M1 实现阶段：M2 业务接口、设备码授权、签名 HLS、事件接收已落地；M3.1 账号与后台登录、M3.2 内容管理 API 与 React 控制台、M3.3 体系与进度接口已落地；M4.2 语音转写已落地（真实 MiniMax 待后台录入密钥）；M4.3 模型配置页已落地（LLM/ASR 条目、密钥加密、连通性测试）；M1 视频→课程管线已落地（上传、单码率 HLS、长音频转写、切分、文章草稿、人工发布；真实 ASR/LLM 待后台录入密钥验收），多码率 HLS 与召回评估后置。
+当前为 M7 实现阶段：M2 业务接口、设备码授权、签名 HLS、事件接收已落地；M3.1 账号与后台登录、M3.2 内容管理 API 与 React 控制台、M3.3 体系与进度接口已落地；M4.2 语音转写已落地（真实 MiniMax 已验收）；M4.3 模型配置页已落地（LLM/ASR 条目、密钥加密、连通性测试）；M1 视频→课程管线已落地（上传、单码率 HLS、长音频转写、切分、文章草稿、人工发布；真实 ASR/LLM/embedding 已验收）；M7 公开门户与自助账号、AI 用量账本、运行链路、任务级主备绑定与自动切换已落地。多码率 HLS、召回评估、客服入口后置。

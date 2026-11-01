@@ -91,6 +91,7 @@ curl -fsS -X POST https://$DOMAIN/v1/auth/device/approve \
 ```
 
 - 内容管理控制台：浏览器打开 `https://$DOMAIN/admin/`，用 operator/admin 账号登录，管理课程、章节、知识点、文章与片段。镜像构建已包含 `web/admin` 并输出到 `dist/admin`；服务端只在 `dist/admin/index.html` 存在时挂载 `/admin/`，缺失时该路径 404 而 API 不受影响。前端是纯静态 SPA，会话令牌存 `sessionStorage`，关标签即失效，不使用 Cookie，因此 `/admin/` 反向代理无需额外鉴权配置（接口本身仍校验 Bearer）。
+- 公开门户：浏览器打开 `https://$DOMAIN/`。镜像构建同时输出预渲染门户 `dist/portal`（含 `routes.json`、`sitemap.xml`、`robots.txt`），服务端按精确路由托管，未知前端路径回落 SPA 壳；`/v1/*` 未命中仍为 JSON 404。门户注册/登录/个人中心会话同样存 `sessionStorage`。发布插件包时把 tgz 放入 `dist/downloads/`，并更新 `content/releases.json` 的版本、文件名、SHA-256、大小与说明；下载由服务端以 `attachment` 提供。
 - 视频建课：「视频建课」页创建 draft 课程与素材 → 上传 → 处理 → 查看转写 → 生成 → 预览 → 应用到草稿 → 发布。发布前会按配置重建索引；索引失败返回 `503` 且课程保持 draft。源视频默认保留在 `workspace/pipeline/storage/sources/`，清理策略未冻结前不要手工删除 `sources/`。
 
 ## 4. TLS
@@ -191,7 +192,7 @@ IMAGE_TAG=2026-10-31 docker compose --env-file .env.prod -f docker-compose.prod.
 IMAGE_TAG=2026-10-30 docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 ```
 
-- 发布前：`npm run typecheck && npm test`、备份、确认迁移可向前兼容；`npm run build` 会同时产出服务端与 `dist/admin`；用 `scripts/restore-drill.sh` 验证备份可导入。
+- 发布前：`npm run typecheck && npm test`、备份、确认迁移可向前兼容；`npm run build` 会同时产出服务端 `dist/server`、`dist/admin` 与预渲染门户 `dist/portal`（`PUBLIC_BASE_URL` 决定 canonical/sitemap）；用 `scripts/restore-drill.sh` 验证备份可导入。
 - 发布后：`/health`、一次设备授权/刷新、一次检索、一次播放会话、打开 `/admin/` 完成一次登录与内容读写，检查 5xx 与 P95；跑一次 `npm run loadtest` 对比基线。
 - 迁移已改变数据时，仅回滚镜像可能不兼容；优先前滚修复，否则按 §6 恢复。
 

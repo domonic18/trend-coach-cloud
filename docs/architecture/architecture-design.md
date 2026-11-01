@@ -1,7 +1,7 @@
-# 趋势课程云端服务 · 架构设计（v0.5）
+# 趋势课程云端服务 · 架构设计（v0.6）
 
-版本：v0.5（2026-11-01）
-状态：初稿。接口口径以插件 PRD v1.6 §6、插件架构 §6/§9/§10/§12 与 [对接清单](./cloud-service-integration-checklist.md) 为准；冲突时先改那两份文档，再同步本文。v0.5 补充 M6 公测加固（限流矩阵、内存上限、压测与恢复演练、合规基线）；v0.4 新增 M1 视频→课程管线（本地存储、DB 任务队列、长音频转写、LLM 草稿与人工发布）；v0.3 同步 M3.1/M3.2/M3.3 落地状态；v0.2 新增 M4.2 语音转写（MiniMax ASR）。
+版本：v0.6（2026-11-01）
+状态：初稿。接口口径以插件 PRD v1.6 §6、插件架构 §6/§9/§10/§12 与 [对接清单](./cloud-service-integration-checklist.md) 为准；冲突时先改那两份文档，再同步本文。v0.6 新增 M7 公开门户与自助账号、AI 用量账本与任务级模型路由（`/v1/portal/*`、`/v1/admin/ai/*`）；v0.5 补充 M6 公测加固（限流矩阵、内存上限、压测与恢复演练、合规基线）；v0.4 新增 M1 视频→课程管线（本地存储、DB 任务队列、长音频转写、LLM 草稿与人工发布）；v0.3 同步 M3.1/M3.2/M3.3 落地状态；v0.2 新增 M4.2 语音转写（MiniMax ASR）。
 
 ## 1. 目标与范围
 
@@ -17,6 +17,8 @@
 | 语音转写（M4.2，MiniMax ASR，仅语音→文字） | 学员侧生成式推理 |
 | 后台账号、内容管理与索引重建（M3） | 召回评估看板、插件版本与灰度 |
 | 视频→课程管线（M1）：流式上传、单码率 HLS、长音频转写、章节/知识点/片段切分、文章草稿、人工发布 | 多码率 ABR、对象存储、断点续传、自动发布 |
+| 公开门户（体系、功能、安装向导、下载、FAQ）与学员自助注册/个人中心（M7） | 邮件/短信验证、找回密码、客服工单 |
+| AI 用量账本、运行链路、任务级主备绑定与自动切换（M7） | 学员侧推理、第三方分析 SDK |
 
 **不耦合 `ai-invest`**：独立仓库、独立数据库、独立鉴权与用户体系；不复制其代码、数据或评估集，只借鉴 PostgreSQL `halfvec` + `pg_trgm` + RRF 的技术选型（PRD D2）。
 
@@ -24,7 +26,7 @@
 
 ## 2. 设计原则与约束
 
-1. **业务面边界**：学员只读知识内容，仅学习进度与事件同意为学员写操作；账号与内容管理走 `/v1/admin/*`，只接受 operator/admin 会话。
+1. **业务面边界**：学员只读知识内容，仅学习进度、事件同意与个人资料为学员写操作；账号与内容管理走 `/v1/admin/*`，只接受 operator/admin 会话；门户会话（`scope=portal`）不得进入后台命名空间。
 2. **凭据不落地到浏览器**：Bearer 只出现在插件 Host 与云端；浏览器只拿签名播放地址。
 3. **内容最小外流**：只下发 Top-K 片段与元数据，不下发全库正文、可下载源站地址。
 4. **契约先行**：接口字段、边界与错误码先写进需求与对接清单，再改实现与 OpenAPI。
@@ -51,6 +53,8 @@ flowchart LR
     EV[事件接收<br/>字段白名单]
     PIPE[视频管线 worker<br/>ffmpeg / 长音频 ASR / 内容 LLM]
     STORE[(本地源文件与 HLS)]
+    PORTAL[门户与账号<br/>预渲染静态页 + /v1/portal]
+    AIOPS[AI 路由<br/>用量账本 / 任务绑定 / 自动切换]
   end
 
   subgraph Media["媒体域"]
@@ -76,6 +80,10 @@ flowchart LR
   STORE --> OBJ
   ADM --> API
   ADM --> DB
+  VIS[访客 / 学员浏览器] --> PORTAL
+  PORTAL --> DB
+  PIPE --> AIOPS
+  AIOPS --> DB
 ```
 
 **职责边界**
@@ -89,6 +97,8 @@ flowchart LR
 | 事件接收 | 白名单校验、同意检查、幂等写入 | 第三方 SDK |
 | 视频管线（M1） | 上传落盘、ffprobe/ffmpeg、长音频转写、切分草稿、任务编排、人工发布与索引 | 学员侧读写、自动发布 |
 | 本地媒体存储 | 源文件、工作区、HLS 的原子发布与清理 | 对外暴露路径或直链 |
+| 门户与账号（M7） | 预渲染公开页、注册/登录、个人资料、改密、设备解绑、发布清单与统计 | 内容 CMS、邮件/短信、客服 |
+| AI 路由（M7） | 任务模型解析、用量记账、运行链路、健康冷却与单跳降级 | 学员侧推理、模型密钥分发 |
 
 ## 4. 总体架构
 
@@ -103,11 +113,13 @@ API Gateway ── 鉴权（Bearer + x-device-id）── 限流 ── 请求�
    ├── kb     : search / segments/:id
    ├── playback: sessions（签名 playlistUrl）
    ├── asr     : POST /v1/asr/transcribe → MiniMax speech_to_text（M4.2）
-   ├── admin   : /v1/auth/session + /v1/admin/*（后台账号、内容管理、索引重建、视频管线、模型配置，M3/M1/M4.3）
+   ├── portal  : /v1/portal/*（注册/登录/个人资料/设备/发布清单/统计，M7）+ 预渲染静态页
+   ├── admin   : /v1/auth/session + /v1/admin/*（后台账号、内容管理、索引重建、视频管线、模型配置、AI 运营，M3/M1/M4.3/M7）
    └── events : GET/PUT /v1/events/consent + POST /v1/events（白名单）
    │
-PostgreSQL ── 课程 / 章节 / 知识点 / 片段 / 文章 / 向量 / 用户 / 设备 / 令牌 / 事件 / 后台会话 / 管线任务与转写
+PostgreSQL ── 课程 / 章节 / 知识点 / 片段 / 文章 / 向量 / 用户 / 设备 / 令牌 / 事件 / 会话 / 管线任务与转写 / AI 用量与运行
 本地存储（MediaStore）── 源视频 / 工作区 / HLS；生产 HLS 由 CDN 或对象存储承接
+构建产物 ── dist/server（服务端）、dist/admin（后台 SPA）、dist/portal（预渲染门户）、dist/downloads（插件包）
 ```
 
 - 单仓库、单服务进程起步（模块化单体），按接口前缀拆模块；M3 再按负载拆服务。
@@ -126,6 +138,8 @@ PostgreSQL ── 课程 / 章节 / 知识点 / 片段 / 文章 / 向量 / 用�
 - 两个环境严格隔离数据库、媒体存储、令牌密钥与 CDN 配置。
 - 签名密钥、数据库口令、CDN 密钥通过环境变量/密钥管理注入，不入库、不入镜像；ASR/LLM/embedding 密钥存数据库（后台录入、加密落库），环境只提供 `CREDENTIAL_ENCRYPTION_KEY`。
 - 镜像内置 ffmpeg/ffprobe；`PIPELINE_STORAGE_DIR`（源文件与工作区）与 `PIPELINE_HLS_DIR`（对外 HLS）位于同一挂载点（宿主 `workspace/pipeline` 挂到 `/data`），保证 HLS 原子 rename。所有运行期持久化数据按 ai-invest 约定放在仓库根 `workspace/`，整体 gitignore。
+- 构建同时产出 `dist/server`、`dist/admin`、`dist/portal` 与 `dist/downloads`：门户先 Vite 客户端构建，再程序化 SSR 构建逐路由预渲染，生成 `routes.json`、`sitemap.xml`、`robots.txt`。`PUBLIC_BASE_URL` 决定 canonical/sitemap 的绝对地址，默认 `http://127.0.0.1:3939`。
+- 门户静态注册使用 `prefix: '/'`、`wildcard: false`、`decorateReply: false`、`index: false`，只挂载构建产物中的精确文件；未知 HTML GET 由 `setNotFoundHandler` 回落预渲染页或 SPA 壳（`no-store`），`/v1/*` 未命中保持 JSON `404`。
 
 ## 5. 数据模型
 
@@ -149,6 +163,10 @@ erDiagram
   MEDIA_TRANSCRIPTS ||--o{ TRANSCRIPT_SEGMENTS : yields
   MEDIA_ASSETS ||--o{ CONTENT_GENERATIONS : produces
   COURSES ||--o{ CONTENT_GENERATIONS : targets
+  AI_RUNS ||--o{ AI_RUN_STEPS : contains
+  AI_RUNS ||--o{ AI_USAGE_EVENTS : records
+  LLM_CONFIGS ||--o{ LLM_TASK_BINDINGS : primary
+  LLM_CONFIGS ||--o| LLM_CONFIG_HEALTH : monitors
 ```
 
 | 表 | 关键字段 | 不变量 |
@@ -159,7 +177,7 @@ erDiagram
 | `segments` | `segment_id`、`course_id/chapter_id/knowledge_point_id`、`start_sec`、`end_sec`、`text`、`embedding halfvec`、`tsv`、`status` | `segment_id` 全局唯一、跨版本稳定；`start_sec < end_sec` 整数秒；下架 `status` 使 GET 返回 404 |
 | `media_assets` | `asset_id`、`course_id`、`title`、`hls_path`、`encryption`、`status`、`source_rel_path`、`source_size_bytes`、`source_sha256`、`duration_ms`、`error_code` | 不对外暴露源站直链；状态 `awaiting_upload/uploaded/processing/ready/failed/archived`；播放只选 `ready`；`source_*` 仅内部使用 |
 | `users` | `user_id`、`username`、`display_name`、`role`、`status`、`password_hash`、`events_consent` | 账号由管理员创建；`username` 唯一且小写；密码只存 scrypt 哈希；禁用立即拒绝令牌 |
-| `sessions` | `token_hash`、`user_id`、`expires_at`、`revoked_at`、`last_seen_at` | 后台会话与设备令牌分离；只存哈希；改密/禁用/角色变更即吊销 |
+| `sessions` | `token_hash`、`user_id`、`expires_at`、`revoked_at`、`last_seen_at`、`scope(console/portal)` | 后台会话与设备令牌分离；只存哈希；`scope=portal` 仅可访问 `/v1/portal/*`；改密/禁用/角色变更即吊销 |
 | `invite_codes` | `code_hash`、`user_id`、`expires_at`、`consumed_at`、`created_by` | 单次使用；只存哈希；新建邀请码使旧码失效；默认 7 天 |
 | `devices` | `device_id`、`user_id`、首次授权时间、状态 | `device_id` 由插件首启生成并持久绑定 |
 | `tokens` | `token_hash`、`kind(access/refresh)`、`device_id`、`expires_at`、`revoked_at`、`rotated_from` | 只存哈希；旧 refresh 轮换后立即失效 |
@@ -172,8 +190,13 @@ erDiagram
 | `transcript_chunks`（M1） | `transcript_id`、`idx`、`start_ms/end_ms`、`status`、`sentences jsonb`、`attempt` | 块内时间戳为局部毫秒偏移；`(transcript_id, idx)` 唯一；成功块不重复请求 |
 | `transcript_segments`（M1） | `transcript_id`、`idx`、`start_ms/end_ms`、`text` | 全局毫秒时间戳、≤30s 分组、1–4000 字符；按 `start_ms` 排序 |
 | `content_generations`（M1） | `generation_id`、`asset_id`、`transcript_id`、`course_id`、`job_id`、`status`、`prompt_version`、`model`、计数、`payload jsonb`、`applied_content jsonb` | 每素材仅一个 `draft`；只存预览与待审原因；`apply` 后保留映射；不自动发布 |
-| `llm_configs`（M4.3） | `config_id`、`name`、`provider`、`protocol`、`base_url`、`model`、`api_key_encrypted`、`purpose(content/embedding)`、`is_default`、`is_active`、测试状态 | 每个用途最多一个启用默认项（部分唯一索引）；密钥只存密文；embedding 必须 1024 维 |
+| `llm_configs`（M4.3/M7） | `config_id`、`name`、`provider`、`protocol`、`base_url`、`model`、`api_key_encrypted`、`purpose(content/embedding)`、`is_default`、`is_active`、`input_price_micros_per_1k`、`output_price_micros_per_1k`、测试状态 | 每个用途最多一个启用默认项（部分唯一索引）；密钥只存密文；embedding 必须 1024 维；单价可为空，空表示成本未知 |
 | `asr_config`（M4.3） | 单行 `id=1`、`provider`、`protocol(minimax/openai)`、`base_url`、`model`、`api_key_encrypted`、`enabled`、测试状态 | 全局唯一渠道；`enabled` 且密钥可解密时才参与转写 |
+| `ai_runs`（M7） | `run_id`、`task_key`、`source(pipeline/admin)`、`source_id`、`status(running/succeeded/failed)`、`primary_config_id`、`fallback_used`、`step_seq`、`started_at`、`finished_at`、`error_code`、`summary jsonb` | 一次业务运行一行；不存 prompt 与正文；来源 ID 可空、≤200 |
+| `ai_usage_events`（M7） | `usage_id`、`run_id`、`task_key`、`provider`、`model`、`config_id`、`input/output/cached_tokens`、`audio_seconds`、`characters`、`latency_ms`、`status(success/error/fallback)`、`error_code`、`created_at` | 只记数字与模型标识；批量写入；按 `created_at`、`task_key`、`config_id` 建索引 |
+| `ai_run_steps`（M7） | `step_id`、`run_id`、`seq`、`task_key`、`config_id`、`provider`、`model`、`attempt`、`status(success/error)`、`latency_ms`、`usage_id`、`error_code`、`created_at` | `(run_id, seq)` 唯一；主/备每次尝试一行，关联用量 |
+| `llm_task_bindings`（M7） | `task_key`、`primary_config_id`、`fallback_config_id`、`updated_at` | 主备必须同用途且启用；备用可为空；主备不可相同；未绑定回落默认启用模型 |
+| `llm_config_health`（M7） | `config_id`、`consecutive_failures`、`cooldown_until`、`last_error`、`last_failure_at`、`last_success_at`、`updated_at` | 每个配置一行；冷却期内路由跳过该配置；内存 Map 只作加速 |
 
 建库插件：`pgvector`（`halfvec`）、`pg_trgm`；检索索引与向量索引分离于业务表，可在线重建（M3 后台触发）。
 
@@ -371,7 +394,7 @@ sequenceDiagram
 
 ### 7.2 账号与后台会话（M3.1）
 
-- 账号由管理员创建：`username`（小写、唯一）、`displayName`、`role`（student/operator/admin）、可选初始密码或一次性邀请码。
+- 后台账号由管理员创建：`username`（小写、唯一）、`displayName`、`role`（student/operator/admin）、可选初始密码或一次性邀请码；学员也可通过门户自助注册（§7.6），只创建 `student`。
 - 密码用随机盐 scrypt 存储（N=16384、r=8、p=1、64 字节），比较使用常量时间；登录失败、邀请码错误与禁用账号统一返回 `401`。
 - 后台会话 `POST /v1/auth/session` 只对 operator/admin 开放；令牌 12 小时默认、只存 SHA-256 哈希；注销、改密、禁用与角色变更即吊销。
 - 邀请码默认 7 天、单次使用；相同账号新建邀请码会使未使用旧码失效；服务端只存哈希，明文只在创建响应出现一次。
@@ -390,7 +413,7 @@ sequenceDiagram
 - 文章 `PUT` 为幂等 upsert：每次成功保存 `version + 1`、`updated_at = now()`；`status=published` 时写 `published_at`。Markdown 在服务端校验为纯 Markdown 子集，拒绝 `<script>`、`<iframe>`、事件属性与 `javascript:` 等可执行内容。
 - 片段写入校验 `startSec < endSec`、标题/文本长度与知识点归属；文本变更时清空 `embedding`，避免旧向量参与检索，需通过 `POST /v1/admin/content/reindex` 重建。
 - 学员可见性由现有查询保证：课程非 `published`、片段或文章非 `published` 时不下发；后台写入不影响已签发的播放会话，但新会话需片段仍可用。
-- 控制台为 `/admin` 单页应用（Vite + React），构建产物由 Fastify 静态托管；会话令牌存 `sessionStorage`，不使用 cookie，静态页不缓存；所有数据请求仍走 `/v1/auth/session` + 后台接口逐请求鉴权。
+- 控制台为 `/admin` 单页应用（Vite + React 18 + Ant Design 5 + React Router + TanStack Query），构建产物由 Fastify 静态托管；默认深色、可切换浅色，提供概览工作台与课程/片段/视频建课/模型/账号分组导航；浏览器对 `/admin/*` 深链的 HTML 导航回落 `index.html`（`no-store`），API 404 保持 JSON。会话令牌存 `sessionStorage`，不使用 cookie，静态入口不缓存；所有数据请求仍走 `/v1/auth/session` + 后台接口逐请求鉴权。
 - 账号管理页仅 admin 可见；operator 登录后仅显示内容管理，接口层同时校验角色，前端隐藏不作为安全边界。
 - M1 在内容管理下追加素材、上传、管线任务、转写、生成与发布接口（详见 §6.4 与对接清单 §3.9），均要求 operator/admin 会话；发布必须显式调用，生成内容不会自动发布。
 
@@ -445,6 +468,74 @@ ASR / 内容 LLM / embedding 的连接信息不再读环境变量，统一存数
 
 **隐私**：音频只在请求生命周期内存在，转发 MiniMax 后丢弃；不落盘、不落数据库、不写对象存储、不进入指标；转写文本只回传插件，不持久化。
 
+### 7.6 门户与自助账号（M7）
+
+**构建与托管**
+
+```
+web/portal (Vite + React 18 + AntD 5)
+  → vite build（客户端）→ dist/portal
+  → vite build --ssr src/entry-server.tsx（程序化）→ 临时 SSR 产物
+  → scripts/prerender-portal.mjs 逐路由 renderToString + StaticRouter
+      ├── 注入 title/description/canonical/OG/twitter/robots 与 AntD SSR 样式
+      ├── 写 dist/portal/<route>/index.html 与 routes.json
+      └── 生成 sitemap.xml、robots.txt；清理 SSR 产物
+```
+
+- 服务端 `tsc` 产物固定输出 `dist/server`，与门户站点产物 `dist/portal` 分离；Vite 构建会清空 `emptyOutDir`，两者共用目录会删除服务端模块。
+- 渲染期禁止 `Date.now()`/`Math.random()`，登录态相关 UI 只在客户端 effect 后出现，避免水合不一致。
+- 服务端第二静态注册只挂精确文件（`wildcard:false`），HTML/`routes.json` 与 SPA 壳 `no-store`，带哈希资源长缓存，`sitemap.xml`/`robots.txt` 缓存 1 小时。
+- 未知 HTML GET 回落：`/admin` 前缀 → 后台 `index.html`；命中 `routes.json` → 预渲染页；其他前端路径 → 门户壳并带 `x-robots-tag: noindex`；`/v1/*` 与非 HTML 请求保持 JSON `404`。
+- 下载：`content/releases.json` 为发布清单，`dist/downloads/` 由同一静态注册挂载并强制 `Content-Disposition: attachment`。
+
+**账号与会话**
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| POST | `/v1/portal/auth/register` | 无（IP 限流） | 创建 `student` 并直接签发门户会话；用户名冲突 `409` |
+| POST | `/v1/portal/auth/login` | 无（IP + 用户名限流） | 非禁用账号均可；返回 `{ token, expiresAt, user }` |
+| GET/DELETE | `/v1/portal/auth/session` | 门户会话 | 查询 / 注销当前门户会话 |
+| GET/PATCH | `/v1/portal/me` | 门户会话 | 资料与显示名 |
+| POST | `/v1/portal/me/password` | 门户会话 | 校验旧密码；吊销其他会话 |
+| GET | `/v1/portal/me/devices` | 门户会话 | 本人设备列表 |
+| DELETE | `/v1/portal/me/devices/{deviceId}` | 门户会话 | 仅本人设备；吊销该设备令牌 |
+| GET | `/v1/portal/releases` | 公开 | 发布清单，`max-age=60` |
+| GET | `/v1/portal/stats` | 公开（IP 限流） | 已发布课程/知识点/片段/文章计数，`max-age=60` |
+
+- `requirePortalSession` 只接受 `sessions.scope='portal'` 且账号 active；学员门户令牌访问 `/v1/admin/*` 因角色被拒（`403`）。
+- 注册只允许 `student`；后台账号仍由管理员创建，运营/管理员可用门户接口维护自己的资料与设备。
+- 会话令牌只存 `sessionStorage`，不落 Cookie；改密后除当前会话外全部吊销。
+
+### 7.7 AI 用量与任务级模型路由（M7）
+
+**任务模型**
+
+```
+LLM_TASKS = content.outline | content.points | content.article
+          | embedding.query | embedding.segment | asr.longform
+```
+
+- `resolveTaskModel(taskKey)`：优先 `llm_task_bindings` 的主/备；未绑定时回落到同用途（content/embedding）的 `is_default AND is_active` 配置；仍无则任务失败。
+- `withFailover(taskKey, call)`：主模型可重试错误（429/`rate_limited`/`unavailable`/5xx/网络/超时）时切备用，仅单跳；两次尝试都写 `ai_usage_events` 与 `ai_run_steps`，运行标 `fallback_used`。
+- `reportFailure(configId, code)` 累加 `llm_config_health.consecutive_failures` 并写 `cooldown_until = now()+60s`；`reportSuccess` 清零。冷却状态进程内 Map + DB 双写，单实例成立。
+- `UsageRecorder` 内存缓冲批量 `INSERT`，按容量/定时 flush，进程关闭时 flush；记录只含数字、模型标识与错误码，不含 prompt、回答、音频或转写正文。
+
+**后台接口**
+
+| 方法 | 路径 | 角色 | 说明 |
+|---|---|---|---|
+| GET | `/v1/admin/ai/usage/summary?from&to&task` | operator/admin | 总量、按日、按任务、按模型、成本估算 |
+| GET | `/v1/admin/ai/usage/events?from&to&task&model&cursor&limit` | operator/admin | 用量明细，游标分页 |
+| GET | `/v1/admin/ai/runs?from&to&task&status&source&cursor&limit` | operator/admin | 运行列表 |
+| GET | `/v1/admin/ai/runs/{runId}` | operator/admin | 运行详情与步骤链 |
+| GET | `/v1/admin/ai/bindings` | operator/admin | 全任务绑定与可选模型 |
+| PUT | `/v1/admin/ai/bindings/{taskKey}` | admin | 设置主/备；`primaryConfigId=null` 删除绑定 |
+| GET | `/v1/admin/ai/health` | operator/admin | 配置失败次数、冷却与最近错误 |
+
+- 成本：`round((input_tokens × input_price + output_tokens × output_price) / 1000)`，单位微美元；任一参与计费的模型价格缺失时返回 `null`，不猜测。
+- 绑定校验：主/备必须与任务用途一致且 `is_active`，主备相同 `400`，停用配置 `409`；保存后下一次调用立即生效。
+- 日志只记任务键、配置 ID、状态、错误码与耗时；不记 prompt、生成正文、密钥或完整上游响应。
+
 ## 8. 播放与媒体
 
 - `POST /v1/playback/sessions` 校验片段可播与用户配额后，返回短时效签名 `playlistUrl`（绑定设备与会话）。
@@ -465,11 +556,13 @@ ASR / 内容 LLM / embedding 的连接信息不再读环境变量，统一存数
 |---|---|
 | 传输 | 全站 HTTPS；媒体域同样 TLS |
 | 凭据 | 设备令牌与会话令牌只存哈希；密码只存带盐 scrypt；签名密钥与 CDN 密钥走密钥管理；不在日志、响应、镜像中出现 |
-| 账号 | 管理员创建账号；角色最小权限；学员不可访问后台；禁用/改密吊销会话，禁用即时拒绝设备令牌 |
+| 账号 | 后台账号由管理员创建、学员可自助注册；角色最小权限；门户会话 `scope=portal` 与后台隔离；禁用/改密吊销会话，禁用即时拒绝设备令牌 |
+| 门户 | 预渲染 HTML `no-store`；未知路径壳 `noindex`；公开接口只返回发布清单与聚合计数；下载强制 `attachment` |
 | 内容 | 只下发 Top-K；播放地址短时效、设备绑定、并发限制；不提供下载直链 |
 | 内容管理 | `/v1/admin/content/*` 仅 operator/admin 会话；Markdown 拒绝可执行 HTML/脚本；发布状态即时影响学员可见性 |
 | 视频管线 | 上传先鉴权/限流再消费 body；`Content-Type` 与体积校验；ffmpeg/ffprobe 参数数组、禁止 shell；源路径/SHA/ffmpeg stderr/provider 响应不外泄；生成内容人工发布 |
-| 模型密钥 | ASR、embedding、内容 LLM 密钥只读环境变量；不序列化、不写日志/响应/镜像；内容 LLM 仅管理端调用 |
+| 模型密钥 | ASR、embedding、内容 LLM 密钥只存加密数据库；不序列化、不写日志/响应/镜像；内容 LLM 仅管理端调用 |
+| AI 运营 | 用量只记数字与模型标识；绑定写仅 admin；读接口限流；健康与降级状态不含密钥与正文 |
 | 输入 | 白名单校验 + 长度/体积上限；拒绝非 JSON 与超大请求；ASR 路由单独 3MiB 上限并校验 WAV；上传路由单独 2GiB 流式上限 |
 | 日志 | 不记 token、完整 query、完整 deviceId、源路径、转写正文、provider 响应；需要排障时用截断前缀或哈希 |
 | 隐私 | 数据最小化；事件需同意且可撤回；支持数据删除；学员语音音频与转写不落盘、不落日志、不进指标；建课源视频/转写按管线规则持久化 |
@@ -494,6 +587,9 @@ ASR / 内容 LLM / embedding 的连接信息不再读环境变量，统一存数
 | `POST /v1/asr/transcribe` | 设备 ID | `RATE_LIMIT_ASR_PER_MINUTE` | 20 |
 | `POST /v1/playback/sessions` | 设备 ID | `PLAYBACK_MAX_CONCURRENT`（并发会话数） | 5 |
 | `/v1/admin/content/*` 与管线 | 后台账号 | `RATE_LIMIT_CONTENT_PER_MINUTE`、`RATE_LIMIT_PIPELINE_PER_MINUTE` | 300 / 30 |
+| `POST /v1/portal/auth/register` | IP | `RATE_LIMIT_REGISTER_PER_MINUTE` | 5 |
+| `POST /v1/portal/auth/login` 与 `/v1/portal/*` 公开读 | IP + 用户名 | `RATE_LIMIT_LOGIN_PER_MINUTE`、`RATE_LIMIT_PORTAL_PER_MINUTE` | 10 / 120 |
+| `/v1/admin/ai/*` | 后台账号 | `RATE_LIMIT_AI_PER_MINUTE` | 120 |
 
 扩多实例前必须把限流改为共享存储（Redis/DB），否则配额按实例放大；当前部署保持单实例。
 
@@ -508,6 +604,8 @@ ASR / 内容 LLM / embedding 的连接信息不再读环境变量，统一存数
 | 事件 | 接收量、白名单拒绝量、同意/撤回状态 |
 | 语音 | 转写请求量、耗时 P50/P95、错误分桶（400/413/422/429/502/503）、上游错误类别、音频时长分布（仅聚合桶，不记内容） |
 | 管线 | 任务按 `kind/status/stage` 计数、队列深度、阶段耗时、重试与取消次数、转写块失败数、生成预算拒绝数、发布成功/索引失败 |
+| AI 运营 | 各任务请求量、token/音频用量、延迟 P50/P95、错误与降级次数、估算成本、配置冷却状态 |
+| 门户 | 注册/登录成功与失败、429 命中、公开页 5xx、预渲染缺失与 SPA 回落次数 |
 
 - 日志结构化，带 `request_id`；响应返回 `request_id` 便于排障（不泄露内部细节）。
 - 告警：5xx/429 异常升高、检索 P95 超阈值、索引任务连续失败、证书到期、签名失败率异常。
@@ -530,7 +628,9 @@ ASR / 内容 LLM / embedding 的连接信息不再读环境变量，统一存数
 | 媒体 | 加密 HLS 可解密、seek、Range 206、CORS、token 过期提示 |
 | 语音 | WAV 校验边界、provider 成功/业务错误/429/5xx/非 JSON/超时、空文本 422、鉴权与限流、日志脱敏；真实 MiniMax 待后台录入 ASR 密钥 |
 | 管线 | 纯算法（静音切块、转写合并、文本锚定、ID）、假 provider ingest→生成→apply→发布 E2E、取消/重试/心跳恢复、上传边界、OpenAPI 双向一致；`RUN_FFMPEG_TESTS=1` 跑真实 ffmpeg 合成视频 |
-| 安全 | 越权/设备不匹配/过期令牌、日志脱敏抽查、限流 |
+| 门户 | 注册/登录/限流、会话 scope 越权、资料与设备解绑、发布清单缺失、预渲染深链与 `/v1` 404 语义、静态缓存头 |
+| AI 运营 | 用量记账、run/steps 一致性、绑定校验、主备切换与冷却、成本缺失返回 `null`、operator 只读与 admin 写 |
+| 安全 | 越权/设备不匹配/过期令牌、门户令牌访问后台、日志脱敏抽查、限流 |
 | 压测 | 检索 P95 与并发目标；播放会话签发与 CDN 并发 |
 
 CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 compose）、OpenAPI 与实现一致性校验。
@@ -544,6 +644,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 | M3 | 后台管理、账号体系、学习进度、索引重建/召回测试 | 内容可运营、用户可管理 | 核心已落地（M3.1/M3.2/M3.3）；召回测试、媒体上传、运营看板、插件版本与灰度后置 |
 | M4.2 | 语音转写：`/v1/asr/transcribe`、MiniMax provider、配置与限流 | 契约测试通过；真实 MiniMax 需后台录入 ASR 密钥 | 已落地；真实上游已验收 |
 | M6 | 限流、压测、备份、合规加固 | 公测放行 | 已落地加固项；账号注销/数据删除待完成 |
+| M7 | 公开门户、门户自助账号、AI 用量账本、运行链路、任务级主备绑定与切换 | 门户深链可刷新；注册/登录/个人中心闭环；AI 调用可计量、可降级 | 已落地；客服/联系入口后置 |
 
 **实现状态（2026-11-01）**
 
@@ -554,6 +655,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 - **M4.2 已落地**：`/v1/asr/transcribe` + MiniMax provider + 按设备限流；2026-11-01 单元/契约测试通过（WAV 与时长校验、base URL 归一化、本地 stub 覆盖成功/`base_resp` 业务错误/429/500/非 JSON/超时，以及鉴权、设备不匹配、非法音频、413、空结果 422、上游错误映射、fake provider 成功与限流 429）；真实上游待后台录入 ASR 密钥。
 - **M1 已落地**：媒体素材创建与流式上传、ffprobe 校验、单码率 HLS、16kHz WAV 抽取、静音切块、MiniMax 长音频转写（块级缓存）、章节/知识点/片段/文章草稿生成、生成预览/apply/discard、课程发布与按需 `reindex`、DB 任务队列（认领/心跳/重试/取消/恢复）与管理端「视频建课」页。测试使用假 MediaProcessor/ASR/LLM；真实 MiniMax 与内容 LLM 待密钥验收。
 - **M6 已落地加固项**：限流补齐设备轮询、刷新、体系/片段读取与后台内容接口，`429` 带 `Retry-After`，内存键数设上限；新增零依赖压测脚本 `scripts/load-test.mjs`（P95/错误率阈值）、非破坏性恢复演练 `scripts/restore-drill.sh` 与合规清单 `docs/operations/compliance.md`。账号注销/数据删除、指标与播放会话定期清理、源视频保留期仍未实现，见合规清单 §9。
+- **M7 已落地**：`web/portal` 门户（首页、体系、功能、向导、下载、FAQ、登录/注册/个人中心）与构建期预渲染（`routes.json`/`sitemap.xml`/`robots.txt`）；`/v1/portal/*` 注册/登录/资料/改密/设备解绑/发布清单/统计；迁移 007 的会话 `scope`、`ai_usage_events`/`ai_runs`/`ai_run_steps`/`llm_task_bindings`/`llm_config_health` 与价格字段；LLM/embedding/ASR 接入用量记账、任务级主备绑定、单跳降级与 60s 冷却；后台「AI 用量」「AI 运行」页与模型页「任务绑定」「健康状态」Tab。客服/联系入口、邮件验证与找回密码未实现。
 - **其他**：TTL 与并发上限仍为临时默认值；生产媒体走 CDN 尚未接入，本地 staging 由 `src/media/routes.ts`、生产管线由 `PIPELINE_HLS_DIR` 提供签名文件服务。
 
 ### 13.1 视频 → 课程能力现状
@@ -591,6 +693,10 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 | C12 | 单码率 H.264/AAC HLS，6s 分片 | 最小可用、转码成本低；现有 hls.js 可直接播放 | 弱网自适应缺失，多码率后置 |
 | C13 | 生成结果单表 `payload jsonb` + 显式 apply/publish | 保留“先审后发、可丢弃”，避免 5 张 staging 表；生成绝不自动发布 | 预览不支持细粒度编辑，后续再拆表 |
 | C14 | 页面内禁用自动发布，发布前同步 reindex | 沿用“未审核内容不进入问答”；索引失败不翻状态 | 发布耗时随课程片段数增长 |
+| C15 | 门户使用仓库内 Markdown + 构建期预渲染，静态托管与 `/admin` 同域 | SEO 与首屏可用、无新增运行时服务；深链刷新不 404；不与 `/v1` 路由冲突 | 内容更新需重新构建；渲染期受确定性约束 |
+| C16 | 门户与后台共用会话表，以 `scope` 区分来源 | 复用 scrypt/会话实现，避免两套账号体系；审计与定向清理更简单 | 鉴权中间件需同时校验 scope 与角色 |
+| C17 | AI 任务级主/备绑定 + 健康冷却 + 单跳降级 | 429/5xx 时自动恢复；绑定与默认配置兼容；用量与步骤可追溯 | 冷却为单实例内存 + DB 双写，横向扩容需共享状态 |
+| C18 | 用量账本只记数字与模型标识，成本按配置单价估算 | 不落 prompt/正文，隐私面小；价格缺失返回未知而非猜测 | 成本依赖运营维护单价，跨供应商计价格式未统一 |
 
 ## 15. 开放问题
 
@@ -608,6 +714,10 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 12. 真实 embedding 已验收（2026-11-01，智谱 `embedding-3` + `dimensions: 1024`）：测试连通正常，已有课程重发布 `indexed=true`、`embedded=30`，检索为词法 + 向量混合召回。
 13. 源视频与转写留存期限、版权授权与归档策略待运营确认；未冻结前不自动清理。
 14. 多码率 ABR、对象存储与断点续传后置；`MediaStore` 接口已预留。
+15. 门户内容维护走仓库 Markdown 与重新构建；CMS 与在线编辑未列入本期。
+16. 门户会话只存 `sessionStorage`、无刷新令牌；新标签页需重新登录，后续可评估短时刷新机制。
+17. 客服/联系入口（原需求 5）本期不做，后续单独立项。
+18. AI 限流与配置冷却仍为单实例内存实现；横向扩容前需换 Redis 或 DB 共享状态。
 
 ## 16. 关联文档
 

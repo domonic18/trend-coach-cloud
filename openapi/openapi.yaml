@@ -1376,6 +1376,12 @@ components:
       type: string
       enum: [content, embedding]
 
+    AiTaskKey:
+      type: string
+      enum:
+        [content.outline, content.points, content.article,
+         embedding.query, embedding.segment, asr.longform]
+
     LlmProtocol:
       type: string
       enum: [openai, anthropic]
@@ -1402,8 +1408,8 @@ components:
       additionalProperties: false
       required:
         [configId, name, provider, protocol, baseUrl, model, purpose, apiKeyConfigured,
-         apiKeyMasked, isDefault, isActive, lastTestedAt, lastTestStatus, lastTestError,
-         createdAt, updatedAt]
+         apiKeyMasked, isDefault, isActive, inputPriceMicrosPer1k, outputPriceMicrosPer1k,
+         lastTestedAt, lastTestStatus, lastTestError, createdAt, updatedAt]
       properties:
         configId:
           type: string
@@ -1428,6 +1434,13 @@ components:
           type: boolean
         isActive:
           type: boolean
+        inputPriceMicrosPer1k:
+          type: [integer, 'null']
+          minimum: 0
+          description: 微美元/千输入 token；null 表示未配置，成本不估算。
+        outputPriceMicrosPer1k:
+          type: [integer, 'null']
+          minimum: 0
         lastTestedAt:
           type: [integer, 'null']
         lastTestStatus:
@@ -1470,6 +1483,12 @@ components:
           type: boolean
         isActive:
           type: boolean
+        inputPriceMicrosPer1k:
+          type: [integer, 'null']
+          minimum: 0
+        outputPriceMicrosPer1k:
+          type: [integer, 'null']
+          minimum: 0
 
     UpdateLlmConfigRequest:
       type: object
@@ -1499,6 +1518,12 @@ components:
           type: boolean
         isActive:
           type: boolean
+        inputPriceMicrosPer1k:
+          type: [integer, 'null']
+          minimum: 0
+        outputPriceMicrosPer1k:
+          type: [integer, 'null']
+          minimum: 0
 
     AsrConfig:
       type: object
@@ -3862,3 +3887,656 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+
+  /v1/admin/ai/usage/summary:
+    get:
+      summary: AI 用量汇总（operator/admin）
+      description: 汇总、按日趋势、按任务与按模型分组；价格未配置时 costMicros 为 null。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: task
+          in: query
+          schema:
+            $ref: '#/components/schemas/AiTaskKey'
+      responses:
+        '200':
+          description: 用量汇总
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [from, to, totals, daily, byTask, byModel]
+                properties:
+                  from:
+                    type: string
+                    format: date-time
+                  to:
+                    type: string
+                    format: date-time
+                  totals:
+                    type: object
+                    additionalProperties: true
+                  daily:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  byTask:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  byModel:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/admin/ai/usage/events:
+    get:
+      summary: AI 用量明细（operator/admin）
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: task
+          in: query
+          schema:
+            $ref: '#/components/schemas/AiTaskKey'
+        - name: model
+          in: query
+          schema:
+            type: string
+            maxLength: 200
+        - name: cursor
+          in: query
+          description: 上一页最后一条 usageId
+          schema:
+            type: string
+            pattern: '^\d+$'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: 用量明细
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events, nextCursor]
+                properties:
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  nextCursor:
+                    type: [string, 'null']
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/admin/ai/runs:
+    get:
+      summary: AI 运行列表（operator/admin）
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: task
+          in: query
+          schema:
+            $ref: '#/components/schemas/AiTaskKey'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [running, succeeded, failed]
+        - name: source
+          in: query
+          schema:
+            type: string
+            enum: [pipeline, admin]
+        - name: cursor
+          in: query
+          description: '<startedAtMs>:<runId>'
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: 运行列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs, nextCursor]
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  nextCursor:
+                    type: [string, 'null']
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/admin/ai/runs/{runId}:
+    get:
+      summary: AI 运行详情与步骤（operator/admin）
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 运行详情
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                required: [runId, taskKey, status, steps]
+                properties:
+                  runId:
+                    type: string
+                    format: uuid
+                  taskKey:
+                    $ref: '#/components/schemas/AiTaskKey'
+                  status:
+                    type: string
+                    enum: [running, succeeded, failed]
+                  steps:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/ai/bindings:
+    get:
+      summary: 任务模型绑定与可选模型（operator/admin）
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: 绑定列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bindings, configs]
+                properties:
+                  bindings:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  configs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LlmConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/admin/ai/bindings/{taskKey}:
+    put:
+      summary: 设置任务主/备模型（admin）
+      description: primaryConfigId 为 null 时删除绑定并回落到用途默认模型。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: taskKey
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/AiTaskKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [primaryConfigId]
+              properties:
+                primaryConfigId:
+                  type: [string, 'null']
+                  pattern: '^llmc_[0-9a-f]{16}$'
+                fallbackConfigId:
+                  type: [string, 'null']
+                  pattern: '^llmc_[0-9a-f]{16}$'
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/admin/ai/health:
+    get:
+      summary: 模型健康与冷却状态（operator/admin）
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: 健康状态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [configs]
+                properties:
+                  configs:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/portal/auth/register:
+    post:
+      summary: 门户注册（公开）
+      description: 仅创建 student 账号；成功即返回门户会话。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  pattern: '^[a-z][a-z0-9._-]{2,31}$'
+                password:
+                  type: string
+                  minLength: 10
+                  maxLength: 128
+                displayName:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+      responses:
+        '201':
+          description: 已注册
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, user]
+                properties:
+                  token:
+                    type: string
+                  user:
+                    type: object
+                    additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: 用户名已存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/portal/auth/login:
+    post:
+      summary: 门户登录（公开）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, user]
+                properties:
+                  token:
+                    type: string
+                  user:
+                    type: object
+                    additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/portal/auth/session:
+    get:
+      summary: 当前门户会话
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: 当前用户
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user:
+                    type: object
+                    additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      summary: 退出门户会话
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: 已退出
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/portal/me:
+    get:
+      summary: 个人资料
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: 资料
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [profile]
+                properties:
+                  profile:
+                    type: object
+                    additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    patch:
+      summary: 修改显示名
+      security:
+        - sessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName]
+              properties:
+                displayName:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [profile]
+                properties:
+                  profile:
+                    type: object
+                    additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/portal/me/password:
+    post:
+      summary: 修改密码（吊销其他会话）
+      security:
+        - sessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword:
+                  type: string
+                newPassword:
+                  type: string
+                  minLength: 10
+                  maxLength: 128
+      responses:
+        '200':
+          description: 已修改
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated]
+                properties:
+                  updated:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/portal/me/devices:
+    get:
+      summary: 我的设备
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: 设备列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices]
+                properties:
+                  devices:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/portal/me/devices/{deviceId}:
+    delete:
+      summary: 解绑我的设备
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._:-]{8,128}$'
+      responses:
+        '200':
+          description: 已解绑
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/portal/releases:
+    get:
+      summary: 版本发布清单（公开）
+      responses:
+        '200':
+          description: 清单（60 秒缓存）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [dshVersion, webAppPackage, plugin]
+                properties:
+                  dshVersion:
+                    type: string
+                  webAppPackage:
+                    type: string
+                  plugin:
+                    type: [object, 'null']
+                    additionalProperties: true
+        '503':
+          description: 清单格式错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/portal/stats:
+    get:
+      summary: 站点统计（公开）
+      responses:
+        '200':
+          description: 已发布内容计数（60 秒缓存）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [courses, knowledgePoints, segments, articles]
+                properties:
+                  courses:
+                    type: integer
+                  knowledgePoints:
+                    type: integer
+                  segments:
+                    type: integer
+                  articles:
+                    type: integer
+        '429':
+          $ref: '#/components/responses/TooManyRequests'

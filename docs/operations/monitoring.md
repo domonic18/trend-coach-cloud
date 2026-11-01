@@ -1,6 +1,6 @@
 # 监控与告警
 
-版本：v0.2（2026-11-01）
+版本：v0.3（2026-11-01）
 
 云端保留 `/metrics` 指标接口，但**默认不部署 Prometheus/Grafana**。需要监控时，由部署方把外部 Prometheus 指向该接口；本文另提供可选的抓取、告警与看板模板。
 
@@ -26,6 +26,7 @@
 - 指标不包含 token、设备 ID、query 原文、片段内容、转写正文、源路径或播放地址。
 - 管线指标只按 `kind/status/stage/reason` 聚合，不使用素材 ID、课程 ID、任务 ID 作标签。
 - 业务事件（检索/引用/播放/满意度）留在事件表，不转成指标标签。
+- AI 用量不做 Prometheus 指标：token、成本、任务/模型维度与单次运行链路在 `/v1/admin/ai/usage/*`、`/v1/admin/ai/runs` 查看；`/metrics` 只覆盖这些请求自身的 HTTP 计数与耗时。用量表只记数字与模型标识，不含 prompt、正文或用户身份。
 
 ## 2. 接入外部 Prometheus
 
@@ -78,6 +79,8 @@ curl -fsS -H "Authorization: Bearer $METRICS_TOKEN" https://$DOMAIN/metrics | he
 | 管线队列积压 | `pipeline_queue_depth`、CPU 与 ffmpeg 进程 | 单 worker 并发 1 是默认值；扩容前评估 API 延迟与磁盘 IO |
 | 发布返回 503 | 是否配置 embedding、reindex 错误类别 | 索引失败不翻课程状态；修复 provider 后重试发布 |
 | 转写块失败率高 | `transcript_chunks` 失败数、上游错误类别 | 上游 429/5xx 会重试；持续失败检查密钥与限流 |
+| AI 成本或失败率异常 | `/v1/admin/ai/usage/summary` 按任务/模型与错误码 | 先看 `/v1/admin/ai/health` 是否冷却；主备绑定与价格在后台「模型配置」核对 |
+| 门户登录/注册 429 升高 | 按路由统计的 429 与来源 IP | 登录按 IP+用户名双维度限流；确认是否为脚本撞库，必要时临时调 `RATE_LIMIT_*` |
 
 容量基线：单实例 2 vCPU 可承载日常检索；持续 CPU > 70% 或 P95 接近阈值时先扩容 app 实例（迁移有 advisory lock，可安全多实例），再考虑数据库规格。
 
