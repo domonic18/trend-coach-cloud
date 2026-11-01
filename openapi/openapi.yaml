@@ -356,7 +356,7 @@ components:
     CatalogChapterArticle:
       type: object
       additionalProperties: false
-      required: [chapterId, courseId, title, article, figures, adjacentChapters]
+      required: [chapterId, courseId, title, article, figures, adjacentChapters, quiz]
       properties:
         chapterId:
           type: string
@@ -380,6 +380,56 @@ components:
           maxItems: 5
           items:
             $ref: '#/components/schemas/RelatedChapter'
+        quiz:
+          oneOf:
+            - $ref: '#/components/schemas/ChapterQuiz'
+            - type: 'null'
+
+    QuizQuestion:
+      type: object
+      additionalProperties: false
+      required: [questionId, prompt, options, answerIndex, explanation]
+      properties:
+        questionId:
+          type: string
+          pattern: '^q_[A-Za-z0-9._-]{1,40}$'
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 300
+        options:
+          type: array
+          minItems: 2
+          maxItems: 6
+          items:
+            type: string
+            minLength: 1
+            maxLength: 200
+        answerIndex:
+          type: integer
+          minimum: 0
+          maximum: 5
+        explanation:
+          type: string
+          minLength: 1
+          maxLength: 500
+
+    ChapterQuiz:
+      type: object
+      additionalProperties: false
+      required: [version, publishedAt, questions]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        publishedAt:
+          type: integer
+        questions:
+          type: array
+          minItems: 3
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/QuizQuestion'
 
     RelatedChapter:
       type: object
@@ -686,6 +736,25 @@ components:
         publishedAt:
           type: [integer, 'null']
 
+    AdminQuiz:
+      type: object
+      additionalProperties: false
+      required: [questions, version, status, publishedAt]
+      properties:
+        questions:
+          type: array
+          minItems: 1
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/QuizQuestion'
+        version:
+          type: integer
+          minimum: 1
+        status:
+          $ref: '#/components/schemas/ContentStatus'
+        publishedAt:
+          type: [integer, 'null']
+
     AdminKnowledgePoint:
       type: object
       additionalProperties: false
@@ -898,6 +967,20 @@ components:
           type: string
           minLength: 1
           maxLength: 20000
+        status:
+          $ref: '#/components/schemas/ContentStatus'
+
+    PutQuizRequest:
+      type: object
+      additionalProperties: false
+      required: [questions, status]
+      properties:
+        questions:
+          type: array
+          minItems: 1
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/QuizQuestion'
         status:
           $ref: '#/components/schemas/ContentStatus'
 
@@ -3204,6 +3287,91 @@ paths:
                 properties:
                   article:
                     $ref: '#/components/schemas/AdminArticle'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/content/courses/{courseId}/chapters/{chapterId}/quiz:
+    get:
+      summary: 读取章节随堂测验（operator/admin）
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: courseId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+        - name: chapterId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+      responses:
+        '200':
+          description: 题库或 null
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [quiz]
+                properties:
+                  quiz:
+                    oneOf:
+                      - $ref: '#/components/schemas/AdminQuiz'
+                      - type: 'null'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      summary: 保存章节随堂测验（operator/admin）
+      description: 每次保存 version+1；发布需 3–5 道题且写入 publishedAt。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: courseId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+        - name: chapterId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutQuizRequest'
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [quiz]
+                properties:
+                  quiz:
+                    $ref: '#/components/schemas/AdminQuiz'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':

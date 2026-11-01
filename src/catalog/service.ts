@@ -1,4 +1,5 @@
 import type { Pool } from 'pg'
+import { parseQuizQuestions, type QuizQuestion } from '../content/quiz.js'
 import { HttpError } from '../errors.js'
 import { codePointLength, stringField } from '../http/validation.js'
 
@@ -66,6 +67,12 @@ export interface ChapterFigure {
   caption?: string
 }
 
+export interface ChapterQuiz {
+  version: number
+  publishedAt: number
+  questions: QuizQuestion[]
+}
+
 export interface CatalogChapterArticle {
   chapterId: string
   courseId: string
@@ -73,6 +80,7 @@ export interface CatalogChapterArticle {
   article: ChapterArticle | null
   figures: Record<string, ChapterFigure>
   adjacentChapters: { chapterId: string; title: string }[]
+  quiz: ChapterQuiz | null
 }
 
 export interface KnowledgePointDetail {
@@ -130,6 +138,12 @@ interface ChapterFigureRow {
   width: number
   height: number
   rel_path: string
+}
+
+interface ChapterQuizRow {
+  questions: unknown
+  version: number
+  published_at: Date | null
 }
 
 export function parseCourseId(raw: string): string {
@@ -298,6 +312,7 @@ export class CatalogService {
     const figures = await this.chapterFigures(courseId, chapterId)
     if (article !== null) ensureFigureRefs(article.markdown, figures)
     const adjacentChapters = await this.adjacentChapters(courseId, chapterId)
+    const quiz = await this.chapterQuiz(courseId, chapterId)
     const payload: CatalogChapterArticle = {
       chapterId: chapter.chapter_id,
       courseId: parseCourseId(chapter.course_id),
@@ -305,6 +320,7 @@ export class CatalogService {
       article,
       figures,
       adjacentChapters,
+      quiz,
     }
     ensureSize(payload)
     return payload
@@ -361,6 +377,22 @@ export class CatalogService {
       throw new HttpError(500, 'stored chapter article version invalid')
     }
     return { markdown: row.markdown, version: row.version, publishedAt: row.published_at.getTime() }
+  }
+
+  private async chapterQuiz(courseId: string, chapterId: string): Promise<ChapterQuiz | null> {
+    const { rows } = await this.pool.query<ChapterQuizRow>(
+      `SELECT questions, version, published_at
+       FROM chapter_quizzes
+       WHERE course_id = $1 AND chapter_id = $2 AND status = 'published'`,
+      [courseId, chapterId],
+    )
+    const row = rows[0]
+    if (row === undefined) return null
+    if (!Number.isInteger(row.version) || row.version < 1 || row.published_at === null) {
+      throw new HttpError(500, 'stored chapter quiz invalid')
+    }
+    const questions = parseQuizQuestions(row.questions, 500)
+    return { version: row.version, publishedAt: row.published_at.getTime(), questions }
   }
 
   private async chapterFigures(courseId: string, chapterId: string): Promise<Record<string, ChapterFigure>> {

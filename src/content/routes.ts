@@ -195,6 +195,30 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDe
     },
   )
 
+  app.get(
+    '/v1/admin/content/courses/:courseId/chapters/:chapterId/quiz',
+    async request => {
+      await guard(request)
+      const { courseId, chapterId } = request.params as { courseId: string; chapterId: string }
+      return { quiz: await content.getChapterQuiz(courseId, chapterId) }
+    },
+  )
+
+  app.put(
+    '/v1/admin/content/courses/:courseId/chapters/:chapterId/quiz',
+    async request => {
+      await guard(request)
+      const { courseId, chapterId } = request.params as { courseId: string; chapterId: string }
+      const body = asObject(request.body)
+      return {
+        quiz: await content.putChapterQuiz(courseId, chapterId, {
+          questions: body.questions,
+          status: parseStatus(body.status),
+        }),
+      }
+    },
+  )
+
   app.get('/v1/admin/content/segments', async request => {
     await guard(request)
     const query = asObject(request.query)

@@ -2,6 +2,11 @@ import type { Pool } from 'pg'
 import { badRequest, conflict, HttpError, notFound } from '../errors.js'
 import { codePointLength, stringField } from '../http/validation.js'
 import { toVectorLiteral, type EmbeddingResolver } from '../kb/embedding.js'
+import {
+  assertPublishableQuestions,
+  parseQuizQuestions,
+  type QuizQuestion,
+} from './quiz.js'
 
 export const CONTENT_STATUSES = ['draft', 'published', 'archived'] as const
 export type ContentStatus = (typeof CONTENT_STATUSES)[number]
@@ -51,6 +56,10 @@ export interface AdminArticle extends AdminArticleMeta {
   markdown: string
 }
 
+export interface AdminQuiz extends AdminArticleMeta {
+  questions: QuizQuestion[]
+}
+
 export interface AdminKnowledgePoint {
   knowledgePointId: string
   title: string
@@ -66,6 +75,7 @@ export interface AdminChapter {
 
 export interface AdminChapterTree extends AdminChapter {
   article: AdminArticleMeta | null
+  quiz: AdminArticleMeta | null
   figureCount: number
   knowledgePoints: AdminKnowledgePoint[]
 }
@@ -147,6 +157,13 @@ interface ArticleRow {
 
 interface ChapterArticleMetaRow {
   chapter_id: string
+  version: number
+  status: ContentStatus
+  published_at: Date | null
+}
+
+interface QuizRow {
+  questions: unknown
   version: number
   status: ContentStatus
   published_at: Date | null
@@ -314,6 +331,20 @@ export class ContentService {
       })
     }
 
+    const { rows: quizRows } = await this.pool.query<ChapterArticleMetaRow>(
+      `SELECT chapter_id, version, status, published_at
+       FROM chapter_quizzes WHERE course_id = $1`,
+      [courseId],
+    )
+    const quizzes = new Map<string, AdminArticleMeta>()
+    for (const row of quizRows) {
+      quizzes.set(row.chapter_id, {
+        version: row.version,
+        status: row.status,
+        publishedAt: row.published_at?.getTime() ?? null,
+      })
+    }
+
     const { rows: figureRows } = await this.pool.query<ChapterFigureCountRow>(
       `SELECT chapter_id, count(*)::int AS figure_count
        FROM figures WHERE course_id = $1 GROUP BY chapter_id`,
@@ -328,6 +359,7 @@ export class ContentService {
         title: row.title,
         position: row.position,
         article: articles.get(row.chapter_id) ?? null,
+        quiz: quizzes.get(row.chapter_id) ?? null,
         figureCount: figureCounts.get(row.chapter_id) ?? 0,
         knowledgePoints: byChapter.get(row.chapter_id) ?? [],
       })),
@@ -481,6 +513,49 @@ export class ContentService {
     const row = rows[0]
     if (row === undefined) throw new HttpError(500, 'chapter article save failed')
     return toArticle(row)
+  }
+
+  async getChapterQuiz(rawCourseId: string, rawChapterId: string): Promise<AdminQuiz | null> {
+    const courseId = parseContentId(rawCourseId, 'courseId')
+    const chapterId = parseContentId(rawChapterId, 'chapterId')
+    await this.requireChapter(courseId, chapterId)
+    const { rows } = await this.pool.query<QuizRow>(
+      `SELECT questions, version, status, published_at
+       FROM chapter_quizzes WHERE course_id = $1 AND chapter_id = $2`,
+      [courseId, chapterId],
+    )
+    const row = rows[0]
+    return row === undefined ? null : toQuiz(row)
+  }
+
+  async putChapterQuiz(
+    rawCourseId: string,
+    rawChapterId: string,
+    input: { questions: unknown; status: ContentStatus },
+  ): Promise<AdminQuiz> {
+    const courseId = parseContentId(rawCourseId, 'courseId')
+    const chapterId = parseContentId(rawChapterId, 'chapterId')
+    await this.requireChapter(courseId, chapterId)
+    const questions = parseQuizQuestions(input.questions)
+    if (input.status === 'published') assertPublishableQuestions(questions)
+    const { rows } = await this.pool.query<QuizRow>(
+      `INSERT INTO chapter_quizzes (course_id, chapter_id, questions, version, status, published_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, 1, $4, CASE WHEN $4 = 'published' THEN now() END, now())
+       ON CONFLICT (course_id, chapter_id) DO UPDATE
+       SET questions = EXCLUDED.questions,
+           version = chapter_quizzes.version + 1,
+           status = EXCLUDED.status,
+           published_at = CASE
+             WHEN EXCLUDED.status = 'published' THEN now()
+             ELSE chapter_quizzes.published_at
+           END,
+           updated_at = now()
+       RETURNING questions, version, status, published_at`,
+      [courseId, chapterId, JSON.stringify(questions), input.status],
+    )
+    const row = rows[0]
+    if (row === undefined) throw new HttpError(500, 'chapter quiz save failed')
+    return toQuiz(row)
   }
 
   async listSegments(filters: SegmentFilters): Promise<{
@@ -716,6 +791,19 @@ function toArticle(row: ArticleRow): AdminArticle {
     version: row.version,
     status: row.status,
     publishedAt: row.published_at?.getTime() ?? null,
+  }
+}
+
+function toQuiz(row: QuizRow): AdminQuiz {
+  const questions = parseQuizQuestions(row.questions, 500)
+  if (!Number.isInteger(row.version) || row.version < 1) {
+    throw new HttpError(500, 'stored chapter quiz invalid')
+  }
+  return {
+    version: row.version,
+    status: row.status,
+    publishedAt: row.published_at?.getTime() ?? null,
+    questions,
   }
 }
 
