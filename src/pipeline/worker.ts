@@ -8,6 +8,7 @@ import type { LongFormAsr } from '../asr/longform.js'
 import type { Metrics } from '../metrics.js'
 import { planAudioChunks } from './chunks.js'
 import { ASR_CHUNK_MAX_SEC, PIPELINE_ERRORS } from './constants.js'
+import { JobCanceledError, PipelineFailure } from './failures.js'
 import { MediaToolError, SourceProbeError } from './ffmpeg.js'
 import { JobQueue, type PipelineJob } from './jobs.js'
 import type { MediaProcessor } from './media-processor.js'
@@ -62,23 +63,6 @@ interface ChunkRow {
   end_ms: string | number
   status: 'pending' | 'processing' | 'done' | 'failed'
   sentences: unknown
-}
-
-class JobCanceledError extends Error {
-  constructor() {
-    super('job canceled')
-    this.name = 'JobCanceledError'
-  }
-}
-
-class PipelineFailure extends Error {
-  constructor(
-    readonly code: string,
-    readonly retryable: boolean,
-  ) {
-    super(code)
-    this.name = 'PipelineFailure'
-  }
 }
 
 function milliseconds(value: string | number): number {

@@ -1,8 +1,10 @@
 import { randomBytes } from 'node:crypto'
 import type { Pool } from 'pg'
 import type { PipelineConfig } from '../config.js'
-import { badRequest, conflict, HttpError, notFound } from '../errors.js'
+import { parseContentId } from '../content/service.js'
+import { badRequest, conflict, HttpError, notFound, serviceUnavailable } from '../errors.js'
 import { codePointLength, stringField } from '../http/validation.js'
+import { chapterIdFor, draftSegmentIdFor, knowledgePointIdFor } from './ids.js'
 import { ActiveJobError, type JobQueue, type PipelineJob } from './jobs.js'
 import { SourceChecksumError, SourceTooLargeError, type MediaStore } from './media-store.js'
 import {
@@ -10,15 +12,24 @@ import {
   JOB_KINDS,
   JOB_STATUSES,
   type AssetStatus,
+  type GenerationPayload,
+  type GenerationStatus,
   type JobKind,
   type JobStatus,
 } from './types.js'
 
 const ID = /^[A-Za-z0-9._-]{1,64}$/
 const JOB_ID = /^job_[0-9a-f]{16}$/
+const GENERATION_ID = /^gen_[0-9a-f]{16}$/
 const SHA256 = /^[0-9a-f]{64}$/
+const MAX_SECONDS = 86_400
 const LANGUAGES = ['zh', 'en', 'auto'] as const
 export type Language = (typeof LANGUAGES)[number]
+
+export interface PipelineServiceOptions {
+  llmAvailable: boolean
+  reindex?: (courseId: string) => Promise<{ embedded: number }>
+}
 
 export interface AssetDto {
   assetId: string
@@ -73,6 +84,59 @@ export interface TranscriptPage {
   limit: number
 }
 
+export interface GenerationSummary {
+  generationId: string
+  assetId: string
+  courseId: string
+  status: GenerationStatus
+  promptVersion: string
+  model: string
+  chapters: number
+  knowledgePoints: number
+  segments: number
+  needsReview: number
+  createdAt: number
+  updatedAt: number
+  appliedAt: number | null
+}
+
+export interface GenerationPreview {
+  generation: GenerationSummary
+  chapters: { key: string; title: string; position: number }[]
+  knowledgePoints: {
+    key: string
+    chapterKey: string
+    title: string
+    position: number
+    confidence: number
+    needsReview: boolean
+    reviewReasons: string[]
+    hasArticle: boolean
+  }[]
+  segments: { key: string; pointKey: string; title: string; startMs: number; endMs: number }[]
+}
+
+export interface AppliedContent {
+  chapters: Record<string, string>
+  knowledgePoints: Record<string, string>
+  segments: Record<string, string>
+}
+
+export interface ApplyResult {
+  generation: GenerationSummary
+  applied: AppliedContent
+  alreadyApplied: boolean
+}
+
+export interface PublishResult {
+  courseId: string
+  status: 'published'
+  articlesPublished: number
+  segmentsPublished: number
+  indexed: boolean
+  embedded: number
+}
+
 export interface AssetFilters {
   courseId?: string
   status?: AssetStatus
@@ -100,6 +164,11 @@ export interface PipelineApi {
   ): Promise<AssetDto>
   enqueueIngest(assetId: string, language: Language): Promise<JobDto>
   getTranscript(assetId: string, page: { offset: number; limit: number }): Promise<TranscriptPage>
+  enqueueGeneration(assetId: string): Promise<JobDto>
+  getGeneration(generationId: string): Promise<GenerationPreview>
+  applyGeneration(generationId: string): Promise<ApplyResult>
+  discardGeneration(generationId: string): Promise<GenerationSummary>
+  publishCourse(courseId: string): Promise<PublishResult>
   listJobs(filters: JobFilters): Promise<{ jobs: JobDto[]; total: number; offset: number; limit: number }>
   getJob(jobId: string): Promise<JobDetail>
   retryJob(jobId: string): Promise<JobDto>
@@ -128,6 +197,28 @@ interface TranscriptRow {
   segment_count: number
   error_code: string | null
 }
+
+interface GenerationRow {
+  generation_id: string
+  asset_id: string
+  course_id: string
+  status: GenerationStatus
+  prompt_version: string
+  model: string
+  chapters: number
+  knowledge_points: number
+  segments: number
+  needs_review: number
+  payload: unknown
+  applied_content: unknown
+  created_at: Date
+  updated_at: Date
+  applied_at: Date | null
+}
+
+const GENERATION_COLUMNS = `generation_id, asset_id, course_id, status, prompt_version, model,
+  chapters, knowledge_points, segments, needs_review, payload, applied_content,
+  created_at, updated_at, applied_at`
 
 function milliseconds(value: string | number | null): number | null {
   if (value === null) return null
@@ -175,6 +266,61 @@ export function parseJobId(raw: string): string {
   return stringField({ jobId: raw }, 'jobId', { max: 20, pattern: JOB_ID })
 }
 
+export function parseGenerationId(raw: string): string {
+  return stringField({ generationId: raw }, 'generationId', { max: 20, pattern: GENERATION_ID })
+}
+
+export function toGeneration(row: GenerationRow): GenerationSummary {
+  return {
+    generationId: row.generation_id,
+    assetId: row.asset_id,
+    courseId: row.course_id,
+    status: row.status,
+    promptVersion: row.prompt_version,
+    model: row.model,
+    chapters: row.chapters,
+    knowledgePoints: row.knowledge_points,
+    segments: row.segments,
+    needsReview: row.needs_review,
+    createdAt: row.created_at.getTime(),
+    updatedAt: row.updated_at.getTime(),
+    appliedAt: row.applied_at?.getTime() ?? null,
+  }
+}
+
+function readPayload(value: unknown): GenerationPayload {
+  if (typeof value !== 'object' || value === null) {
+    throw new HttpError(500, 'generation payload invalid')
+  }
+  const root = value as Record<string, unknown>
+  if (!Array.isArray(root.chapters) || !Array.isArray(root.knowledgePoints) || !Array.isArray(root.segments)) {
+    throw new HttpError(500, 'generation payload invalid')
+  }
+  return value as GenerationPayload
+}
+
+function readApplied(value: unknown): AppliedContent {
+  if (typeof value !== 'object' || value === null) {
+    throw new HttpError(500, 'generation applied content invalid')
+  }
+  const root = value as Record<string, unknown>
+  const chapters = root.chapters
+  const knowledgePoints = root.knowledgePoints
+  const segments = root.segments
+  if (
+    typeof chapters !== 'object' || chapters === null
+    || typeof knowledgePoints !== 'object' || knowledgePoints === null
+    || typeof segments !== 'object' || segments === null
+  ) {
+    throw new HttpError(500, 'generation applied content invalid')
+  }
+  return {
+    chapters: chapters as Record<string, string>,
+    knowledgePoints: knowledgePoints as Record<string, string>,
+    segments: segments as Record<string, string>,
+  }
+}
+
 export function parseAssetStatus(value: unknown): AssetStatus {
   if (typeof value !== 'string' || !(ASSET_STATUSES as readonly string[]).includes(value)) {
     throw badRequest(`status must be ${ASSET_STATUSES.join('/')}`)
@@ -217,6 +363,7 @@ export class PipelineService implements PipelineApi {
     private readonly config: PipelineConfig,
     private readonly jobs: JobQueue,
     private readonly store: MediaStore,
+    private readonly options: PipelineServiceOptions = { llmAvailable: false },
   ) {}
 
   async listAssets(filters: AssetFilters): Promise<{
@@ -420,6 +567,297 @@ export class PipelineService implements PipelineApi {
     }
   }
 
+  async enqueueGeneration(assetId: string): Promise<JobDto> {
+    const asset = await this.requireAsset(assetId)
+    if (asset.status === 'archived') throw conflict('asset is archived')
+    if (asset.status !== 'ready') throw conflict('asset must be ready')
+
+    const { rows: transcriptRows } = await this.pool.query<{ status: string }>(
+      'SELECT status FROM media_transcripts WHERE asset_id = $1',
+      [assetId],
+    )
+    if (transcriptRows[0]?.status !== 'ready') throw conflict('transcript must be ready')
+
+    const { rows: courseRows } = await this.pool.query<{ status: string }>(
+      'SELECT status FROM courses WHERE course_id = $1',
+      [asset.course_id],
+    )
+    const course = courseRows[0]
+    if (course === undefined) throw notFound('course not found')
+    if (course.status !== 'draft') throw conflict('course must be draft')
+
+    const { rowCount } = await this.pool.query(
+      `SELECT 1 FROM content_generations WHERE asset_id = $1 AND status = 'draft'`,
+      [assetId],
+    )
+    if ((rowCount ?? 0) > 0) throw conflict('draft generation already exists')
+    if (!this.options.llmAvailable) throw serviceUnavailable('content llm unavailable')
+
+    let job: PipelineJob
+    try {
+      job = await this.jobs.create({ assetId, courseId: asset.course_id, kind: 'generate' })
+    } catch (error) {
+      if (error instanceof ActiveJobError) throw conflict('job already active')
+      throw error
+    }
+    return toJob(job)
+  }
+
+  async getGeneration(generationId: string): Promise<GenerationPreview> {
+    const row = await this.requireGeneration(generationId)
+    const payload = readPayload(row.payload)
+    return {
+      generation: toGeneration(row),
+      chapters: payload.chapters.map(chapter => ({
+        key: chapter.key,
+        title: chapter.title,
+        position: chapter.position,
+      })),
+      knowledgePoints: payload.knowledgePoints.map(point => ({
+        key: point.key,
+        chapterKey: point.chapterKey,
+        title: point.title,
+        position: point.position,
+        confidence: point.confidence,
+        needsReview: point.needsReview,
+        reviewReasons: point.reviewReasons,
+        hasArticle: point.articleMarkdown !== null,
+      })),
+      segments: payload.segments.map(segment => ({
+        key: segment.key,
+        pointKey: segment.pointKey,
+        title: segment.title,
+        startMs: segment.startMs,
+        endMs: segment.endMs,
+      })),
+    }
+  }
+
+  async applyGeneration(generationId: string): Promise<ApplyResult> {
+    const row = await this.requireGeneration(generationId)
+    if (row.status === 'applied') {
+      return {
+        generation: toGeneration(row),
+        applied: readApplied(row.applied_content),
+        alreadyApplied: true,
+      }
+    }
+    if (row.status !== 'draft') throw conflict('generation is not a draft')
+    const payload = readPayload(row.payload)
+
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const { rows: lockedRows } = await client.query<{ status: GenerationStatus }>(
+        'SELECT status FROM content_generations WHERE generation_id = $1 FOR UPDATE',
+        [generationId],
+      )
+      const locked = lockedRows[0]
+      if (locked === undefined) throw notFound('generation not found')
+      if (locked.status === 'applied') {
+        await client.query('COMMIT')
+        const appliedRow = await this.requireGeneration(generationId)
+        return {
+          generation: toGeneration(appliedRow),
+          applied: readApplied(appliedRow.applied_content),
+          alreadyApplied: true,
+        }
+      }
+      if (locked.status !== 'draft') throw conflict('generation is not a draft')
+
+      const { rows: courseRows } = await client.query<{ status: string }>(
+        'SELECT status FROM courses WHERE course_id = $1 FOR UPDATE',
+        [row.course_id],
+      )
+      const course = courseRows[0]
+      if (course === undefined) throw notFound('course not found')
+      if (course.status !== 'draft') throw conflict('course must be draft')
+
+      const { rows: countRows } = await client.query<{
+        chapters: number
+        points: number
+        segments: number
+      }>(
+        `SELECT
+           (SELECT count(*)::int FROM chapters WHERE course_id = $1) AS chapters,
+           (SELECT count(*)::int FROM knowledge_points WHERE course_id = $1) AS points,
+           (SELECT count(*)::int FROM segments WHERE course_id = $1) AS segments`,
+        [row.course_id],
+      )
+      const counts = countRows[0]
+      if ((counts?.chapters ?? 0) > 0 || (counts?.points ?? 0) > 0 || (counts?.segments ?? 0) > 0) {
+        throw conflict('course already has content')
+      }
+
+      const chapterIds = new Map<string, string>()
+      for (const chapter of payload.chapters) {
+        const chapterId = chapterIdFor(generationId, chapter.key)
+        await client.query(
+          `INSERT INTO chapters (course_id, chapter_id, title, position)
+           VALUES ($1, $2, $3, $4)`,
+          [row.course_id, chapterId, chapter.title, chapter.position],
+        )
+        chapterIds.set(chapter.key, chapterId)
+      }
+
+      const pointIds = new Map<string, string>()
+      const pointChapters = new Map<string, string>()
+      const positions = new Map<string, number>()
+      for (const point of payload.knowledgePoints) {
+        const chapterId = chapterIds.get(point.chapterKey)
+        if (chapterId === undefined) throw new HttpError(500, 'generation payload invalid')
+        const knowledgePointId = knowledgePointIdFor(generationId, point.key)
+        const position = positions.get(chapterId) ?? 0
+        positions.set(chapterId, position + 1)
+        await client.query(
+          `INSERT INTO knowledge_points (knowledge_point_id, course_id, chapter_id, title, position)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [knowledgePointId, row.course_id, chapterId, point.title, position],
+        )
+        pointIds.set(point.key, knowledgePointId)
+        pointChapters.set(point.key, chapterId)
+        if (point.articleMarkdown !== null) {
+          await client.query(
+            `INSERT INTO articles (knowledge_point_id, markdown, version, status, published_at, updated_at)
+             VALUES ($1, $2, 1, 'draft', NULL, now())`,
+            [knowledgePointId, point.articleMarkdown],
+          )
+        }
+      }
+
+      const segmentIds = new Map<string, string>()
+      for (const segment of payload.segments) {
+        const knowledgePointId = pointIds.get(segment.pointKey)
+        const chapterId = pointChapters.get(segment.pointKey)
+        if (knowledgePointId === undefined || chapterId === undefined) {
+          throw new HttpError(500, 'generation payload invalid')
+        }
+        if (!Number.isFinite(segment.startMs) || !Number.isFinite(segment.endMs) || segment.endMs <= segment.startMs) {
+          throw new HttpError(500, 'generation payload invalid')
+        }
+        const startSec = Math.min(MAX_SECONDS - 1, Math.max(0, Math.floor(segment.startMs / 1000)))
+        const endSec = Math.min(MAX_SECONDS, Math.max(startSec + 1, Math.ceil(segment.endMs / 1000)))
+        const segmentId = draftSegmentIdFor(generationId, segment.key)
+        await client.query(
+          `INSERT INTO segments
+             (segment_id, course_id, chapter_id, knowledge_point_id, title, start_sec, end_sec, text, status, embedding)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft', NULL)`,
+          [
+            segmentId,
+            row.course_id,
+            chapterId,
+            knowledgePointId,
+            segment.title,
+            startSec,
+            endSec,
+            segment.text,
+          ],
+        )
+        segmentIds.set(segment.key, segmentId)
+      }
+
+      const applied: AppliedContent = {
+        chapters: Object.fromEntries(chapterIds),
+        knowledgePoints: Object.fromEntries(pointIds),
+        segments: Object.fromEntries(segmentIds),
+      }
+      await client.query(
+        `UPDATE content_generations
+         SET status = 'applied', applied_content = $2::jsonb, applied_at = now(), updated_at = now()
+         WHERE generation_id = $1`,
+        [generationId, JSON.stringify(applied)],
+      )
+      await client.query('COMMIT')
+
+      const updated = await this.requireGeneration(generationId)
+      return { generation: toGeneration(updated), applied, alreadyApplied: false }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async discardGeneration(generationId: string): Promise<GenerationSummary> {
+    const { rows } = await this.pool.query<GenerationRow>(
+      `UPDATE content_generations
+       SET status = 'discarded', updated_at = now()
+       WHERE generation_id = $1 AND status = 'draft'
+       RETURNING ${GENERATION_COLUMNS}`,
+      [generationId],
+    )
+    const row = rows[0]
+    if (row !== undefined) return toGeneration(row)
+    await this.requireGeneration(generationId)
+    throw conflict('generation is not a draft')
+  }
+
+  async publishCourse(rawCourseId: string): Promise<PublishResult> {
+    const courseId = parseContentId(rawCourseId, 'courseId')
+    const { rows: courseRows } = await this.pool.query<{ status: string }>(
+      'SELECT status FROM courses WHERE course_id = $1',
+      [courseId],
+    )
+    const course = courseRows[0]
+    if (course === undefined) throw notFound('course not found')
+    if (course.status === 'archived') throw conflict('course is archived')
+
+    const { rows: countRows } = await this.pool.query<{ count: number }>(
+      'SELECT count(*)::int AS count FROM segments WHERE course_id = $1',
+      [courseId],
+    )
+    if ((countRows[0]?.count ?? 0) < 1) throw conflict('course has no segments')
+
+    let embedded = 0
+    const reindex = this.options.reindex
+    if (reindex !== undefined) {
+      try {
+        embedded = (await reindex(courseId)).embedded
+      } catch {
+        throw serviceUnavailable('embedding unavailable')
+      }
+    }
+
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const articles = await client.query(
+        `UPDATE articles a
+         SET status = 'published', published_at = now(), updated_at = now()
+         FROM knowledge_points kp
+         WHERE a.knowledge_point_id = kp.knowledge_point_id
+           AND kp.course_id = $1
+           AND a.status = 'draft'`,
+        [courseId],
+      )
+      const segments = await client.query(
+        `UPDATE segments
+         SET status = 'published', updated_at = now()
+         WHERE course_id = $1 AND status = 'draft'`,
+        [courseId],
+      )
+      await client.query(
+        `UPDATE courses SET status = 'published' WHERE course_id = $1`,
+        [courseId],
+      )
+      await client.query('COMMIT')
+      return {
+        courseId,
+        status: 'published',
+        articlesPublished: articles.rowCount ?? 0,
+        segmentsPublished: segments.rowCount ?? 0,
+        indexed: reindex !== undefined,
+        embedded,
+      }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
   async listJobs(filters: JobFilters): Promise<{
     jobs: JobDto[]
     total: number
@@ -500,6 +938,16 @@ export class PipelineService implements PipelineApi {
     )
     const row = rows[0]
     if (row === undefined) throw notFound('media asset not found')
+    return row
+  }
+
+  private async requireGeneration(generationId: string): Promise<GenerationRow> {
+    const { rows } = await this.pool.query<GenerationRow>(
+      `SELECT ${GENERATION_COLUMNS} FROM content_generations WHERE generation_id = $1`,
+      [generationId],
+    )
+    const row = rows[0]
+    if (row === undefined) throw notFound('generation not found')
     return row
   }
 }

@@ -12,6 +12,7 @@ import { createPool } from '../src/db.js'
 import { createMetrics, type Metrics } from '../src/metrics.js'
 import { runMigrations } from '../src/migrate.js'
 import { MediaToolError } from '../src/pipeline/ffmpeg.js'
+import type { LlmClient } from '../src/pipeline/llm.js'
 import type { MediaProcessor } from '../src/pipeline/media-processor.js'
 import { createLocalMediaStore, type MediaStore } from '../src/pipeline/media-store.js'
 import { createPipelineRuntime, type PipelineRuntime } from '../src/pipeline/runtime.js'
@@ -35,6 +36,10 @@ let metrics: Metrics
 let adminToken = ''
 let holdProbe = false
 let releaseProbe: (() => void) | null = null
+let reindexCalls = 0
+let reindexFails = false
+const STUDENT_PASSWORD = 'pipeline-student-pass-1234'
+const LEARNER_DEVICE_ID = 'pipeline-learner-device-01'
 
 interface JobBody {
   jobId: string
@@ -167,6 +172,39 @@ const fakeAsr: LongFormAsr = {
   },
 }
 
+const fakeLlm: LlmClient = {
+  async completeJson(request, parse) {
+    if (request.system.includes('知识点')) {
+      return parse({
+        knowledgePoints: [
+          {
+            title: '趋势反转',
+            excerpt: '趋势反转的初步信号',
+            chapterTitle: '趋势反转',
+            confidence: 0.9,
+          },
+          {
+            title: '成交量确认',
+            excerpt: '成交量需要同步放大',
+            chapterTitle: '趋势反转',
+            confidence: 0.1,
+          },
+        ],
+      })
+    }
+    if (request.system.includes('章节')) {
+      return parse({ chapters: [{ title: '趋势反转' }] })
+    }
+    return parse({ markdown: '# 趋势反转\n\n趋势反转需要成交量确认。' })
+  },
+}
+
+const fakeReindex = async (): Promise<{ embedded: number }> => {
+  reindexCalls += 1
+  if (reindexFails) throw new Error('embedding unavailable')
+  return { embedded: 2 }
+}
+
 async function loginAdmin(): Promise<string> {
   const response = await app.inject({
     method: 'POST',
@@ -175,6 +213,43 @@ async function loginAdmin(): Promise<string> {
   })
   assert.equal(response.statusCode, 200, response.body)
   return (response.json() as { token: string }).token
+}
+
+async function learnerHeaders(): Promise<Record<string, string>> {
+  const username = 'pipeline-learner-01'
+  const created = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/users',
+    headers: adminHeaders(),
+    payload: { username, displayName: '管线学员', role: 'student', password: STUDENT_PASSWORD },
+  })
+  assert.ok(created.statusCode === 201 || created.statusCode === 409, created.body)
+
+  const start = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/device/code',
+    payload: { clientId: 'dsh-plugin-trend-coach', deviceId: LEARNER_DEVICE_ID },
+  })
+  assert.equal(start.statusCode, 200, start.body)
+  const { deviceCode, userCode } = start.json() as { deviceCode: string; userCode: string }
+
+  const approve = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/device/approve',
+    payload: { userCode, username, password: STUDENT_PASSWORD },
+  })
+  assert.equal(approve.statusCode, 200, approve.body)
+
+  const poll = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/device/token',
+    payload: { deviceCode },
+  })
+  const body = poll.json() as { status: string; grant?: { accessToken: string; deviceId: string } }
+  assert.equal(body.status, 'authorized', poll.body)
+  const grant = body.grant
+  assert.ok(grant !== undefined)
+  return { authorization: `Bearer ${grant.accessToken}`, 'x-device-id': grant.deviceId }
 }
 
 async function createAsset(courseId = COURSE_ID, title = '测试视频'): Promise<AssetBody> {
@@ -267,6 +342,8 @@ before(async () => {
     store,
     processor: fakeProcessor,
     asr: fakeAsr,
+    llm: fakeLlm,
+    reindex: fakeReindex,
   })
   app = await buildApp({ config, pool, pipeline: runtime, metrics, startPipeline: true })
   await app.ready()
@@ -616,4 +693,240 @@ test('管线：归档素材拒绝处理与上传', async () => {
     payload: {},
   })
   assert.equal(ingest.statusCode, 409)
+})
+
+test('管线：生成、预览、应用、发布与学员可见性', async () => {
+  const asset = await createAsset(COURSE_ID, '生成视频')
+  await uploadSource(asset.assetId, SOURCE, sha256(SOURCE))
+  const ingest = await enqueueIngest(asset.assetId)
+  await waitForJob(ingest.jobId, current => current.status === 'succeeded')
+
+  const missing = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/content/generations/gen_0000000000000000',
+    headers: adminHeaders(),
+  })
+  assert.equal(missing.statusCode, 404)
+
+  const enqueued = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/content/media-assets/${asset.assetId}/generations`,
+    headers: adminHeaders(),
+  })
+  assert.equal(enqueued.statusCode, 202, enqueued.body)
+  const generationJob = (enqueued.json() as { job: JobBody }).job
+  assert.equal(generationJob.kind, 'generate')
+
+  const duplicate = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/content/media-assets/${asset.assetId}/generations`,
+    headers: adminHeaders(),
+  })
+  assert.equal(duplicate.statusCode, 409)
+
+  const finished = await waitForJob(generationJob.jobId, current => current.status === 'succeeded')
+  assert.equal(finished.stage, 'done')
+  assert.equal(finished.progress, 100)
+
+  const detail = await getJob(generationJob.jobId)
+  const generationId = detail.result.generationId
+  assert.ok(generationId !== null)
+
+  const previewResponse = await app.inject({
+    method: 'GET',
+    url: `/v1/admin/content/generations/${generationId}`,
+    headers: adminHeaders(),
+  })
+  assert.equal(previewResponse.statusCode, 200, previewResponse.body)
+  const preview = previewResponse.json() as {
+    generation: {
+      generationId: string
+      status: string
+      chapters: number
+      knowledgePoints: number
+      segments: number
+      needsReview: number
+    }
+    chapters: { key: string; title: string; position: number }[]
+    knowledgePoints: {
+      key: string
+      chapterKey: string
+      title: string
+      confidence: number
+      needsReview: boolean
+      reviewReasons: string[]
+      hasArticle: boolean
+    }[]
+    segments: { key: string; pointKey: string; title: string; startMs: number; endMs: number }[]
+  }
+  assert.equal(preview.generation.generationId, generationId)
+  assert.equal(preview.generation.status, 'draft')
+  assert.equal(preview.generation.chapters, 1)
+  assert.equal(preview.generation.knowledgePoints, 2)
+  assert.ok(preview.generation.segments >= 1)
+  assert.equal(preview.generation.needsReview, 1)
+  assert.deepEqual(preview.chapters.map(chapter => chapter.title), ['趋势反转'])
+  assert.equal(preview.knowledgePoints.every(point => point.hasArticle), true)
+  assert.equal(preview.knowledgePoints.every(point => point.chapterKey === preview.chapters[0]?.key), true)
+  const lowConfidence = preview.knowledgePoints.find(point => point.title === '成交量确认')
+  assert.equal(lowConfidence?.needsReview, true)
+  assert.deepEqual(lowConfidence?.reviewReasons, ['low_confidence'])
+  assert.equal(lowConfidence?.confidence, 0.1)
+  assert.ok((preview.segments[0]?.endMs ?? 0) > (preview.segments[0]?.startMs ?? 0))
+  assert.equal(previewResponse.body.includes('成交量需要同步放大'), false)
+
+  const applyResponse = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/content/generations/${generationId}/apply`,
+    headers: adminHeaders(),
+  })
+  assert.equal(applyResponse.statusCode, 200, applyResponse.body)
+  const applied = applyResponse.json() as {
+    generation: { status: string }
+    applied: {
+      chapters: Record<string, string>
+      knowledgePoints: Record<string, string>
+      segments: Record<string, string>
+    }
+    alreadyApplied: boolean
+  }
+  assert.equal(applied.generation.status, 'applied')
+  assert.equal(applied.alreadyApplied, false)
+  assert.equal(Object.keys(applied.applied.chapters).length, 1)
+  assert.equal(Object.keys(applied.applied.knowledgePoints).length, 2)
+  const segmentId = Object.values(applied.applied.segments)[0]
+  assert.ok(segmentId !== undefined)
+
+  const repeatResponse = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/content/generations/${generationId}/apply`,
+    headers: adminHeaders(),
+  })
+  assert.equal(repeatResponse.statusCode, 200, repeatResponse.body)
+  const repeated = repeatResponse.json() as typeof applied
+  assert.equal(repeated.alreadyApplied, true)
+  assert.deepEqual(repeated.applied, applied.applied)
+
+  const stored = await pool.query<{ kind: string; status: string }>(
+    `SELECT 'segment' AS kind, status FROM segments WHERE course_id = $1
+     UNION ALL
+     SELECT 'article' AS kind, a.status FROM articles a
+       JOIN knowledge_points kp ON kp.knowledge_point_id = a.knowledge_point_id
+      WHERE kp.course_id = $1`,
+    [COURSE_ID],
+  )
+  assert.ok(stored.rows.length >= 3)
+  assert.equal(stored.rows.every(row => row.status === 'draft'), true)
+
+  const learner = await learnerHeaders()
+  const coursesBefore = await app.inject({
+    method: 'GET',
+    url: '/v1/catalog/courses',
+    headers: learner,
+  })
+  assert.equal(coursesBefore.statusCode, 200, coursesBefore.body)
+  const listed = coursesBefore.json() as { courses: { courseId: string }[] }
+  assert.equal(listed.courses.some(course => course.courseId === COURSE_ID), false)
+
+  const treeBefore = await app.inject({
+    method: 'GET',
+    url: `/v1/catalog/courses/${COURSE_ID}`,
+    headers: learner,
+  })
+  assert.equal(treeBefore.statusCode, 404)
+
+  const searchBefore = await app.inject({
+    method: 'POST',
+    url: '/v1/kb/search',
+    headers: learner,
+    payload: { query: '趋势反转', topK: 5 },
+  })
+  assert.equal(searchBefore.statusCode, 200, searchBefore.body)
+  assert.deepEqual((searchBefore.json() as { segments: unknown[] }).segments, [])
+
+  const playbackBefore = await app.inject({
+    method: 'POST',
+    url: '/v1/playback/sessions',
+    headers: learner,
+    payload: { segmentId },
+  })
+  assert.equal(playbackBefore.statusCode, 404)
+
+  // 学员只有设备令牌，没有后台会话，管理端在会话校验处即拒绝。
+  const learnerPreview = await app.inject({
+    method: 'GET',
+    url: `/v1/admin/content/generations/${generationId}`,
+    headers: learner,
+  })
+  assert.equal(learnerPreview.statusCode, 401)
+
+  reindexFails = true
+  const failedPublish = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/content/courses/${COURSE_ID}/publish`,
+    headers: adminHeaders(),
+  })
+  assert.equal(failedPublish.statusCode, 503)
+  reindexFails = false
+  assert.equal(reindexCalls, 1)
+
+  const publishResponse = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/content/courses/${COURSE_ID}/publish`,
+    headers: adminHeaders(),
+  })
+  assert.equal(publishResponse.statusCode, 200, publishResponse.body)
+  const published = publishResponse.json() as {
+    courseId: string
+    status: string
+    articlesPublished: number
+    segmentsPublished: number
+    indexed: boolean
+    embedded: number
+  }
+  assert.equal(published.courseId, COURSE_ID)
+  assert.equal(published.status, 'published')
+  assert.equal(published.articlesPublished, 2)
+  assert.ok(published.segmentsPublished >= 1)
+  assert.equal(published.indexed, true)
+  assert.equal(published.embedded, 2)
+  assert.equal(reindexCalls, 2)
+
+  const publishAgain = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/content/courses/${COURSE_ID}/publish`,
+    headers: adminHeaders(),
+  })
+  assert.equal(publishAgain.statusCode, 200, publishAgain.body)
+  const republished = publishAgain.json() as typeof published
+  assert.equal(republished.articlesPublished, 0)
+  assert.equal(republished.segmentsPublished, 0)
+
+  const treeAfter = await app.inject({
+    method: 'GET',
+    url: `/v1/catalog/courses/${COURSE_ID}`,
+    headers: learner,
+  })
+  assert.equal(treeAfter.statusCode, 200, treeAfter.body)
+  assert.equal((treeAfter.json() as { chapters: unknown[] }).chapters.length, 1)
+
+  const searchAfter = await app.inject({
+    method: 'POST',
+    url: '/v1/kb/search',
+    headers: learner,
+    payload: { query: '趋势反转', topK: 5 },
+  })
+  assert.equal(searchAfter.statusCode, 200, searchAfter.body)
+  const found = searchAfter.json() as { segments: { segmentId: string; courseId: string }[] }
+  assert.ok(found.segments.length >= 1)
+  assert.equal(found.segments.every(segment => segment.courseId === COURSE_ID), true)
+
+  const playbackAfter = await app.inject({
+    method: 'POST',
+    url: '/v1/playback/sessions',
+    headers: learner,
+    payload: { segmentId },
+  })
+  assert.equal(playbackAfter.statusCode, 200, playbackAfter.body)
+  assert.match((playbackAfter.json() as { playlistUrl: string }).playlistUrl, /^http:\/\/127\.0\.0\.1:3939\/media\//)
 })

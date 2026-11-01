@@ -1198,6 +1198,180 @@ components:
           type: integer
           minimum: 1
 
+    GenerationStatus:
+      type: string
+      enum: [draft, applied, discarded, failed]
+
+    GenerationSummary:
+      type: object
+      additionalProperties: false
+      required:
+        [generationId, assetId, courseId, status, promptVersion, model, chapters,
+         knowledgePoints, segments, needsReview, createdAt, updatedAt, appliedAt]
+      properties:
+        generationId:
+          type: string
+          pattern: '^gen_[0-9a-f]{16}$'
+        assetId:
+          type: string
+        courseId:
+          type: string
+        status:
+          $ref: '#/components/schemas/GenerationStatus'
+        promptVersion:
+          type: string
+        model:
+          type: string
+        chapters:
+          type: integer
+          minimum: 0
+        knowledgePoints:
+          type: integer
+          minimum: 0
+        segments:
+          type: integer
+          minimum: 0
+        needsReview:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: integer
+        updatedAt:
+          type: integer
+        appliedAt:
+          type: [integer, 'null']
+
+    GenerationChapterPreview:
+      type: object
+      additionalProperties: false
+      required: [key, title, position]
+      properties:
+        key:
+          type: string
+        title:
+          type: string
+        position:
+          type: integer
+          minimum: 0
+
+    GenerationKnowledgePointPreview:
+      type: object
+      additionalProperties: false
+      required:
+        [key, chapterKey, title, position, confidence, needsReview, reviewReasons, hasArticle]
+      properties:
+        key:
+          type: string
+        chapterKey:
+          type: string
+        title:
+          type: string
+        position:
+          type: integer
+          minimum: 0
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        needsReview:
+          type: boolean
+        reviewReasons:
+          type: array
+          items:
+            type: string
+        hasArticle:
+          type: boolean
+
+    GenerationSegmentPreview:
+      type: object
+      additionalProperties: false
+      required: [key, pointKey, title, startMs, endMs]
+      properties:
+        key:
+          type: string
+        pointKey:
+          type: string
+        title:
+          type: string
+        startMs:
+          type: integer
+          minimum: 0
+        endMs:
+          type: integer
+          minimum: 1
+
+    GenerationPreview:
+      type: object
+      additionalProperties: false
+      required: [generation, chapters, knowledgePoints, segments]
+      properties:
+        generation:
+          $ref: '#/components/schemas/GenerationSummary'
+        chapters:
+          type: array
+          items:
+            $ref: '#/components/schemas/GenerationChapterPreview'
+        knowledgePoints:
+          type: array
+          items:
+            $ref: '#/components/schemas/GenerationKnowledgePointPreview'
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/GenerationSegmentPreview'
+
+    AppliedContent:
+      type: object
+      additionalProperties: false
+      required: [chapters, knowledgePoints, segments]
+      properties:
+        chapters:
+          type: object
+          additionalProperties:
+            type: string
+        knowledgePoints:
+          type: object
+          additionalProperties:
+            type: string
+        segments:
+          type: object
+          additionalProperties:
+            type: string
+
+    GenerationApplyResult:
+      type: object
+      additionalProperties: false
+      required: [generation, applied, alreadyApplied]
+      properties:
+        generation:
+          $ref: '#/components/schemas/GenerationSummary'
+        applied:
+          $ref: '#/components/schemas/AppliedContent'
+        alreadyApplied:
+          type: boolean
+
+    CoursePublishResult:
+      type: object
+      additionalProperties: false
+      required: [courseId, status, articlesPublished, segmentsPublished, indexed, embedded]
+      properties:
+        courseId:
+          type: string
+        status:
+          type: string
+          enum: [published]
+        articlesPublished:
+          type: integer
+          minimum: 0
+        segmentsPublished:
+          type: integer
+          minimum: 0
+        indexed:
+          type: boolean
+        embedded:
+          type: integer
+          minimum: 0
+
   responses:
     BadRequest:
       description: 入参或结构不合法
@@ -3079,6 +3253,188 @@ paths:
                 properties:
                   job:
                     $ref: '#/components/schemas/PipelineJob'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/media-assets/{assetId}/generations:
+    post:
+      summary: 入队内容生成任务（operator/admin）
+      description: 素材与转写必须就绪、课程处于 draft；同一素材只允许一个 draft 生成。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: assetId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+      responses:
+        '202':
+          description: 已入队
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [job]
+                properties:
+                  job:
+                    $ref: '#/components/schemas/PipelineJob'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/generations/{generationId}:
+    get:
+      summary: 生成结果预览（operator/admin）
+      description: 返回章节/知识点/片段摘要与待审原因，不含文章正文与片段正文。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: generationId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^gen_[0-9a-f]{16}$'
+      responses:
+        '200':
+          description: 生成预览
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerationPreview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/generations/{generationId}/apply:
+    post:
+      summary: 应用生成结果到草稿课程（operator/admin）
+      description: 课程必须为 draft 且无既有内容；重复调用幂等返回同一映射。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: generationId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^gen_[0-9a-f]{16}$'
+      responses:
+        '200':
+          description: 已应用或此前已应用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerationApplyResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/generations/{generationId}/discard:
+    post:
+      summary: 丢弃草稿生成结果（operator/admin）
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: generationId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^gen_[0-9a-f]{16}$'
+      responses:
+        '200':
+          description: 已丢弃
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [generation]
+                properties:
+                  generation:
+                    $ref: '#/components/schemas/GenerationSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/courses/{courseId}/publish:
+    post:
+      summary: 发布课程并建立索引（operator/admin）
+      description: 至少一个片段；配置 embedding 时先同步重建索引，失败则不翻状态。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: courseId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+      responses:
+        '200':
+          description: 已发布
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoursePublishResult'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':

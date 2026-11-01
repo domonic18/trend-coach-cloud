@@ -6,7 +6,9 @@ import type { AppConfig } from '../config.js'
 import { serviceUnavailable } from '../errors.js'
 import type { Metrics } from '../metrics.js'
 import { checkMediaTools } from './ffmpeg.js'
+import { createGenerationHook } from './generation.js'
 import { JobQueue } from './jobs.js'
+import { createLlmClient, type LlmClient } from './llm.js'
 import { createLocalMediaProcessor, type MediaProcessor } from './media-processor.js'
 import { createLocalMediaStore, type MediaStore } from './media-store.js'
 import { PipelineService, type PipelineApi } from './service.js'
@@ -28,6 +30,8 @@ export interface PipelineRuntimeInput {
   processor?: MediaProcessor
   asr?: LongFormAsr
   generator?: GenerationHook
+  llm?: LlmClient
+  reindex?: (courseId: string) => Promise<{ embedded: number }>
 }
 
 /** 未启用时保留路由，管理端拿到 503 而不是 404。 */
@@ -42,6 +46,11 @@ export function createDisabledPipelineApi(): PipelineApi {
     uploadSource: fail,
     enqueueIngest: fail,
     getTranscript: fail,
+    enqueueGeneration: fail,
+    getGeneration: fail,
+    applyGeneration: fail,
+    discardGeneration: fail,
+    publishCourse: fail,
     listJobs: fail,
     getJob: fail,
     retryJob: fail,
@@ -84,8 +93,21 @@ export async function createPipelineRuntime(input: PipelineRuntimeInput): Promis
   })
   const asr = input.asr
     ?? (input.config.asr === undefined ? undefined : createMiniMaxLongFormAsr(input.config.asr))
+  const llm = input.llm
+    ?? (input.config.llm === undefined ? undefined : createLlmClient(input.config.llm))
+  const generator = input.generator ?? (llm === undefined
+    ? undefined
+    : createGenerationHook({
+      pool: input.pool,
+      config,
+      llm,
+      model: input.config.llm?.model ?? 'unknown',
+    }))
   const jobs = new JobQueue(input.pool, config.maxAttempts)
-  const api = new PipelineService(input.pool, config, jobs, store)
+  const api = new PipelineService(input.pool, config, jobs, store, {
+    llmAvailable: llm !== undefined,
+    ...(input.reindex === undefined ? {} : { reindex: input.reindex }),
+  })
   const worker = new PipelineWorker({
     pool: input.pool,
     config,
@@ -95,7 +117,7 @@ export async function createPipelineRuntime(input: PipelineRuntimeInput): Promis
     ...(asr === undefined ? {} : { asr }),
     ...(input.config.asr === undefined ? {} : { asrConfig: input.config.asr }),
     asrLongTimeoutMs: input.config.asrLongTimeoutMs,
-    ...(input.generator === undefined ? {} : { generator: input.generator }),
+    ...(generator === undefined ? {} : { generator }),
     log: input.log,
     metrics: input.metrics,
   })

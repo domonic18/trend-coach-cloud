@@ -9,6 +9,7 @@ import { RateLimiter } from '../rate-limit.js'
 import {
   parseAssetId,
   parseAssetStatus,
+  parseGenerationId,
   parseJobId,
   parseJobKind,
   parseJobStatus,
@@ -135,6 +136,37 @@ export async function registerPipelineRoutes(app: FastifyInstance, deps: Pipelin
         : await api.uploadSource(id, body, expectedSha256)
       return { asset }
     })
+  })
+
+  app.post('/v1/admin/content/media-assets/:assetId/generations', async (request, reply) => {
+    await guard(request)
+    const { assetId } = request.params as { assetId: string }
+    const job = await api.enqueueGeneration(parseAssetId(assetId))
+    return reply.code(202).send({ job })
+  })
+
+  app.get('/v1/admin/content/generations/:generationId', async request => {
+    await guard(request)
+    const { generationId } = request.params as { generationId: string }
+    return api.getGeneration(parseGenerationId(generationId))
+  })
+
+  app.post('/v1/admin/content/generations/:generationId/apply', async request => {
+    await guard(request)
+    const { generationId } = request.params as { generationId: string }
+    return api.applyGeneration(parseGenerationId(generationId))
+  })
+
+  app.post('/v1/admin/content/generations/:generationId/discard', async request => {
+    await guard(request)
+    const { generationId } = request.params as { generationId: string }
+    return { generation: await api.discardGeneration(parseGenerationId(generationId)) }
+  })
+
+  app.post('/v1/admin/content/courses/:courseId/publish', async request => {
+    await guard(request)
+    const { courseId } = request.params as { courseId: string }
+    return api.publishCourse(parseContentId(courseId, 'courseId'))
   })
 
   app.post('/v1/admin/content/media-assets/:assetId/ingest', async (request, reply) => {

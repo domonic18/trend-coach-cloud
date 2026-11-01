@@ -165,6 +165,7 @@ export async function buildApp({
     config,
     metrics,
     log: app.log,
+    ...(embed === undefined ? {} : { reindex: (courseId: string) => content.reindex(courseId) }),
   })
 
   registerAuthRoutes(app, { auth, accounts, config, limiter })
