@@ -1,7 +1,7 @@
-# 趋势课程云端服务 · 架构设计（v0.4）
+# 趋势课程云端服务 · 架构设计（v0.5）
 
-版本：v0.4（2026-11-01）
-状态：初稿。接口口径以插件 PRD v1.6 §6、插件架构 §6/§9/§10/§12 与 [对接清单](./cloud-service-integration-checklist.md) 为准；冲突时先改那两份文档，再同步本文。v0.4 新增 M1 视频→课程管线（本地存储、DB 任务队列、长音频转写、LLM 草稿与人工发布）；v0.3 同步 M3.1/M3.2/M3.3 落地状态；v0.2 新增 M4.2 语音转写（MiniMax ASR）。
+版本：v0.5（2026-11-01）
+状态：初稿。接口口径以插件 PRD v1.6 §6、插件架构 §6/§9/§10/§12 与 [对接清单](./cloud-service-integration-checklist.md) 为准；冲突时先改那两份文档，再同步本文。v0.5 补充 M6 公测加固（限流矩阵、内存上限、压测与恢复演练、合规基线）；v0.4 新增 M1 视频→课程管线（本地存储、DB 任务队列、长音频转写、LLM 草稿与人工发布）；v0.3 同步 M3.1/M3.2/M3.3 落地状态；v0.2 新增 M4.2 语音转写（MiniMax ASR）。
 
 ## 1. 目标与范围
 
@@ -460,6 +460,28 @@ POST /v1/asr/transcribe
 | 隐私 | 数据最小化；事件需同意且可撤回；支持数据删除；学员语音音频与转写不落盘、不落日志、不进指标；建课源视频/转写按管线规则持久化 |
 | 依赖 | 定期审计；生产不使用第三方分析 SDK |
 
+### 9.1 限流
+
+单实例固定窗口（60s），键为设备 ID、IP、后台账号或设备码；内存表上限 10 万键，到上限先清过期窗口，仍满则拒绝新键，避免随机键撑爆内存。超限统一 `429` + `Retry-After: 60`，响应体不泄露配额细节。
+
+| 入口 | 键 | 配置 | 默认 |
+|---|---|---|---|
+| `POST /v1/auth/device/code` | IP | `RATE_LIMIT_DEVICE_CODE_PER_MINUTE` | 10 |
+| `POST /v1/auth/device/token` | 设备码 | `RATE_LIMIT_DEVICE_TOKEN_PER_MINUTE` | 120 |
+| `POST /v1/auth/device/approve` | IP | `RATE_LIMIT_DEVICE_APPROVE_PER_MINUTE` | 10 |
+| `POST /v1/auth/refresh` | 设备 ID | `RATE_LIMIT_REFRESH_PER_MINUTE` | 60 |
+| `POST /v1/auth/session` | IP | `RATE_LIMIT_LOGIN_PER_MINUTE` | 10 |
+| `POST /v1/auth/invite/redeem` | IP | `RATE_LIMIT_INVITE_PER_MINUTE` | 10 |
+| `POST /v1/kb/search` | 设备 ID | `RATE_LIMIT_SEARCH_PER_MINUTE` | 120 |
+| `GET /v1/kb/segments/*`、`/v1/catalog/*` | 设备 ID | `RATE_LIMIT_CATALOG_PER_MINUTE` | 240 |
+| `PUT /v1/progress/*` | 设备 ID | `RATE_LIMIT_PROGRESS_PER_MINUTE` | 120 |
+| `POST /v1/events` | 设备 ID | `RATE_LIMIT_EVENTS_PER_MINUTE` | 120 |
+| `POST /v1/asr/transcribe` | 设备 ID | `RATE_LIMIT_ASR_PER_MINUTE` | 20 |
+| `POST /v1/playback/sessions` | 设备 ID | `PLAYBACK_MAX_CONCURRENT`（并发会话数） | 5 |
+| `/v1/admin/content/*` 与管线 | 后台账号 | `RATE_LIMIT_CONTENT_PER_MINUTE`、`RATE_LIMIT_PIPELINE_PER_MINUTE` | 300 / 30 |
+
+扩多实例前必须把限流改为共享存储（Redis/DB），否则配额按实例放大；当前部署保持单实例。
+
 ## 10. 可观测性
 
 | 类别 | 指标 |
@@ -506,7 +528,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 | M2 | 核心业务接口、设备码授权、签名 HLS、事件接口与同意管理、契约测试 | 对接清单验收通过，插件联调完成 | 已落地；限流为单实例内存实现 |
 | M3 | 后台管理、账号体系、学习进度、索引重建/召回测试 | 内容可运营、用户可管理 | 核心已落地（M3.1/M3.2/M3.3）；召回测试、媒体上传、运营看板、插件版本与灰度后置 |
 | M4.2 | 语音转写：`/v1/asr/transcribe`、MiniMax provider、配置与限流 | 契约测试通过；真实 MiniMax 需 `ASR_API_KEY` | 已落地；真实上游待 `ASR_API_KEY` |
-| M6 | 限流、压测、备份、合规加固 | 公测放行 | 未开始 |
+| M6 | 限流、压测、备份、合规加固 | 公测放行 | 已落地加固项；账号注销/数据删除与真实密钥验收待完成 |
 
 **实现状态（2026-11-01）**
 
@@ -516,6 +538,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 - **M3.3 已落地**：课程列表、课程树、知识点详情、学习进度上报。
 - **M4.2 已落地**：`/v1/asr/transcribe` + MiniMax provider + 按设备限流；2026-11-01 单元/契约测试通过（WAV 与时长校验、base URL 归一化、本地 stub 覆盖成功/`base_resp` 业务错误/429/500/非 JSON/超时，以及鉴权、设备不匹配、非法音频、413、空结果 422、上游错误映射、fake provider 成功与限流 429）；真实上游待 `ASR_API_KEY`。
 - **M1 已落地**：媒体素材创建与流式上传、ffprobe 校验、单码率 HLS、16kHz WAV 抽取、静音切块、MiniMax 长音频转写（块级缓存）、章节/知识点/片段/文章草稿生成、生成预览/apply/discard、课程发布与按需 `reindex`、DB 任务队列（认领/心跳/重试/取消/恢复）与管理端「视频建课」页。测试使用假 MediaProcessor/ASR/LLM；真实 MiniMax 与内容 LLM 待密钥验收。
+- **M6 已落地加固项**：限流补齐设备轮询、刷新、体系/片段读取与后台内容接口，`429` 带 `Retry-After`，内存键数设上限；新增零依赖压测脚本 `scripts/load-test.mjs`（P95/错误率阈值）、非破坏性恢复演练 `scripts/restore-drill.sh` 与合规清单 `docs/operations/compliance.md`。账号注销/数据删除、指标与播放会话定期清理、源视频保留期仍未实现，见合规清单 §9。
 - **其他**：TTL 与并发上限仍为临时默认值；生产媒体走 CDN 尚未接入，本地 staging 由 `src/media/routes.ts`、生产管线由 `PIPELINE_HLS_DIR` 提供签名文件服务。
 
 ### 13.1 视频 → 课程能力现状

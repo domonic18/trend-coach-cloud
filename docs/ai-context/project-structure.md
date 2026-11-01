@@ -1,6 +1,6 @@
 # 项目结构
 
-版本：v0.7（2026-11-01）
+版本：v0.8（2026-11-01）
 
 本仓库已进入 M1 实现阶段：单进程模块化单体（Fastify + PostgreSQL/pgvector），业务接口、鉴权、媒体签名、体系与进度、账号与后台登录、内容管理与 React 管理端、语音转写、视频→课程管线与契约测试已落地。管线覆盖流式上传、ffmpeg HLS、长音频转写、切分、文章草稿与人工发布；真实 ASR/LLM 待密钥验收。本文件描述现状与已确定的目标结构，避免后续实现随意扩散。
 
@@ -29,7 +29,10 @@ trend-coach-cloud/
 │   └── backups/                               # scripts/backup.sh 输出
 ├── scripts/
 │   ├── migrate.ts                             # npm run migrate [-- --reset]
-│   └── seed.ts                                # npm run seed
+│   ├── seed.ts                                # npm run seed
+│   ├── backup.sh / restore.sh                 # 备份与覆盖式恢复（需显式确认）
+│   ├── restore-drill.sh                       # 备份导入独立演练库，不触碰业务库
+│   └── load-test.mjs                          # 零依赖压测（P95/错误率阈值）
 ├── openapi/
 │   └── openapi.yaml                           # 唯一对外契约源
 ├── src/

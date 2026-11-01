@@ -1,6 +1,6 @@
 # 监控与告警
 
-版本：v0.1（2026-10-31）
+版本：v0.2（2026-11-01）
 
 云端保留 `/metrics` 指标接口，但**默认不部署 Prometheus/Grafana**。需要监控时，由部署方把外部 Prometheus 指向该接口；本文另提供可选的抓取、告警与看板模板。
 
@@ -73,10 +73,33 @@ curl -fsS -H "Authorization: Bearer $METRICS_TOKEN" https://$DOMAIN/metrics | he
 | 服务不可达 | `docker compose ps`、`/health`、数据库日志 | 数据库不可用先恢复数据库；app 崩溃看 stdout 日志 |
 | 5xx 升高 | app JSON 日志的 `statusCode` 与 `err` | 区分数据库超时、embedding 依赖、未处理异常 |
 | 检索 P95 升高 | 数据库慢查询与连接数 | 检查 pgvector 索引、`SEARCH_MIN_*` 配置与 embedding 超时 |
-| 429 升高 | 按路由与设备来源统计 | 确认是否异常客户端；调整 `RATE_LIMIT_*` 前先评估成本 |
+| 429 升高 | 按路由与设备来源统计，响应带 `Retry-After: 60` | 确认是否异常客户端；调整 `RATE_LIMIT_*` 前先评估成本 |
 | 管线任务失败 | `pipeline_jobs.error_code` 与阶段耗时 | ffmpeg 超时/磁盘满/ASR 429 分开处理；先确认 `/health` 与磁盘余量 |
 | 管线队列积压 | `pipeline_queue_depth`、CPU 与 ffmpeg 进程 | 单 worker 并发 1 是默认值；扩容前评估 API 延迟与磁盘 IO |
 | 发布返回 503 | 是否配置 embedding、reindex 错误类别 | 索引失败不翻课程状态；修复 provider 后重试发布 |
 | 转写块失败率高 | `transcript_chunks` 失败数、上游错误类别 | 上游 429/5xx 会重试；持续失败检查密钥与限流 |
 
 容量基线：单实例 2 vCPU 可承载日常检索；持续 CPU > 70% 或 P95 接近阈值时先扩容 app 实例（迁移有 advisory lock，可安全多实例），再考虑数据库规格。
+
+## 5. 压测基线
+
+`scripts/load-test.mjs`（`npm run loadtest`）是零依赖固定并发压测脚本，用于发布前后对比与容量评估。默认读环境变量传令牌，避免密钥进入 shell 历史：
+
+```bash
+# 公开端点
+npm run loadtest -- --base-url http://127.0.0.1:3939 --path /health --concurrency 20 --duration 20
+
+# 鉴权端点（令牌与设备 ID 只从环境变量读取）
+LOAD_TEST_TOKEN=$SESSION_TOKEN LOAD_TEST_DEVICE_ID=$DEVICE_ID \
+  npm run loadtest -- --path /v1/catalog/courses --concurrency 10 --duration 20 --max-p95-ms 300
+
+# CI 汇总
+npm run loadtest -- --json --duration 30 | tee loadtest.json
+```
+
+- 阈值：默认 P95 ≤500ms、错误率 ≤1%（网络错误 + 5xx + 非 429 的 4xx）；`--max-p95-ms`、`--max-error-rate` 可按端点调整。
+- `429` 单独计数并提示：命中限流说明配额先于容量到顶；压测账号应单独准备，或临时调高 `RATE_LIMIT_*`，不要混入普通用户配额。
+- 不在生产压写接口；读接口压测避开业务高峰，记录机器规格、并发与 P95，作为下次发布的对照基线。
+- 脚本超时（`--timeout-ms`）与预热（`--warmup`）默认 10s / 1s，预热请求不计入统计。
+
+公测放行前建议至少覆盖：`/health`、`/v1/catalog/courses`、`/v1/kb/search`（单设备配额内）、`POST /v1/playback/sessions`（单设备并发上限内），并同时观察 `/metrics` 的 5xx、429 与 P95。

@@ -1,8 +1,8 @@
 # 部署 Runbook
 
-版本：v0.4（2026-11-01）
+版本：v0.5（2026-11-01）
 
-面向运维与开发：把云端服务部署到一台 Linux 主机，覆盖 TLS、数据库迁移、备份恢复、媒体 CDN、视频管线与本地 staging 验证。监控见 [监控与告警](./monitoring.md)。
+面向运维与开发：把云端服务部署到一台 Linux 主机，覆盖 TLS、数据库迁移、备份恢复、媒体 CDN、视频管线与本地 staging 验证。监控见 [监控与告警](./monitoring.md)，数据与合规基线见 [合规与公测检查清单](./compliance.md)。
 
 ## 1. 拓扑与前置条件
 
@@ -128,6 +128,17 @@ RESTORE_CONFIRM=yes scripts/restore.sh workspace/backups/trend-coach-20261031T03
 
 演练：至少每季度在 staging 恢复一次，并跑一次设备授权 + 检索 + 播放冒烟。
 
+非破坏性恢复演练（推荐每次备份后抽查，不停 app、不覆盖业务库）：
+
+```bash
+# 默认取 workspace/backups 下最新备份，导入 trend_coach_restore_drill 后校验核心表并删除
+scripts/restore-drill.sh
+# 指定备份；DRILL_KEEP=1 保留演练库供排查
+DRILL_KEEP=1 scripts/restore-drill.sh workspace/backups/trend-coach-20261031T031700Z.sql.gz
+```
+
+脚本会启动 db（若未运行）、重建演练库、导入备份，并校验迁移数、用户、课程、章节、知识点与片段可查询；任一步失败返回非零。
+
 ## 7. 媒体、CORS 与 Range
 
 生产不在业务进程代理媒体：`MEDIA_BASE_URL` 指向 CDN 根，播放地址为 `MEDIA_BASE_URL + hlsPath?token=...`。
@@ -161,6 +172,14 @@ curl -sI https://media.example.com/hls/seg0.ts -H 'Range: bytes=0-99' | grep -iE
 
 监控不随 Compose 部署；`/metrics` 保留，接入外部 Prometheus 见 [监控与告警](./monitoring.md)。
 
+发布前后用无依赖脚本做一次基线压测（详见 [监控与告警 §5](./monitoring.md#5-压测基线)）：
+
+```bash
+npm run loadtest -- --base-url https://$DOMAIN --path /health --concurrency 20 --duration 20
+```
+
+超限返回 `429` 且带 `Retry-After: 60`；压测账号应单独准备或临时调高对应 `RATE_LIMIT_*`，避免把限流命中误判为容量问题。
+
 ## 9. 发布与回滚
 
 ```bash
@@ -170,8 +189,8 @@ IMAGE_TAG=2026-10-31 docker compose --env-file .env.prod -f docker-compose.prod.
 IMAGE_TAG=2026-10-30 docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 ```
 
-- 发布前：`npm run typecheck && npm test`、备份、确认迁移可向前兼容；`npm run build` 会同时产出服务端与 `dist/admin`。
-- 发布后：`/health`、一次设备授权/刷新、一次检索、一次播放会话、打开 `/admin/` 完成一次登录与内容读写，检查 5xx 与 P95。
+- 发布前：`npm run typecheck && npm test`、备份、确认迁移可向前兼容；`npm run build` 会同时产出服务端与 `dist/admin`；用 `scripts/restore-drill.sh` 验证备份可导入。
+- 发布后：`/health`、一次设备授权/刷新、一次检索、一次播放会话、打开 `/admin/` 完成一次登录与内容读写，检查 5xx 与 P95；跑一次 `npm run loadtest` 对比基线。
 - 迁移已改变数据时，仅回滚镜像可能不兼容；优先前滚修复，否则按 §6 恢复。
 
 ## 10. 本地 staging 验证

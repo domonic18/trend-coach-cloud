@@ -86,7 +86,8 @@
 | [文档总览](docs/ai-context/docs-overview.md) | 阅读顺序与文档索引 |
 | [项目结构](docs/ai-context/project-structure.md) | 现状与目标目录、放置规则 |
 | [部署 Runbook](docs/operations/deployment-runbook.md) | Compose、TLS、迁移、备份恢复、媒体 CDN |
-| [监控与告警](docs/operations/monitoring.md) | 指标接口、外部 Prometheus 接入、排障 |
+| [监控与告警](docs/operations/monitoring.md) | 指标接口、外部 Prometheus 接入、压测、排障 |
+| [合规与公测检查清单](docs/operations/compliance.md) | 数据清单、保留与删除、访问控制、已知缺口 |
 
 协作与 Agent 约束见 [AGENTS.md](AGENTS.md)。
 
