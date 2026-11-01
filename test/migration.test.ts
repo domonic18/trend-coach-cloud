@@ -61,6 +61,48 @@ test('004 迁移创建管线表、列与索引', async () => {
   for (const index of INDEXES) assert.ok(names.has(index), index)
 })
 
+test('011 迁移创建章节题库并约束发布数量', async () => {
+  await pool.query(
+    `INSERT INTO courses (course_id, title, status) VALUES ('course-quiz', '题库', 'draft')
+     ON CONFLICT (course_id) DO NOTHING`,
+  )
+  await pool.query(
+    `INSERT INTO chapters (course_id, chapter_id, title, position)
+     VALUES ('course-quiz', 'C1', '第一章', 0)
+     ON CONFLICT (course_id, chapter_id) DO NOTHING`,
+  )
+
+  const draftQuestions = JSON.stringify([
+    { questionId: 'q_1', prompt: '题一', options: ['A', 'B'], answerIndex: 0, explanation: '解析一' },
+    { questionId: 'q_2', prompt: '题二', options: ['A', 'B'], answerIndex: 1, explanation: '解析二' },
+  ])
+  const draft = await pool.query(
+    `INSERT INTO chapter_quizzes (course_id, chapter_id, questions)
+     VALUES ('course-quiz', 'C1', $1::jsonb)
+     RETURNING version, status, published_at`,
+    [draftQuestions],
+  )
+  assert.deepEqual(draft.rows[0], { version: 1, status: 'draft', published_at: null })
+
+  await rejectsWithCode(
+    pool.query(
+      `UPDATE chapter_quizzes SET status = 'published', published_at = now()
+       WHERE course_id = 'course-quiz' AND chapter_id = 'C1'`,
+    ),
+    '23514',
+  )
+
+  const published = await pool.query(
+    `UPDATE chapter_quizzes
+     SET status = 'published', published_at = now(),
+         questions = jsonb_insert(questions, '{2}', $1::jsonb)
+     WHERE course_id = 'course-quiz' AND chapter_id = 'C1'
+     RETURNING version, status`,
+    [JSON.stringify({ questionId: 'q_3', prompt: '题三', options: ['A', 'B'], answerIndex: 0, explanation: '解析三' })],
+  )
+  assert.deepEqual(published.rows[0], { version: 1, status: 'published' })
+})
+
 test('存量素材保持 ready，新素材可无 hls_path', async () => {
   await pool.query(
     `INSERT INTO courses (course_id, title, status) VALUES ('course-pipeline', '管线', 'draft')`,

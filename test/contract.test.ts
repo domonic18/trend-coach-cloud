@@ -1643,10 +1643,12 @@ test('体系：章节教材、图示签名与相邻章节', async () => {
     article: { markdown: string; version: number; publishedAt: number } | null
     figures: Record<string, unknown>
     adjacentChapters: { chapterId: string; title: string }[]
+    quiz: unknown
   }
   assert.deepEqual(Object.keys(chapter).sort(), [
-    'adjacentChapters', 'article', 'chapterId', 'courseId', 'figures', 'title',
+    'adjacentChapters', 'article', 'chapterId', 'courseId', 'figures', 'quiz', 'title',
   ])
+  assert.equal(chapter.quiz, null)
   assert.equal(chapter.chapterId, 'M1')
   assert.equal(chapter.courseId, 'TC-101')
   assert.equal(chapter.title, '第一章 趋势认知')
@@ -1788,6 +1790,120 @@ test('体系：章节图示只下发已选且已发布的签名地址', async ()
     )
     await pool.query('DELETE FROM figures WHERE figure_id = $1', [figureId])
     await rm(join(figureDir, figureId), { recursive: true, force: true })
+  }
+})
+
+test('体系：随堂测验读写、发布门禁与损坏防护', async () => {
+  const quizUrl = '/v1/admin/content/courses/TC-101/chapters/M1/quiz'
+  const adminHeaders = { authorization: `Bearer ${adminToken}` }
+  const question = (serial: number): Record<string, unknown> => ({
+    questionId: `q_m1_${serial}`,
+    prompt: `均线问题 ${serial}`,
+    options: ['金叉', '死叉', '背离'],
+    answerIndex: 0,
+    explanation: `解析 ${serial}`,
+  })
+
+  try {
+    const empty = await app.inject({ method: 'GET', url: quizUrl, headers: adminHeaders })
+    assert.equal(empty.statusCode, 200, empty.body)
+    assert.deepEqual(empty.json(), { quiz: null })
+
+    const tooFew = await app.inject({
+      method: 'PUT',
+      url: quizUrl,
+      headers: adminHeaders,
+      payload: { questions: [question(1), question(2)], status: 'published' },
+    })
+    assert.equal(tooFew.statusCode, 400)
+
+    const draft = await app.inject({
+      method: 'PUT',
+      url: quizUrl,
+      headers: adminHeaders,
+      payload: { questions: [question(1), question(2)], status: 'draft' },
+    })
+    assert.equal(draft.statusCode, 200, draft.body)
+    const draftQuiz = (draft.json() as { quiz: { version: number; status: string; publishedAt: number | null } }).quiz
+    assert.equal(draftQuiz.version, 1)
+    assert.equal(draftQuiz.status, 'draft')
+    assert.equal(draftQuiz.publishedAt, null)
+
+    const hidden = await app.inject({
+      method: 'GET',
+      url: '/v1/catalog/courses/TC-101/chapters/M1',
+      headers: authHeaders(mainGrant),
+    })
+    assert.equal(hidden.statusCode, 200)
+    assert.equal((hidden.json() as { quiz: unknown }).quiz, null)
+
+    const published = await app.inject({
+      method: 'PUT',
+      url: quizUrl,
+      headers: adminHeaders,
+      payload: { questions: [question(1), question(2), question(3)], status: 'published' },
+    })
+    assert.equal(published.statusCode, 200, published.body)
+    const publishedQuiz = (published.json() as {
+      quiz: { version: number; status: string; publishedAt: number | null; questions: unknown[] }
+    }).quiz
+    assert.equal(publishedQuiz.version, 2)
+    assert.equal(publishedQuiz.status, 'published')
+    assert.ok(typeof publishedQuiz.publishedAt === 'number')
+    assert.equal(publishedQuiz.questions.length, 3)
+
+    const visible = await app.inject({
+      method: 'GET',
+      url: '/v1/catalog/courses/TC-101/chapters/M1',
+      headers: authHeaders(mainGrant),
+    })
+    assert.equal(visible.statusCode, 200, visible.body)
+    const visibleQuiz = (visible.json() as {
+      quiz: { version: number; publishedAt: number; questions: Record<string, unknown>[] }
+    }).quiz
+    assert.equal(visibleQuiz.version, 2)
+    assert.equal(visibleQuiz.publishedAt, publishedQuiz.publishedAt)
+    assert.deepEqual(visibleQuiz.questions, [question(1), question(2), question(3)])
+
+    for (const payload of [
+      { questions: [question(1), question(1), question(2)], status: 'draft' },
+      { questions: [{ ...question(1), answerIndex: 9 }], status: 'draft' },
+      { questions: [{ ...question(1), options: ['', 'B'] }], status: 'draft' },
+      { questions: [{ ...question(1), prompt: '' }], status: 'draft' },
+      { questions: [1, 2, 3, 4, 5, 6].map(question), status: 'draft' },
+    ]) {
+      const invalid = await app.inject({
+        method: 'PUT',
+        url: quizUrl,
+        headers: adminHeaders,
+        payload,
+      })
+      assert.equal(invalid.statusCode, 400, JSON.stringify(payload))
+    }
+
+    await pool.query("UPDATE chapter_quizzes SET status = 'archived' WHERE course_id = 'TC-101' AND chapter_id = 'M1'")
+    const archived = await app.inject({
+      method: 'GET',
+      url: '/v1/catalog/courses/TC-101/chapters/M1',
+      headers: authHeaders(mainGrant),
+    })
+    assert.equal((archived.json() as { quiz: unknown }).quiz, null)
+
+    await pool.query(
+      `UPDATE chapter_quizzes SET status = 'published', published_at = now(),
+         questions = '[{"bad":1},{"bad":2},{"bad":3}]'::jsonb
+       WHERE course_id = 'TC-101' AND chapter_id = 'M1'`,
+    )
+    const broken = await app.inject({
+      method: 'GET',
+      url: '/v1/catalog/courses/TC-101/chapters/M1',
+      headers: authHeaders(mainGrant),
+    })
+    assert.equal(broken.statusCode, 500)
+  } finally {
+    await pool.query(
+      "DELETE FROM chapter_quizzes WHERE course_id = 'TC-101' AND chapter_id = 'M1'",
+    )
   }
 })
 
