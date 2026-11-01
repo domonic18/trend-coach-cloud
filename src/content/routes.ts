@@ -1,8 +1,10 @@
 import type { FastifyInstance } from 'fastify'
 import type { AccountService } from '../accounts/service.js'
-import { badRequest } from '../errors.js'
+import type { AppConfig } from '../config.js'
+import { badRequest, tooManyRequests } from '../errors.js'
 import { requireSession } from '../http/principal.js'
 import { asObject, optionalStringField } from '../http/validation.js'
+import type { RateLimiter } from '../rate-limit.js'
 import {
   boundedQuery,
   ContentService,
@@ -21,6 +23,8 @@ import {
 export interface ContentRouteDeps {
   content: ContentService
   accounts: AccountService
+  config: AppConfig
+  limiter: RateLimiter
 }
 
 function courseIdParam(raw: string): string {
@@ -56,17 +60,23 @@ function queryInt(
 }
 
 export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDeps): void {
-  const { content, accounts } = deps
+  const { content, accounts, config, limiter } = deps
   const staff = (request: Parameters<typeof requireSession>[0]) =>
     requireSession(request, accounts, ['operator', 'admin'])
+  const guard = async (request: Parameters<typeof staff>[0]): Promise<void> => {
+    const principal = await staff(request)
+    if (!limiter.take(`content:${principal.userId}`, config.rateLimitContentPerMinute)) {
+      throw tooManyRequests()
+    }
+  }
 
   app.get('/v1/admin/content/courses', async request => {
-    await staff(request)
+    await guard(request)
     return content.listCourses()
   })
 
   app.post('/v1/admin/content/courses', async (request, reply) => {
-    await staff(request)
+    await guard(request)
     const body = asObject(request.body)
     const course = await content.createCourse({
       courseId: courseIdParam(String(body.courseId ?? '')),
@@ -77,13 +87,13 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDe
   })
 
   app.get('/v1/admin/content/courses/:courseId', async request => {
-    await staff(request)
+    await guard(request)
     const { courseId } = request.params as { courseId: string }
     return content.getCourseTree(courseId)
   })
 
   app.patch('/v1/admin/content/courses/:courseId', async request => {
-    await staff(request)
+    await guard(request)
     const { courseId } = request.params as { courseId: string }
     const body = asObject(request.body)
     const title = optionalStringField(body, 'title', { min: 1, max: 200 })
@@ -100,7 +110,7 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDe
   })
 
   app.post('/v1/admin/content/courses/:courseId/chapters', async (request, reply) => {
-    await staff(request)
+    await guard(request)
     const { courseId } = request.params as { courseId: string }
     const body = asObject(request.body)
     const position = positionField(body)
@@ -113,7 +123,7 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDe
   })
 
   app.patch('/v1/admin/content/courses/:courseId/chapters/:chapterId', async request => {
-    await staff(request)
+    await guard(request)
     const { courseId, chapterId } = request.params as { courseId: string; chapterId: string }
     const body = asObject(request.body)
     const title = optionalStringField(body, 'title', { min: 1, max: 200 })
@@ -132,7 +142,7 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDe
   app.post(
     '/v1/admin/content/courses/:courseId/chapters/:chapterId/knowledge-points',
     async (request, reply) => {
-      await staff(request)
+      await guard(request)
       const { courseId, chapterId } = request.params as { courseId: string; chapterId: string }
       const body = asObject(request.body)
       const position = positionField(body)
@@ -146,7 +156,7 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDe
   )
 
   app.patch('/v1/admin/content/knowledge-points/:knowledgePointId', async request => {
-    await staff(request)
+    await guard(request)
     const { knowledgePointId } = request.params as { knowledgePointId: string }
     const body = asObject(request.body)
     const title = optionalStringField(body, 'title', { min: 1, max: 200 })
@@ -163,13 +173,13 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDe
   })
 
   app.get('/v1/admin/content/knowledge-points/:knowledgePointId/article', async request => {
-    await staff(request)
+    await guard(request)
     const { knowledgePointId } = request.params as { knowledgePointId: string }
     return { article: await content.getArticle(knowledgePointId) }
   })
 
   app.put('/v1/admin/content/knowledge-points/:knowledgePointId/article', async request => {
-    await staff(request)
+    await guard(request)
     const { knowledgePointId } = request.params as { knowledgePointId: string }
     const body = asObject(request.body)
     const article = await content.putArticle(knowledgePointId, {
@@ -180,7 +190,7 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDe
   })
 
   app.get('/v1/admin/content/segments', async request => {
-    await staff(request)
+    await guard(request)
     const query = asObject(request.query)
     const filters: SegmentFilters = {
       ...(query.courseId === undefined
@@ -198,7 +208,7 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDe
   })
 
   app.post('/v1/admin/content/segments', async (request, reply) => {
-    await staff(request)
+    await guard(request)
     const body = asObject(request.body)
     const segment = await content.createSegment({
       segmentId: parseSegmentId(String(body.segmentId ?? '')),
@@ -215,7 +225,7 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDe
   })
 
   app.patch('/v1/admin/content/segments/:segmentId', async request => {
-    await staff(request)
+    await guard(request)
     const { segmentId } = request.params as { segmentId: string }
     const body = asObject(request.body)
     const title = optionalStringField(body, 'title', { min: 1, max: 200 })
@@ -243,7 +253,7 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDe
   })
 
   app.post('/v1/admin/content/reindex', async request => {
-    await staff(request)
+    await guard(request)
     const body = request.body === undefined ? {} : asObject(request.body)
     const courseId = body.courseId === undefined ? undefined : courseIdParam(String(body.courseId))
     return content.reindex(courseId)

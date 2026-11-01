@@ -96,6 +96,10 @@ export interface AppConfig {
   rateLimitDeviceApprovePerMinute: number
   rateLimitAsrPerMinute: number
   rateLimitPipelinePerMinute: number
+  rateLimitDeviceTokenPerMinute: number
+  rateLimitRefreshPerMinute: number
+  rateLimitCatalogPerMinute: number
+  rateLimitContentPerMinute: number
 }
 
 type Env = Record<string, string | undefined>
@@ -346,5 +350,9 @@ export function loadConfig(env: Env = process.env): AppConfig {
     rateLimitDeviceApprovePerMinute: int(env, 'RATE_LIMIT_DEVICE_APPROVE_PER_MINUTE', 10),
     rateLimitAsrPerMinute: int(env, 'RATE_LIMIT_ASR_PER_MINUTE', 20),
     rateLimitPipelinePerMinute: int(env, 'RATE_LIMIT_PIPELINE_PER_MINUTE', 30),
+    rateLimitDeviceTokenPerMinute: int(env, 'RATE_LIMIT_DEVICE_TOKEN_PER_MINUTE', 120),
+    rateLimitRefreshPerMinute: int(env, 'RATE_LIMIT_REFRESH_PER_MINUTE', 60),
+    rateLimitCatalogPerMinute: int(env, 'RATE_LIMIT_CATALOG_PER_MINUTE', 240),
+    rateLimitContentPerMinute: int(env, 'RATE_LIMIT_CONTENT_PER_MINUTE', 300),
   }
 }

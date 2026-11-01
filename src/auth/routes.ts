@@ -34,6 +34,10 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
   app.post('/v1/auth/device/token', async request => {
     const body = asObject(request.body)
     const deviceCode = stringField(body, 'deviceCode', { max: 256 })
+    // 轮询是本接口的正常用法，按设备码而非 IP 限流，避免同一 NAT 下互相挤占。
+    if (!limiter.take(`device-token:${deviceCode}`, config.rateLimitDeviceTokenPerMinute)) {
+      throw tooManyRequests()
+    }
     return auth.pollDeviceToken(deviceCode)
   })
 
@@ -41,6 +45,9 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
     const body = asObject(request.body)
     const refreshToken = stringField(body, 'refreshToken', { max: 256 })
     const deviceId = stringField(body, 'deviceId', { min: 8, max: 128, pattern: DEVICE_ID })
+    if (!limiter.take(`refresh:${deviceId}`, config.rateLimitRefreshPerMinute)) {
+      throw tooManyRequests()
+    }
     return auth.refresh(refreshToken, deviceId)
   })
 

@@ -7,6 +7,7 @@ import { parseEventBody } from '../src/events/service.js'
 import { fuse, parseSearchBody, type Candidate, type SegmentRow } from '../src/kb/service.js'
 import { parseRange } from '../src/media/range.js'
 import { signPlaybackToken, verifyPlaybackToken } from '../src/playback/sign.js'
+import { RateLimiter } from '../src/rate-limit.js'
 
 const baseEnv = {
   APP_ENV: 'local',
@@ -128,6 +129,18 @@ test('Range 解析：单段、后缀、越界、多段', () => {
   assert.equal(parseRange('bytes=20-10', 100), 'invalid')
   assert.equal(parseRange('bytes=0-1,3-4', 100), 'invalid')
   assert.equal(parseRange('bytes=-0', 100), 'invalid')
+})
+
+test('限流器：固定窗口、过期清理与键数上限', () => {
+  let now = 0
+  const limiter = new RateLimiter(() => now, 60_000, 2)
+  assert.equal(limiter.take('a', 1), true)
+  assert.equal(limiter.take('a', 1), false)
+  assert.equal(limiter.take('b', 1), true)
+  assert.equal(limiter.take('c', 1), false)
+  now = 60_000
+  assert.equal(limiter.take('c', 1), true)
+  assert.equal(limiter.take('a', 1), true)
 })
 
 test('播放签名：往返、篡改、过期与目录作用域', () => {

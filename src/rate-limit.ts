@@ -7,12 +7,18 @@ export class RateLimiter {
   constructor(
     private readonly now: () => number = Date.now,
     private readonly windowMs = 60_000,
+    private readonly maxKeys = 100_000,
   ) {}
 
   take(key: string, limit: number): boolean {
     const current = this.now()
     const entry = this.windows.get(key)
     if (entry === undefined || current - entry.start >= this.windowMs) {
+      // 随机键可无限增长；到达上限先清过期窗口，仍满则拒绝新键，保住内存。
+      if (entry === undefined && this.windows.size >= this.maxKeys) {
+        this.prune()
+        if (this.windows.size >= this.maxKeys) return false
+      }
       this.windows.set(key, { start: current, count: 1 })
       return true
     }

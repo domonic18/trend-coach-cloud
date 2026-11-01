@@ -25,7 +25,10 @@ export function registerKbRoutes(app: FastifyInstance, deps: KbRouteDeps): void 
   })
 
   app.get('/v1/kb/segments/:segmentId', async request => {
-    await requirePrincipal(request, auth)
+    const principal = await requirePrincipal(request, auth)
+    if (!limiter.take(`kb-segment:${principal.deviceId}`, config.rateLimitCatalogPerMinute)) {
+      throw tooManyRequests()
+    }
     const { segmentId } = request.params as { segmentId: string }
     return kb.getSegment(segmentId)
   })

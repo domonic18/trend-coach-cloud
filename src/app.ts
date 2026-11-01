@@ -107,6 +107,7 @@ export async function buildApp({
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error instanceof HttpError) {
+      if (error.statusCode === 429) reply.header('retry-after', '60')
       reply.code(error.statusCode).send({ error: error.message, requestId: request.id })
       return
     }
@@ -173,7 +174,7 @@ export async function buildApp({
   registerKbRoutes(app, { kb, auth, config, limiter })
   registerPlaybackRoutes(app, { playback, auth })
   registerEventRoutes(app, { events, auth, config, limiter })
-  registerCatalogRoutes(app, { catalog, auth })
+  registerCatalogRoutes(app, { catalog, auth, config, limiter })
   registerProgressRoutes(app, { progress, auth, config, limiter })
   registerAsrRoutes(app, {
     ...(asr === undefined ? {} : { asr }),
@@ -181,7 +182,7 @@ export async function buildApp({
     config,
     limiter,
   })
-  registerContentRoutes(app, { content, accounts })
+  registerContentRoutes(app, { content, accounts, config, limiter })
   await registerPipelineRoutes(app, { api: pipeline.api, accounts, config, limiter })
   if (config.mediaLocalDir !== undefined) registerMediaRoutes(app, { config, pool })
 

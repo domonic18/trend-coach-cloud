@@ -58,6 +58,10 @@ function env(overrides: Record<string, string> = {}): Record<string, string> {
     RATE_LIMIT_INVITE_PER_MINUTE: '1000',
     RATE_LIMIT_DEVICE_APPROVE_PER_MINUTE: '1000',
     RATE_LIMIT_ASR_PER_MINUTE: '1000',
+    RATE_LIMIT_DEVICE_TOKEN_PER_MINUTE: '1000',
+    RATE_LIMIT_REFRESH_PER_MINUTE: '1000',
+    RATE_LIMIT_CATALOG_PER_MINUTE: '1000',
+    RATE_LIMIT_CONTENT_PER_MINUTE: '1000',
     ASR_API_KEY: 'test-asr-key',
     ...overrides,
   }
@@ -1799,6 +1803,69 @@ test('检索限流：单设备超出配额返回 429', async () => {
       payload: { query: '均线' },
     })
     assert.equal(second.statusCode, 429)
+  } finally {
+    await limited.close()
+  }
+})
+
+test('设备轮询与刷新限流：超出配额返回 429', async () => {
+  const limited = await buildApp({
+    config: loadConfig(env({
+      RATE_LIMIT_DEVICE_TOKEN_PER_MINUTE: '1',
+      RATE_LIMIT_REFRESH_PER_MINUTE: '1',
+    })),
+    pool,
+  })
+  try {
+    const poll = () => limited.inject({
+      method: 'POST',
+      url: '/v1/auth/device/token',
+      payload: { deviceCode: 'invalid-device-code' },
+    })
+    const firstPoll = await poll()
+    assert.notEqual(firstPoll.statusCode, 429)
+    const secondPoll = await poll()
+    assert.equal(secondPoll.statusCode, 429)
+    assert.equal(secondPoll.headers['retry-after'], '60')
+
+    const refresh = () => limited.inject({
+      method: 'POST',
+      url: '/v1/auth/refresh',
+      payload: { refreshToken: 'invalid-refresh-token', deviceId: 'refresh-limit-0001' },
+    })
+    const firstRefresh = await refresh()
+    assert.notEqual(firstRefresh.statusCode, 429)
+    const secondRefresh = await refresh()
+    assert.equal(secondRefresh.statusCode, 429)
+  } finally {
+    await limited.close()
+  }
+})
+
+test('体系与后台内容读取限流：超出配额返回 429', async () => {
+  const limited = await buildApp({
+    config: loadConfig(env({
+      RATE_LIMIT_CATALOG_PER_MINUTE: '1',
+      RATE_LIMIT_CONTENT_PER_MINUTE: '1',
+    })),
+    pool,
+  })
+  try {
+    const catalog = () => limited.inject({
+      method: 'GET',
+      url: '/v1/catalog/courses',
+      headers: authHeaders(mainGrant),
+    })
+    assert.equal((await catalog()).statusCode, 200)
+    assert.equal((await catalog()).statusCode, 429)
+
+    const content = () => limited.inject({
+      method: 'GET',
+      url: '/v1/admin/content/courses',
+      headers: adminHeaders(),
+    })
+    assert.equal((await content()).statusCode, 200)
+    assert.equal((await content()).statusCode, 429)
   } finally {
     await limited.close()
   }
