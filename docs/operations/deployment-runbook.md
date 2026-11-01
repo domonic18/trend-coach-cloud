@@ -9,8 +9,7 @@
 ```
 Internet ── Caddy(80/443, 自动 TLS) ── app(Fastify, 3939, 镜像内置 ffmpeg/ffprobe)
                                           ├── db(PostgreSQL 17 + pgvector)
-                                          ├── pipeline-storage volume（源视频 / 工作区）
-                                          ├── pipeline-hls volume（HLS，供 CDN 回源）
+                                          ├── pipeline-data volume（/data：源视频、工作区、HLS）
                                           └── 媒体：生产走 CDN；仅本地 staging 由 app 的 /media 提供
 Prometheus(可选) ── 抓取 app:/metrics（Bearer METRICS_TOKEN）
 Grafana(可选) ── 查询 Prometheus
@@ -87,7 +86,7 @@ curl -fsS -X POST https://$DOMAIN/v1/auth/device/approve \
 ```
 
 - 内容管理控制台：浏览器打开 `https://$DOMAIN/admin/`，用 operator/admin 账号登录，管理课程、章节、知识点、文章与片段。镜像构建已包含 `web/admin` 并输出到 `dist/admin`；服务端只在 `dist/admin/index.html` 存在时挂载 `/admin/`，缺失时该路径 404 而 API 不受影响。前端是纯静态 SPA，会话令牌存 `sessionStorage`，关标签即失效，不使用 Cookie，因此 `/admin/` 反向代理无需额外鉴权配置（接口本身仍校验 Bearer）。
-- 视频建课：「视频建课」页创建 draft 课程与素材 → 上传 → 处理 → 查看转写 → 生成 → 预览 → 应用到草稿 → 发布。发布前会按配置重建索引；索引失败返回 `503` 且课程保持 draft。源视频默认保留在 `pipeline-storage` 卷，清理策略未冻结前不要手工删除 `sources/`。
+- 视频建课：「视频建课」页创建 draft 课程与素材 → 上传 → 处理 → 查看转写 → 生成 → 预览 → 应用到草稿 → 发布。发布前会按配置重建索引；索引失败返回 `503` 且课程保持 draft。源视频默认保留在 `pipeline_data` 卷，清理策略未冻结前不要手工删除 `sources/`。
 
 ## 4. TLS
 
@@ -186,10 +185,9 @@ DOMAIN=localhost
 MEDIA_HOST_DIR=../dsh-plugin-trend-coach/spike/media
 MEDIA_LOCAL_DIR=/media
 PIPELINE_ENABLED=true
-PIPELINE_STORAGE_DIR=/data/pipeline
+# 两目录必须在同一个 /media 挂载点内，HLS 才能原子 rename
+PIPELINE_STORAGE_DIR=/media/pipeline
 PIPELINE_HLS_DIR=/media
-PIPELINE_STORAGE_HOST_DIR=./pipeline-data
-# 本地 staging 的 HLS 与媒体共用同一宿主目录
 ```
 
 ```bash
@@ -229,3 +227,4 @@ curl -fsS -H "Authorization: Bearer $SESSION_TOKEN" \
 - `sources/<assetId>/source` 默认保留；`work/<assetId>/` 成功或失败后清理。
 - 磁盘告警阈值建议 ≤75%；不要手工删除 `sources/`，除非已确认版权与重试需求。
 - `PIPELINE_MAX_CONCURRENT_JOBS` 默认 1；提高前先评估 CPU 与内存，转码阻塞会影响 API 延迟。
+- 默认使用挂到 `/data` 的 `pipeline_data` 命名卷；镜像预建 `/data/pipeline`、`/data/hls` 并归属 `node`（uid 1000），卷会继承属主。改用 `PIPELINE_HOST_DIR` 绑定宿主目录时先 `chown -R 1000:1000`；不要让两目录落在不同挂载点，否则 HLS 的原子 rename 会因跨设备失败。

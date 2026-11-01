@@ -36,7 +36,10 @@ services:
         condition: service_healthy
     volumes:
       # 仅本地 staging 验证需要；生产媒体走 CDN，不挂载。
-      - ${MEDIA_HOST_DIR:-./media}:/media:ro
+      # 本地 staging 的 PIPELINE_HLS_DIR=/media，故需可写。
+      - ${MEDIA_HOST_DIR:-./media}:/media
+      # 管线工作区与 HLS 输出必须在同一挂载点内，HLS 才能原子 rename。
+      - ${PIPELINE_HOST_DIR:-pipeline_data}:/data
     networks: [edge, backend]
 
   caddy:
@@ -63,5 +66,6 @@ networks:
 
 volumes:
   pgdata:
+  pipeline_data:
   caddy_data:
   caddy_config:

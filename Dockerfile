@@ -11,6 +11,10 @@ RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
+# 管线在 runtime 直接 spawn ffmpeg/ffprobe；预建目录让命名卷继承 node 属主。
+RUN apk add --no-cache ffmpeg \
+  && mkdir -p /data/pipeline /data/hls \
+  && chown -R node:node /data
 WORKDIR /app
 COPY --from=build /app/package.json ./
 COPY --from=build /app/node_modules ./node_modules
