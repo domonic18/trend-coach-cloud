@@ -1,8 +1,8 @@
 import { readdir, readFile } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import type pg from 'pg'
 
-const migrationsDir = fileURLToPath(new URL('../migrations/', import.meta.url))
+const migrationsDir = join(process.cwd(), 'migrations')
 
 export async function runMigrations(pool: pg.Pool, { reset = false } = {}): Promise<string[]> {
   const lockClient = await pool.connect()
@@ -26,7 +26,7 @@ export async function runMigrations(pool: pg.Pool, { reset = false } = {}): Prom
     const files = (await readdir(migrationsDir)).filter(name => name.endsWith('.sql')).sort()
     for (const file of files) {
       if (applied.has(file)) continue
-      const sql = await readFile(`${migrationsDir}${file}`, 'utf8')
+      const sql = await readFile(join(migrationsDir, file), 'utf8')
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
