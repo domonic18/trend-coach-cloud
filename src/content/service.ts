@@ -7,10 +7,10 @@ export const CONTENT_STATUSES = ['draft', 'published', 'archived'] as const
 export type ContentStatus = (typeof CONTENT_STATUSES)[number]
 
 const ID = /^[A-Za-z0-9._-]{1,64}$/
-const SEGMENT_ID = /^seg-[A-Za-z0-9._-]{1,76}$/
-const MAX_TITLE = 200
-const MAX_TEXT = 4000
-const MAX_ARTICLE = 20000
+export const SEGMENT_ID = /^seg-[A-Za-z0-9._-]{1,76}$/
+export const MAX_TITLE = 200
+export const MAX_TEXT = 4000
+export const MAX_ARTICLE = 20000
 const MAX_QUERY = 100
 const MAX_START = 86400
 const MAX_END = 86400

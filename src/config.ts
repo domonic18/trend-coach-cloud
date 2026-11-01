@@ -1,3 +1,5 @@
+import { resolve } from 'node:path'
+
 export const APP_ENVS = ['local', 'staging', 'production'] as const
 export type AppEnv = (typeof APP_ENVS)[number]
 
@@ -19,6 +21,42 @@ export interface AsrConfig {
   apiKey: string
   model: string
   timeoutMs: number
+}
+
+export interface PipelineConfig {
+  enabled: true
+  storageDir: string
+  hlsDir: string
+  ffmpegPath: string
+  ffprobePath: string
+  maxUploadBytes: number
+  maxSourceSeconds: number
+  maxConcurrentJobs: number
+  asrConcurrency: number
+  llmConcurrency: number
+  pollIntervalMs: number
+  heartbeatMs: number
+  staleJobMs: number
+  maxAttempts: number
+  ffmpegTimeoutMs: number
+  audioTimeoutMs: number
+  transcriptSegmentMaxSec: number
+  segmentDraftMaxSec: number
+  generationWindowSec: number
+  generationMinConfidence: number
+  generationMaxWindows: number
+  generationMaxKps: number
+  generationMaxArticles: number
+}
+
+export interface LlmConfig {
+  baseUrl: string
+  model: string
+  apiKey?: string
+  timeoutMs: number
+  temperature: number
+  maxTokens: number
+  maxInputChars: number
 }
 
 export interface AppConfig {
@@ -43,6 +81,9 @@ export interface AppConfig {
   bootstrapAdmin?: { username: string; password: string }
   embedding?: EmbeddingConfig
   asr?: AsrConfig
+  asrLongTimeoutMs: number
+  pipeline?: PipelineConfig
+  llm?: LlmConfig
   searchMinSimilarity: number
   searchMinConfidence: number
   rrfK: number
@@ -54,6 +95,7 @@ export interface AppConfig {
   rateLimitInvitePerMinute: number
   rateLimitDeviceApprovePerMinute: number
   rateLimitAsrPerMinute: number
+  rateLimitPipelinePerMinute: number
 }
 
 type Env = Record<string, string | undefined>
@@ -83,6 +125,14 @@ function float(env: Env, key: string, fallback: number): number {
 function text(env: Env, key: string): string | undefined {
   const raw = env[key]?.trim()
   return raw === '' ? undefined : raw
+}
+
+function bool(env: Env, key: string, fallback: boolean): boolean {
+  const raw = env[key]?.trim()
+  if (raw === undefined || raw === '') return fallback
+  if (raw === 'true' || raw === '1') return true
+  if (raw === 'false' || raw === '0') return false
+  fail(`${key} 必须是 true/false`)
 }
 
 function isLoopback(hostname: string): boolean {
@@ -183,6 +233,76 @@ export function loadConfig(env: Env = process.env): AppConfig {
         timeoutMs: int(env, 'ASR_TIMEOUT_MS', 30_000),
       }
 
+  const pipelineEnabled = bool(env, 'PIPELINE_ENABLED', false)
+  let pipeline: PipelineConfig | undefined
+  if (pipelineEnabled) {
+    const storageRaw = text(env, 'PIPELINE_STORAGE_DIR') ?? fail('PIPELINE_STORAGE_DIR 在启用管线时必填')
+    const hlsRaw = text(env, 'PIPELINE_HLS_DIR') ?? fail('PIPELINE_HLS_DIR 在启用管线时必填')
+    const storageDir = resolve(storageRaw)
+    const hlsDir = resolve(hlsRaw)
+    if (storageDir === hlsDir) fail('PIPELINE_STORAGE_DIR 与 PIPELINE_HLS_DIR 不能相同')
+    if (mediaLocalDir !== undefined && hlsDir !== resolve(mediaLocalDir)) {
+      fail('PIPELINE_HLS_DIR 必须与 MEDIA_LOCAL_DIR 相同')
+    }
+    const heartbeatMs = int(env, 'PIPELINE_HEARTBEAT_MS', 10_000, { min: 1000 })
+    const staleJobMs = int(env, 'PIPELINE_STALE_JOB_MS', 120_000, { min: 1000 })
+    if (staleJobMs <= heartbeatMs) fail('PIPELINE_STALE_JOB_MS 必须大于 PIPELINE_HEARTBEAT_MS')
+    const generationMinConfidence = float(env, 'GENERATION_MIN_CONFIDENCE', 0.6)
+    if (generationMinConfidence < 0 || generationMinConfidence > 1) {
+      fail('GENERATION_MIN_CONFIDENCE 必须在 0–1 之间')
+    }
+    pipeline = {
+      enabled: true,
+      storageDir,
+      hlsDir,
+      ffmpegPath: text(env, 'FFMPEG_PATH') ?? 'ffmpeg',
+      ffprobePath: text(env, 'FFPROBE_PATH') ?? 'ffprobe',
+      maxUploadBytes: int(env, 'PIPELINE_MAX_UPLOAD_BYTES', 2 * 1024 * 1024 * 1024, { min: 1024 }),
+      maxSourceSeconds: int(env, 'PIPELINE_MAX_SOURCE_SECONDS', 4 * 60 * 60, { min: 1 }),
+      maxConcurrentJobs: int(env, 'PIPELINE_MAX_CONCURRENT_JOBS', 1, { max: 16 }),
+      asrConcurrency: int(env, 'PIPELINE_ASR_CONCURRENCY', 2, { max: 16 }),
+      llmConcurrency: int(env, 'PIPELINE_LLM_CONCURRENCY', 2, { max: 16 }),
+      pollIntervalMs: int(env, 'PIPELINE_POLL_INTERVAL_MS', 2000, { min: 100 }),
+      heartbeatMs,
+      staleJobMs,
+      maxAttempts: int(env, 'PIPELINE_MAX_ATTEMPTS', 3, { max: 10 }),
+      ffmpegTimeoutMs: int(env, 'PIPELINE_FFMPEG_TIMEOUT_MS', 2 * 60 * 60 * 1000, { min: 1000 }),
+      audioTimeoutMs: int(env, 'PIPELINE_AUDIO_TIMEOUT_MS', 10 * 60 * 1000, { min: 1000 }),
+      transcriptSegmentMaxSec: int(env, 'TRANSCRIPT_SEGMENT_MAX_SEC', 30, { max: 480 }),
+      segmentDraftMaxSec: int(env, 'SEGMENT_DRAFT_MAX_SEC', 120, { max: 600 }),
+      generationWindowSec: int(env, 'GENERATION_WINDOW_SEC', 600, { min: 60 }),
+      generationMinConfidence,
+      generationMaxWindows: int(env, 'GENERATION_MAX_WINDOWS', 24, { max: 200 }),
+      generationMaxKps: int(env, 'GENERATION_MAX_KPS', 80, { max: 500 }),
+      generationMaxArticles: int(env, 'GENERATION_MAX_ARTICLES', 80, { max: 500 }),
+    }
+  }
+
+  const llmBaseRaw = text(env, 'CONTENT_LLM_BASE_URL')
+  const llmModel = text(env, 'CONTENT_LLM_MODEL')
+  if ((llmBaseRaw === undefined) !== (llmModel === undefined)) {
+    fail('CONTENT_LLM_BASE_URL 与 CONTENT_LLM_MODEL 必须同时配置')
+  }
+  let llm: LlmConfig | undefined
+  if (llmBaseRaw !== undefined && llmModel !== undefined) {
+    const baseUrl = parseUrl('CONTENT_LLM_BASE_URL', llmBaseRaw, appEnv)
+    const apiKey = text(env, 'CONTENT_LLM_API_KEY')
+    if (appEnv !== 'local' && !isLoopback(baseUrl.hostname) && apiKey === undefined) {
+      fail(`CONTENT_LLM_API_KEY 在 ${appEnv} 必填`)
+    }
+    const temperature = float(env, 'CONTENT_LLM_TEMPERATURE', 0.2)
+    if (temperature < 0 || temperature > 2) fail('CONTENT_LLM_TEMPERATURE 必须在 0–2 之间')
+    llm = {
+      baseUrl: baseUrl.toString().replace(/\/+$/, ''),
+      model: llmModel,
+      ...(apiKey === undefined ? {} : { apiKey }),
+      timeoutMs: int(env, 'CONTENT_LLM_TIMEOUT_MS', 120_000, { min: 1000 }),
+      temperature,
+      maxTokens: int(env, 'CONTENT_LLM_MAX_TOKENS', 8192, { max: 1_000_000 }),
+      maxInputChars: int(env, 'CONTENT_LLM_MAX_INPUT_CHARS', 120_000, { min: 1000 }),
+    }
+  }
+
   const searchMinSimilarity = float(env, 'SEARCH_MIN_SIMILARITY', 0.05)
   const searchMinConfidence = float(env, 'SEARCH_MIN_CONFIDENCE', 0.15)
   if (searchMinSimilarity < 0 || searchMinSimilarity > 1) fail('SEARCH_MIN_SIMILARITY 必须在 0–1 之间')
@@ -210,7 +330,10 @@ export function loadConfig(env: Env = process.env): AppConfig {
     inviteTtlSec: int(env, 'INVITE_TTL_SECONDS', 7 * 24 * 60 * 60, { min: 3600 }),
     ...(bootstrapAdmin === undefined ? {} : { bootstrapAdmin }),
     ...(embedding === undefined ? {} : { embedding }),
+    asrLongTimeoutMs: int(env, 'ASR_LONG_TIMEOUT_MS', 600_000, { min: 1000 }),
     ...(asr === undefined ? {} : { asr }),
+    ...(pipeline === undefined ? {} : { pipeline }),
+    ...(llm === undefined ? {} : { llm }),
     searchMinSimilarity,
     searchMinConfidence,
     rrfK: int(env, 'RRF_K', 60),
@@ -222,5 +345,6 @@ export function loadConfig(env: Env = process.env): AppConfig {
     rateLimitInvitePerMinute: int(env, 'RATE_LIMIT_INVITE_PER_MINUTE', 10),
     rateLimitDeviceApprovePerMinute: int(env, 'RATE_LIMIT_DEVICE_APPROVE_PER_MINUTE', 10),
     rateLimitAsrPerMinute: int(env, 'RATE_LIMIT_ASR_PER_MINUTE', 20),
+    rateLimitPipelinePerMinute: int(env, 'RATE_LIMIT_PIPELINE_PER_MINUTE', 30),
   }
 }

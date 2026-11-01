@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { resolve } from 'node:path'
 import test from 'node:test'
 import { hashPassword, verifyPassword } from '../src/accounts/password.js'
 import { loadConfig } from '../src/config.js'
@@ -205,4 +206,109 @@ test('事件白名单：字段、名称与时间范围', () => {
     }),
     /occurredAt out of range/,
   )
+})
+
+test('管线默认关闭；启用时要求成对目录且 HLS 目录与媒体目录一致', () => {
+  const disabled = loadConfig(baseEnv)
+  assert.equal(disabled.pipeline, undefined)
+  assert.equal(disabled.llm, undefined)
+  assert.equal(disabled.asrLongTimeoutMs, 600_000)
+  assert.equal(disabled.rateLimitPipelinePerMinute, 30)
+
+  assert.throws(() => loadConfig({ ...baseEnv, PIPELINE_ENABLED: 'yes' }), /true\/false/)
+  assert.throws(() => loadConfig({ ...baseEnv, PIPELINE_ENABLED: 'true' }), /PIPELINE_STORAGE_DIR/)
+  assert.throws(
+    () => loadConfig({ ...baseEnv, PIPELINE_ENABLED: 'true', PIPELINE_STORAGE_DIR: '/tmp/pipeline' }),
+    /PIPELINE_HLS_DIR/,
+  )
+  assert.throws(
+    () => loadConfig({
+      ...baseEnv,
+      PIPELINE_ENABLED: 'true',
+      PIPELINE_STORAGE_DIR: '/tmp/pipeline',
+      PIPELINE_HLS_DIR: '/tmp/pipeline/',
+    }),
+    /不能相同/,
+  )
+  assert.throws(
+    () => loadConfig({
+      ...baseEnv,
+      MEDIA_LOCAL_DIR: '/srv/media',
+      PIPELINE_ENABLED: 'true',
+      PIPELINE_STORAGE_DIR: '/srv/pipeline',
+      PIPELINE_HLS_DIR: '/srv/hls',
+    }),
+    /MEDIA_LOCAL_DIR/,
+  )
+  assert.throws(
+    () => loadConfig({
+      ...baseEnv,
+      PIPELINE_ENABLED: 'true',
+      PIPELINE_STORAGE_DIR: '/tmp/pipeline',
+      PIPELINE_HLS_DIR: '/tmp/hls',
+      PIPELINE_HEARTBEAT_MS: '200000',
+      PIPELINE_STALE_JOB_MS: '1000',
+    }),
+    /必须大于/,
+  )
+
+  const config = loadConfig({
+    ...baseEnv,
+    MEDIA_LOCAL_DIR: '/srv/media/',
+    PIPELINE_ENABLED: 'true',
+    PIPELINE_STORAGE_DIR: '/srv/pipeline',
+    PIPELINE_HLS_DIR: '/srv/media',
+    PIPELINE_MAX_UPLOAD_BYTES: '1024',
+    RATE_LIMIT_PIPELINE_PER_MINUTE: '5',
+  })
+  assert.equal(config.pipeline?.storageDir, resolve('/srv/pipeline'))
+  assert.equal(config.pipeline?.hlsDir, resolve('/srv/media'))
+  assert.equal(config.pipeline?.maxUploadBytes, 1024)
+  assert.equal(config.pipeline?.maxAttempts, 3)
+  assert.equal(config.pipeline?.generationMinConfidence, 0.6)
+  assert.equal(config.rateLimitPipelinePerMinute, 5)
+})
+
+test('内容 LLM 必须成对配置，非本机地址要求 key', () => {
+  assert.throws(
+    () => loadConfig({ ...baseEnv, CONTENT_LLM_BASE_URL: 'https://llm.example.com/v1' }),
+    /同时配置/,
+  )
+  assert.throws(
+    () => loadConfig({ ...baseEnv, CONTENT_LLM_MODEL: 'qwen' }),
+    /同时配置/,
+  )
+  assert.throws(
+    () => loadConfig({
+      ...baseEnv,
+      APP_ENV: 'staging',
+      PUBLIC_BASE_URL: 'https://api.example.com',
+      ASR_API_KEY: 'test-asr-key',
+      CONTENT_LLM_BASE_URL: 'https://llm.example.com/v1',
+      CONTENT_LLM_MODEL: 'qwen',
+    }),
+    /CONTENT_LLM_API_KEY/,
+  )
+  assert.throws(
+    () => loadConfig({
+      ...baseEnv,
+      APP_ENV: 'staging',
+      PUBLIC_BASE_URL: 'https://api.example.com',
+      ASR_API_KEY: 'test-asr-key',
+      CONTENT_LLM_BASE_URL: 'http://llm.example.com/v1',
+      CONTENT_LLM_MODEL: 'qwen',
+      CONTENT_LLM_API_KEY: 'llm-key',
+    }),
+    /HTTPS/,
+  )
+  const config = loadConfig({
+    ...baseEnv,
+    CONTENT_LLM_BASE_URL: 'https://llm.example.com/v1/',
+    CONTENT_LLM_MODEL: 'qwen',
+    CONTENT_LLM_API_KEY: 'llm-key',
+    CONTENT_LLM_TEMPERATURE: '0.4',
+  })
+  assert.equal(config.llm?.baseUrl, 'https://llm.example.com/v1')
+  assert.equal(config.llm?.temperature, 0.4)
+  assert.equal(config.llm?.maxTokens, 8192)
 })
