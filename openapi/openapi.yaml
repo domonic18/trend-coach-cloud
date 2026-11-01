@@ -271,7 +271,7 @@ components:
     CatalogChapter:
       type: object
       additionalProperties: false
-      required: [chapterId, title, position, knowledgePoints]
+      required: [chapterId, title, position, hasArticle, figureCount, knowledgePoints]
       properties:
         chapterId:
           type: string
@@ -281,6 +281,12 @@ components:
           maxLength: 200
         position:
           type: integer
+        hasArticle:
+          type: boolean
+        figureCount:
+          type: integer
+          minimum: 0
+          maximum: 3
         knowledgePoints:
           type: array
           items:
@@ -289,8 +295,11 @@ components:
     CatalogCourse:
       type: object
       additionalProperties: false
-      required: [courseId, title, chapters]
+      required: [contractVersion, courseId, title, chapters]
       properties:
+        contractVersion:
+          type: integer
+          minimum: 1
         courseId:
           type: string
           pattern: '^[A-Za-z0-9._-]{1,64}$'
@@ -304,7 +313,7 @@ components:
           items:
             $ref: '#/components/schemas/CatalogChapter'
 
-    KnowledgePointArticle:
+    ChapterArticle:
       type: object
       additionalProperties: false
       required: [markdown, version, publishedAt]
@@ -313,6 +322,7 @@ components:
           type: string
           minLength: 1
           maxLength: 20000
+          description: 仅 Markdown 子集；图片引用只允许 ![alt](figure:figureId)。
         version:
           type: integer
           minimum: 1
@@ -320,10 +330,73 @@ components:
           type: integer
           description: 毫秒时间戳
 
+    ChapterFigure:
+      type: object
+      additionalProperties: false
+      required: [url, width, height, alt]
+      properties:
+        url:
+          type: string
+          description: 短时签名地址，默认 10 分钟；过期后重新请求本章。
+        width:
+          type: integer
+          minimum: 800
+        height:
+          type: integer
+          minimum: 800
+        alt:
+          type: string
+          minLength: 1
+          maxLength: 200
+        caption:
+          type: string
+          minLength: 1
+          maxLength: 200
+
+    CatalogChapterArticle:
+      type: object
+      additionalProperties: false
+      required: [chapterId, courseId, title, article, figures, adjacentChapters]
+      properties:
+        chapterId:
+          type: string
+        courseId:
+          type: string
+          pattern: '^[A-Za-z0-9._-]{1,64}$'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        article:
+          oneOf:
+            - $ref: '#/components/schemas/ChapterArticle'
+            - type: 'null'
+        figures:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ChapterFigure'
+        adjacentChapters:
+          type: array
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/RelatedChapter'
+
+    RelatedChapter:
+      type: object
+      additionalProperties: false
+      required: [chapterId, title]
+      properties:
+        chapterId:
+          type: string
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+
     KnowledgePointDetail:
       type: object
       additionalProperties: false
-      required: [knowledgePointId, courseId, chapterId, title, article, adjacentKnowledgePoints]
+      required: [knowledgePointId, courseId, chapterId, title, adjacentKnowledgePoints]
       properties:
         knowledgePointId:
           type: string
@@ -337,10 +410,6 @@ components:
           type: string
           minLength: 1
           maxLength: 200
-        article:
-          oneOf:
-            - $ref: '#/components/schemas/KnowledgePointArticle'
-            - type: 'null'
         segmentId:
           type: string
           pattern: '^seg-[A-Za-z0-9._-]+$'
@@ -561,7 +630,9 @@ components:
     AdminCourseSummary:
       type: object
       additionalProperties: false
-      required: [courseId, title, status, chapterCount, knowledgePointCount, segmentCount, articleCount]
+      required:
+        [courseId, title, status, chapterCount, knowledgePointCount, segmentCount,
+         chapterArticleCount, figureCount]
       properties:
         courseId:
           type: string
@@ -578,7 +649,10 @@ components:
         segmentCount:
           type: integer
           minimum: 0
-        articleCount:
+        chapterArticleCount:
+          type: integer
+          minimum: 0
+        figureCount:
           type: integer
           minimum: 0
 
@@ -615,7 +689,7 @@ components:
     AdminKnowledgePoint:
       type: object
       additionalProperties: false
-      required: [knowledgePointId, title, position, segmentCount, article]
+      required: [knowledgePointId, title, position, segmentCount]
       properties:
         knowledgePointId:
           type: string
@@ -626,10 +700,6 @@ components:
         segmentCount:
           type: integer
           minimum: 0
-        article:
-          oneOf:
-            - $ref: '#/components/schemas/AdminArticleMeta'
-            - type: 'null'
 
     AdminChapter:
       type: object
@@ -646,7 +716,7 @@ components:
     AdminChapterTree:
       type: object
       additionalProperties: false
-      required: [chapterId, title, position, knowledgePoints]
+      required: [chapterId, title, position, article, figureCount, knowledgePoints]
       properties:
         chapterId:
           type: string
@@ -654,6 +724,13 @@ components:
           type: string
         position:
           type: integer
+        article:
+          oneOf:
+            - $ref: '#/components/schemas/AdminArticleMeta'
+            - type: 'null'
+        figureCount:
+          type: integer
+          minimum: 0
         knowledgePoints:
           type: array
           items:
@@ -1015,11 +1092,11 @@ components:
 
     PipelineJobKind:
       type: string
-      enum: [ingest, generate]
+      enum: [ingest, generate, illustrate]
 
     PipelineJobStage:
       type: string
-      enum: [queued, probe, transcode, transcribe, structure, generate, finalize, done]
+      enum: [queued, probe, transcode, transcribe, structure, generate, figure_plan, figure_render, finalize, done]
 
     PipelineJob:
       type: object
@@ -1032,7 +1109,7 @@ components:
           type: string
           pattern: '^job_[0-9a-f]{16}$'
         assetId:
-          type: string
+          type: [string, 'null']
         courseId:
           type: string
         kind:
@@ -1074,7 +1151,7 @@ components:
           type: string
           pattern: '^job_[0-9a-f]{16}$'
         assetId:
-          type: string
+          type: [string, 'null']
         courseId:
           type: string
         kind:
@@ -1202,12 +1279,35 @@ components:
       type: string
       enum: [draft, applied, discarded, failed]
 
+    GenerationCounts:
+      type: object
+      additionalProperties: false
+      required: [chapters, knowledgePoints, chapterArticles, figures, segments, needsReview]
+      properties:
+        chapters:
+          type: integer
+          minimum: 0
+        knowledgePoints:
+          type: integer
+          minimum: 0
+        chapterArticles:
+          type: integer
+          minimum: 0
+        figures:
+          type: integer
+          minimum: 0
+        segments:
+          type: integer
+          minimum: 0
+        needsReview:
+          type: integer
+          minimum: 0
+
     GenerationSummary:
       type: object
       additionalProperties: false
       required:
-        [generationId, assetId, courseId, status, promptVersion, model, chapters,
-         knowledgePoints, segments, needsReview, createdAt, updatedAt, appliedAt]
+        [generationId, assetId, courseId, status, promptVersion, model, counts, createdAt, appliedAt]
       properties:
         generationId:
           type: string
@@ -1222,21 +1322,9 @@ components:
           type: string
         model:
           type: string
-        chapters:
-          type: integer
-          minimum: 0
-        knowledgePoints:
-          type: integer
-          minimum: 0
-        segments:
-          type: integer
-          minimum: 0
-        needsReview:
-          type: integer
-          minimum: 0
+        counts:
+          $ref: '#/components/schemas/GenerationCounts'
         createdAt:
-          type: integer
-        updatedAt:
           type: integer
         appliedAt:
           type: [integer, 'null']
@@ -1244,7 +1332,7 @@ components:
     GenerationChapterPreview:
       type: object
       additionalProperties: false
-      required: [key, title, position]
+      required: [key, title, position, articleLength, hasArticle, figureCount]
       properties:
         key:
           type: string
@@ -1253,12 +1341,20 @@ components:
         position:
           type: integer
           minimum: 0
+        articleLength:
+          type: integer
+          minimum: 0
+        hasArticle:
+          type: boolean
+        figureCount:
+          type: integer
+          minimum: 0
 
     GenerationKnowledgePointPreview:
       type: object
       additionalProperties: false
       required:
-        [key, chapterKey, title, position, confidence, needsReview, reviewReasons, hasArticle]
+        [key, chapterKey, title, position, confidence, needsReview, reviewReasons]
       properties:
         key:
           type: string
@@ -1279,7 +1375,24 @@ components:
           type: array
           items:
             type: string
-        hasArticle:
+
+    GenerationFigurePreview:
+      type: object
+      additionalProperties: false
+      required: [key, chapterKey, kind, caption, candidateCount, needsReview]
+      properties:
+        key:
+          type: string
+        chapterKey:
+          type: string
+        kind:
+          type: string
+        caption:
+          type: string
+        candidateCount:
+          type: integer
+          minimum: 0
+        needsReview:
           type: boolean
 
     GenerationSegmentPreview:
@@ -1303,7 +1416,7 @@ components:
     GenerationPreview:
       type: object
       additionalProperties: false
-      required: [generation, chapters, knowledgePoints, segments]
+      required: [generation, chapters, knowledgePoints, figures, segments]
       properties:
         generation:
           $ref: '#/components/schemas/GenerationSummary'
@@ -1315,6 +1428,10 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/GenerationKnowledgePointPreview'
+        figures:
+          type: array
+          items:
+            $ref: '#/components/schemas/GenerationFigurePreview'
         segments:
           type: array
           items:
@@ -1323,13 +1440,17 @@ components:
     AppliedContent:
       type: object
       additionalProperties: false
-      required: [chapters, knowledgePoints, segments]
+      required: [chapters, knowledgePoints, figures, segments]
       properties:
         chapters:
           type: object
           additionalProperties:
             type: string
         knowledgePoints:
+          type: object
+          additionalProperties:
+            type: string
+        figures:
           type: object
           additionalProperties:
             type: string
@@ -1341,46 +1462,229 @@ components:
     GenerationApplyResult:
       type: object
       additionalProperties: false
-      required: [generation, applied, alreadyApplied]
+      required:
+        [generationId, alreadyApplied, courseId, chapters, knowledgePoints, figures,
+         segments, chapterArticles, figuresApplied]
       properties:
-        generation:
-          $ref: '#/components/schemas/GenerationSummary'
-        applied:
-          $ref: '#/components/schemas/AppliedContent'
+        generationId:
+          type: string
+          pattern: '^gen_[0-9a-f]{16}$'
         alreadyApplied:
           type: boolean
+        courseId:
+          type: string
+        chapters:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [chapterId, key]
+            properties:
+              chapterId:
+                type: string
+              key:
+                type: string
+        knowledgePoints:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [knowledgePointId, key]
+            properties:
+              knowledgePointId:
+                type: string
+              key:
+                type: string
+        figures:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [figureId, key]
+            properties:
+              figureId:
+                type: string
+              key:
+                type: string
+        segments:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [segmentId, key]
+            properties:
+              segmentId:
+                type: string
+              key:
+                type: string
+        chapterArticles:
+          type: integer
+          minimum: 0
+        figuresApplied:
+          type: integer
+          minimum: 0
 
     CoursePublishResult:
       type: object
       additionalProperties: false
-      required: [courseId, status, articlesPublished, segmentsPublished, indexed, embedded]
+      required: [courseId, published, indexed, embedded, counts]
       properties:
         courseId:
           type: string
-        status:
-          type: string
-          enum: [published]
-        articlesPublished:
-          type: integer
-          minimum: 0
-        segmentsPublished:
-          type: integer
-          minimum: 0
+        published:
+          type: boolean
+          enum: [true]
         indexed:
           type: boolean
         embedded:
           type: integer
           minimum: 0
+        counts:
+          type: object
+          additionalProperties: false
+          required: [chapters, knowledgePoints, chapterArticles, figures, segments]
+          properties:
+            chapters:
+              type: integer
+              minimum: 0
+            knowledgePoints:
+              type: integer
+              minimum: 0
+            chapterArticles:
+              type: integer
+              minimum: 0
+            figures:
+              type: integer
+              minimum: 0
+            segments:
+              type: integer
+              minimum: 0
+
+    FigureStatus:
+      type: string
+      enum: [planned, rendering, ready, failed, published]
+
+    FigureCandidateStatus:
+      type: string
+      enum: [rendering, ready, failed]
+
+    FigureCandidate:
+      type: object
+      additionalProperties: false
+      required:
+        [candidateId, status, width, height, bytes, sourceSec, errorCode, previewUrl]
+      properties:
+        candidateId:
+          type: string
+          pattern: '^cand_[0-9a-f]{8,32}$'
+        status:
+          $ref: '#/components/schemas/FigureCandidateStatus'
+        width:
+          type: [integer, 'null']
+          minimum: 800
+        height:
+          type: [integer, 'null']
+          minimum: 800
+        bytes:
+          type: [integer, 'null']
+          minimum: 1
+        sourceSec:
+          type: [number, 'null']
+          minimum: 0
+        errorCode:
+          type: [string, 'null']
+          maxLength: 64
+        previewUrl:
+          type: [string, 'null']
+          description: 候选图预览地址，仅 ready 时有值。
+
+    Figure:
+      type: object
+      additionalProperties: false
+      required:
+        [figureId, chapterId, kind, caption, status, selectedCandidateId, prompt, model,
+         seed, reviewReasons, candidates]
+      properties:
+        figureId:
+          type: string
+          pattern: '^fig_[0-9a-f]{8}_[A-Za-z0-9._-]+$'
+        chapterId:
+          type: string
+        kind:
+          type: string
+          enum: [keyframe, generated]
+        caption:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          $ref: '#/components/schemas/FigureStatus'
+        selectedCandidateId:
+          type: [string, 'null']
+        prompt:
+          type: [string, 'null']
+        model:
+          type: [string, 'null']
+        seed:
+          type: [integer, 'null']
+        reviewReasons:
+          type: array
+          items:
+            type: string
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/FigureCandidate'
+
+    FigureList:
+      type: object
+      additionalProperties: false
+      required: [figures, total, offset, limit]
+      properties:
+        figures:
+          type: array
+          items:
+            $ref: '#/components/schemas/Figure'
+        total:
+          type: integer
+          minimum: 0
+        offset:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+
+    IllustrateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        chapterIds:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+          description: 缺省时处理该课程全部有教材的章节。
+
+    SelectFigureRequest:
+      type: object
+      additionalProperties: false
+      required: [candidateId]
+      properties:
+        candidateId:
+          type: string
+          pattern: '^cand_[0-9a-f]{8,32}$'
 
     LlmPurpose:
       type: string
-      enum: [content, embedding]
+      enum: [content, embedding, image]
 
     AiTaskKey:
       type: string
       enum:
-        [content.outline, content.points, content.article,
-         embedding.query, embedding.segment, asr.longform]
+        [content.outline, content.points, content.article, content.chapter_article,
+         content.figure_plan, image.figure, embedding.query, embedding.segment,
+         asr.longform]
 
     LlmProtocol:
       type: string
@@ -1409,7 +1713,7 @@ components:
       required:
         [configId, name, provider, protocol, baseUrl, model, purpose, apiKeyConfigured,
          apiKeyMasked, isDefault, isActive, inputPriceMicrosPer1k, outputPriceMicrosPer1k,
-         lastTestedAt, lastTestStatus, lastTestError, createdAt, updatedAt]
+         imagePriceMicros, lastTestedAt, lastTestStatus, lastTestError, createdAt, updatedAt]
       properties:
         configId:
           type: string
@@ -1441,6 +1745,10 @@ components:
         outputPriceMicrosPer1k:
           type: [integer, 'null']
           minimum: 0
+        imagePriceMicros:
+          type: integer
+          minimum: 0
+          description: 单张图片成本（微美元），默认 120000（¥0.12）。
         lastTestedAt:
           type: [integer, 'null']
         lastTestStatus:
@@ -1489,6 +1797,9 @@ components:
         outputPriceMicrosPer1k:
           type: [integer, 'null']
           minimum: 0
+        imagePriceMicros:
+          type: integer
+          minimum: 0
 
     UpdateLlmConfigRequest:
       type: object
@@ -1523,6 +1834,9 @@ components:
           minimum: 0
         outputPriceMicrosPer1k:
           type: [integer, 'null']
+          minimum: 0
+        imagePriceMicros:
+          type: integer
           minimum: 0
 
     AsrConfig:
@@ -1956,9 +2270,45 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /v1/catalog/courses/{courseId}/chapters/{chapterId}:
+    get:
+      summary: 章节教材与图示
+      description: '只返回已发布章节教材；正文中的 figure: 引用由插件按 figures 映射替换为短时签名地址。'
+      security:
+        - bearerAuth: []
+          deviceId: []
+      parameters:
+        - name: courseId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+        - name: chapterId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+      responses:
+        '200':
+          description: 章节教材；未发布时 article 为 null
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogChapterArticle'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /v1/catalog/knowledge-points/{knowledgePointId}:
     get:
-      summary: 知识点详情与已发布文章
+      summary: 知识点详情与相邻知识点
       security:
         - bearerAuth: []
           deviceId: []
@@ -1971,7 +2321,7 @@ paths:
             pattern: '^[A-Za-z0-9._-]{1,64}$'
       responses:
         '200':
-          description: 知识点详情；无已发布文章时 article 为 null
+          description: 知识点详情；M8 起不再返回文章，正文由章节接口提供
           content:
             application/json:
               schema:
@@ -2778,13 +3128,19 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /v1/admin/content/knowledge-points/{knowledgePointId}/article:
+  /v1/admin/content/courses/{courseId}/chapters/{chapterId}/article:
     get:
-      summary: 读取知识点文章（operator/admin）
+      summary: 读取章节教材（operator/admin）
       security:
         - sessionAuth: []
       parameters:
-        - name: knowledgePointId
+        - name: courseId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+        - name: chapterId
           in: path
           required: true
           schema:
@@ -2792,7 +3148,7 @@ paths:
             pattern: '^[A-Za-z0-9._-]{1,64}$'
       responses:
         '200':
-          description: 文章或 null
+          description: 教材或 null
           content:
             application/json:
               schema:
@@ -2813,12 +3169,18 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     put:
-      summary: 保存知识点文章（operator/admin）
-      description: 每次保存 version+1；发布时写 publishedAt；拒绝可执行 HTML。
+      summary: 保存章节教材（operator/admin）
+      description: 每次保存 version+1；发布时写 publishedAt；图片引用只允许 ![alt](figure:figureId)。
       security:
         - sessionAuth: []
       parameters:
-        - name: knowledgePointId
+        - name: courseId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+        - name: chapterId
           in: path
           required: true
           schema:
@@ -3650,6 +4012,256 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/courses/{courseId}/illustrate:
+    post:
+      summary: 为章节教材生成图示（operator/admin）
+      description: 课程须为 draft 且已有教材；仅成功生成的候选图计入图片预算。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: courseId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IllustrateRequest'
+      responses:
+        '202':
+          description: 已入队
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [job]
+                properties:
+                  job:
+                    $ref: '#/components/schemas/PipelineJob'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/figures:
+    get:
+      summary: 图示列表（operator/admin）
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: courseId
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+        - name: chapterId
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._-]{1,64}$'
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: 图示分页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FigureList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/figures/{figureId}/select:
+    post:
+      summary: 选定图示候选图（operator/admin）
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: figureId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^fig_[0-9a-f]{8}_[A-Za-z0-9._-]+$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SelectFigureRequest'
+      responses:
+        '200':
+          description: 已选定
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [figure]
+                properties:
+                  figure:
+                    $ref: '#/components/schemas/Figure'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/figures/{figureId}/regenerate:
+    post:
+      summary: 重新生成图示候选（operator/admin）
+      description: 重新规划并清空选择；预算不足返回 409 image_budget_exceeded。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: figureId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^fig_[0-9a-f]{8}_[A-Za-z0-9._-]+$'
+      responses:
+        '202':
+          description: 已入队
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [figure]
+                properties:
+                  figure:
+                    $ref: '#/components/schemas/Figure'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/figures/{figureId}:
+    delete:
+      summary: 删除图示（operator/admin）
+      description: 已发布或仍被章节教材引用时返回 409 figure_in_use。
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: figureId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^fig_[0-9a-f]{8}_[A-Za-z0-9._-]+$'
+      responses:
+        '204':
+          description: 已删除
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/admin/content/figure-candidates/{candidateId}:
+    get:
+      summary: 读取候选图原图（operator/admin）
+      security:
+        - sessionAuth: []
+      parameters:
+        - name: candidateId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^cand_[0-9a-f]{8,32}$'
+      responses:
+        '200':
+          description: PNG 或 JPEG 原图
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '503':

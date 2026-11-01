@@ -14,13 +14,13 @@
 | 设备码授权与令牌轮换 | 学员侧内容写接口（一期只读） |
 | 鉴权指标事件接收（M2） | 第三方分析 SDK |
 | 语音转写（M4.2，MiniMax ASR，仅语音→文字） | 学员侧生成式推理 |
-| 视频→课程管线（M1）：上传、转码、长音频转写、切分、文章草稿、人工发布 | 多码率 ABR、对象存储、断点续传、自动发布 |
+| 视频→课程管线（M1/M8）：上传、转码、长音频转写、切分、章节教材与图示草稿、人工发布 | 多码率 ABR、对象存储、断点续传、自动发布 |
 | 公开门户、自助注册/登录与个人中心（M7） | 邮件/短信验证、找回密码、客服工单 |
 | AI 用量、运行链路、任务级主备绑定与自动切换（M7） | 学员侧推理、第三方分析 SDK |
 
 **不耦合 ai-invest**：不进其库、不调其服务、不共享代码与数据；只借鉴 PostgreSQL halfvec + pg_trgm + RRF 的技术选型（PRD D2）。
 
-**内容生产管线现状（2026-11-01）**：M1 视频→课程管线已落地，覆盖素材上传、单码率 HLS、带时间戳长音频转写、章节/知识点/片段切分、文章草稿与人工发布；真实 MiniMax ASR、内容 LLM 与 1024 维 embedding 均已通过链路验收。学员侧契约不受影响。
+**内容生产管线现状（2026-11-01）**：M1 视频→课程管线已落地，覆盖素材上传、单码率 HLS、带时间戳长音频转写、章节/知识点/片段切分、文章草稿与人工发布；真实 MiniMax ASR、内容 LLM 与 1024 维 embedding 均已通过链路验收。M8 设计已定：阅读层改为章节教材并新增图示（关键帧 + 文生图），学员体系契约升级到 `contractVersion=2`；旧课程直接作废重跑。
 
 ## 2. 通用约定
 
@@ -147,6 +147,7 @@ Content-Type: application/json
 ```http
 GET /v1/catalog/courses
 GET /v1/catalog/courses/{courseId}
+GET /v1/catalog/courses/{courseId}/chapters/{chapterId}   # M8 新增
 GET /v1/catalog/knowledge-points/{knowledgePointId}
 PUT /v1/progress/knowledge-points/{knowledgePointId}
 Authorization: Bearer <token>
@@ -167,16 +168,19 @@ x-device-id: <deviceId>
 }
 ```
 
-课程树响应（知识点内联进度）：
+课程树响应（知识点内联进度；**不内联章节正文**，按需拉取）：
 
 ```jsonc
 {
+  "contractVersion": 2,
   "courseId": "string",
   "title": "string",
   "chapters": [{
     "chapterId": "string",
     "title": "string",
     "position": 0,
+    "hasArticle": true,
+    "figureCount": 2,
     "knowledgePoints": [{
       "knowledgePointId": "string",
       "title": "string",
@@ -189,7 +193,32 @@ x-device-id: <deviceId>
 }
 ```
 
-知识点详情响应：
+章节教材响应（M8 新增；正文中的 `![alt](figure:<figureId>)` 由插件替换为 `figures[figureId].url`）：
+
+```jsonc
+{
+  "chapterId": "string",
+  "courseId": "string",
+  "title": "string",
+  "article": {
+    "markdown": "# 章标题\n\n...\n\n![均线交叉示意](figure:fig_ab12cd34_f1)\n",
+    "version": 1,
+    "publishedAt": 1760000000000
+  },
+  "figures": {
+    "fig_ab12cd34_f1": {
+      "url": "https://media.example.com/figures/fig_ab12cd34_f1/cand_1.jpg?expires=1760000600&sig=...",
+      "width": 1600,
+      "height": 900,
+      "alt": "均线交叉示意",
+      "caption": "均线交叉示意"
+    }
+  },
+  "adjacentChapters": [{ "chapterId": "string", "title": "string" }]
+}
+```
+
+知识点详情响应（**不再返回文章**，仅定位与相邻导航）：
 
 ```jsonc
 {
@@ -197,7 +226,6 @@ x-device-id: <deviceId>
   "courseId": "string",
   "chapterId": "string",
   "title": "string",
-  "article": { "markdown": "string", "version": 1, "publishedAt": 1760000000000 },
   "segmentId": "seg-...",
   "adjacentKnowledgePoints": [{ "knowledgePointId": "string", "title": "string" }]
 }
@@ -213,9 +241,12 @@ x-device-id: <deviceId>
 { "knowledgePointId": "string", "watchedSec": 120, "completed": false, "updatedAt": 1760000000000 }
 ```
 
-- 只下发 `published` 内容；未发布或不存在 `404`。`article` 可为 `null`；`segmentId` 可缺省。
+- 只下发 `published` 内容；未发布或不存在 `404`。章节 `article` 可为 `null`（生成失败或未发布）；`segmentId` 可缺省。
+- `contractVersion` 为整数，M8 起为 `2`；插件低于最低支持版本时提示升级，不静默降级。缺失 `contractVersion` 视为 `1`。
+- 章节教材只允许 Markdown 子集与 `figure:<figureId>` 图片引用；`figures` 中每个 `url` 为短时签名（默认 10 分钟），过期后重新请求本章接口换取。
+- 图示仅返回 `published` 且已选候选；引用缺失时服务端保证不会发布，因此正常响应中 `markdown` 的每个 `figure:` 引用都能在 `figures` 中命中。
 - 课程树不携带 `startSec/endSec`；播放定位仍以 `GET /v1/kb/segments/{segmentId}` 为准。
-- 边界：课程 ≤50；单课程 ≤50 章节、总知识点 ≤1000；标题 ≤200 字符；响应 ≤512KiB；文章 `markdown` ≤20000 字符，仅 Markdown 子集，不含 HTML/脚本。
+- 边界：课程 ≤50；单课程 ≤50 章节、总知识点 ≤1000；标题 ≤200 字符；单章正文 1500–3000 字、≤20000 字符；每章 ≤3 图；响应 ≤512KiB；图片单张 ≤8MiB、边缘 ≥800px。
 - 进度按当前用户与设备写入；`watchedSec` 整数秒 0–86400，取历史最大值；`completed` 为 `true` 后不可回退；重复上报幂等。
 - 进度属于业务写入，不走 `POST /v1/events`，不受指标同意开关影响；非本人设备 `403`，超限 `429`。
 - 后台管理接口不属于本契约，学员令牌不可访问。
@@ -286,8 +317,8 @@ POST  /v1/admin/content/courses/{courseId}/chapters
 PATCH /v1/admin/content/courses/{courseId}/chapters/{chapterId}
 POST  /v1/admin/content/courses/{courseId}/chapters/{chapterId}/knowledge-points
 PATCH /v1/admin/content/knowledge-points/{knowledgePointId}
-GET   /v1/admin/content/knowledge-points/{knowledgePointId}/article
-PUT   /v1/admin/content/knowledge-points/{knowledgePointId}/article
+GET   /v1/admin/content/courses/{courseId}/chapters/{chapterId}/article   # M8
+PUT   /v1/admin/content/courses/{courseId}/chapters/{chapterId}/article   # M8
 GET   /v1/admin/content/segments
 POST  /v1/admin/content/segments
 PATCH /v1/admin/content/segments/{segmentId}
@@ -300,7 +331,7 @@ POST  /v1/admin/content/reindex
 // GET /v1/admin/content/courses
 { "courses": [{ "courseId": "TC-101", "title": "趋势交易基础", "status": "draft",
                 "chapterCount": 3, "knowledgePointCount": 6,
-                "segmentCount": 8, "articleCount": 6 }] }
+                "segmentCount": 8, "chapterArticleCount": 3, "figureCount": 5 }] }
 
 // POST /v1/admin/content/courses
 { "courseId": "TC-101", "title": "趋势交易基础", "status": "draft" }
@@ -310,9 +341,10 @@ POST  /v1/admin/content/reindex
 // GET /v1/admin/content/courses/{courseId}
 { "course": { "courseId": "TC-101", "title": "...", "status": "published" },
   "chapters": [{ "chapterId": "M1", "title": "第一章", "position": 1,
+    "article": { "version": 3, "status": "published", "publishedAt": 1760000000000 },
+    "figureCount": 2,
     "knowledgePoints": [{ "knowledgePointId": "KP-1.1", "title": "...", "position": 1,
-      "segmentCount": 2,
-      "article": { "version": 3, "status": "published", "publishedAt": 1760000000000 } }] }] }
+      "segmentCount": 2 }] }] }
 
 // POST /v1/admin/content/courses/{courseId}/chapters
 { "chapterId": "M4", "title": "第四章", "position": 4 }
@@ -322,10 +354,12 @@ POST  /v1/admin/content/reindex
 { "knowledgePointId": "KP-4.1", "title": "知识点标题", "position": 1 }
 // PATCH /v1/admin/content/knowledge-points/{knowledgePointId} → title/position
 
-// GET /v1/admin/content/knowledge-points/{knowledgePointId}/article
-{ "article": { "markdown": "# 标题", "version": 2, "status": "draft", "publishedAt": null } }
+// GET /v1/admin/content/courses/{courseId}/chapters/{chapterId}/article
+{ "article": { "markdown": "# 标题\n\n正文…\n\n![示意图](figure:fig_ab12cd34_f1)",
+               "version": 2, "status": "draft", "publishedAt": null } }
 // 未创建时 → { "article": null }
 // PUT：{ "markdown": "...", "status": "draft|published|archived" }；每次保存 version+1
+// 正文中的图片引用只接受 ![alt](figure:<figureId>)，且 figureId 必须属于该章节；否则 400
 
 // GET /v1/admin/content/segments?courseId=&knowledgePointId=&status=&query=&offset=0&limit=50
 { "segments": [{ "segmentId": "seg-tc101-m1-kp1-1", "courseId": "TC-101",
@@ -347,8 +381,9 @@ POST  /v1/admin/content/reindex
 - `courseId`、`chapterId`、`knowledgePointId` 1–64、`[A-Za-z0-9._-]`；`segmentId` `^seg-[A-Za-z0-9._-]{1,76}$`；标题 1–200；片段文本 1–4000。
 - `startSec` 0–86400、`endSec` 1–86400，且 `startSec < endSec`；`position` 0–10000 整数；状态仅 `draft/published/archived`。
 - 片段写入时业务校验知识点存在且归属该课程/章节；文本变更立即清空 `embedding`，避免旧向量参与检索置信。
-- 文章 `markdown` 1–20000，拒绝 `<script>`、`<iframe>`、`<object>`、`<embed>`、`<style>`、事件属性与 `javascript:`/`data:text/html`；每次保存 `version + 1`，发布时写 `publishedAt`。
-- 课程、章节、知识点、片段、文章不提供物理删除；用 `archived` 下架。课程 `archived` 后其下内容对学员不可见。
+- 章节教材 `markdown` 1–20000（建议 1500–3000），拒绝 `<script>`、`<iframe>`、`<object>`、`<embed>`、`<style>`、事件属性与 `javascript:`/`data:text/html`；图片引用只认 `figure:` 白名单格式；每次保存 `version + 1`，发布时写 `publishedAt`。
+- 知识点不再有独立文章；M8 前的 `/knowledge-points/{id}/article` 接口移除，旧 `articles` 数据只读保留。
+- 课程、章节、知识点、片段、章节教材、图示不提供物理删除；用 `archived` 下架。课程 `archived` 后其下内容对学员不可见；删除被正文引用的图示 `409 figure_in_use`。
 - `GET /v1/admin/content/segments` 的 `query` 对标题/文本做 ILIKE，`query` ≤100；`offset` 0–100000，`limit` 1–100。
 - `POST /v1/admin/content/reindex` 未配置 embedding 返回 `409`；按课程重建时课程不存在返回 `404`。
 - 控制台 `/admin` 静态资源不属于 OpenAPI；会话令牌只存 `sessionStorage`，退出清除。
@@ -411,6 +446,11 @@ POST  /v1/admin/content/pipeline/jobs/{jobId}/cancel
 GET   /v1/admin/content/generations/{generationId}
 POST  /v1/admin/content/generations/{generationId}/apply
 POST  /v1/admin/content/generations/{generationId}/discard
+POST  /v1/admin/content/courses/{courseId}/illustrate        # M8 新增
+GET   /v1/admin/content/figures?courseId=&chapterId=         # M8 新增
+POST  /v1/admin/content/figures/{figureId}/select            # M8 新增
+POST  /v1/admin/content/figures/{figureId}/regenerate        # M8 新增
+DELETE /v1/admin/content/figures/{figureId}                  # M8 新增
 POST  /v1/admin/content/courses/{courseId}/publish
 ```
 
@@ -453,10 +493,35 @@ POST  /v1/admin/content/courses/{courseId}/publish
 // POST /v1/admin/content/media-assets/{assetId}/generations
 // 202 → { "job": { ... } }；要求转写 ready
 
+// POST /v1/admin/content/courses/{courseId}/illustrate
+{ "chapterIds": ["ch_..."] }   // 可选；缺省为全部已有图示计划的章节
+// 202 → { "job": { ... } }；要求课程 draft 且章节教材已 apply
+
+// GET /v1/admin/content/figures?courseId=&chapterId=&offset=0&limit=50
+{ "figures": [{ "figureId": "fig_...", "chapterId": "ch_...", "kind": "keyframe|generated",
+                "caption": "...", "status": "planned|rendering|ready|failed|published",
+                "selectedCandidateId": "cand_... | null", "prompt": "...",
+                "model": "...", "seed": 0, "reviewReasons": [],
+                "candidates": [{ "candidateId": "cand_...", "status": "ready|failed",
+                                 "width": 1600, "height": 900, "bytes": 0,
+                                 "sourceSec": 125, "errorCode": null,
+                                 "previewUrl": "https://.../admin/figures/..." }] }],
+  "total": 1, "offset": 0, "limit": 50 }
+
+// POST /v1/admin/content/figures/{figureId}/select
+{ "candidateId": "cand_..." }   // 候选必须 ready
+// 200 → { "figure": { ... } }
+
+// POST /v1/admin/content/figures/{figureId}/regenerate
+// 202 → { "figure": { ... } }；仅 generated 类，候选数仍为 2
+
+// DELETE /v1/admin/content/figures/{figureId}
+// 204；被已发布正文引用时 409 figure_in_use
+
 // GET /v1/admin/content/pipeline/jobs?status=&kind=&courseId=&assetId=&offset=0&limit=50
-{ "jobs": [{ "jobId": "job_...", "assetId": "...", "courseId": "...",
-             "kind": "ingest|generate", "status": "queued|running|succeeded|failed|canceled",
-             "stage": "queued|probe|transcode|transcribe|structure|generate|finalize|done",
+{ "jobs": [{ "jobId": "job_...", "assetId": "... | null", "courseId": "...",
+             "kind": "ingest|generate|illustrate", "status": "queued|running|succeeded|failed|canceled",
+             "stage": "queued|probe|transcode|transcribe|structure|generate|figure_plan|figure_render|finalize|done",
              "progress": 0, "attempts": 0, "maxAttempts": 3, "errorCode": null,
              "createdAt": 0, "updatedAt": 0, "startedAt": null, "finishedAt": null }],
   "total": 1, "offset": 0, "limit": 50 }
@@ -469,30 +534,39 @@ POST  /v1/admin/content/courses/{courseId}/publish
 
 // GET /v1/admin/content/generations/{generationId}
 { "generation": { "generationId": "gen_...", "assetId": "...", "courseId": "...",
-                  "status": "draft|applied|discarded|failed", "promptVersion": "m1-v1",
+                  "status": "draft|applied|discarded|failed", "promptVersion": "m8-v1",
                   "model": "...", "counts": { "chapters": 3, "knowledgePoints": 12,
-                  "segments": 30, "needsReview": 2 },
+                  "chapterArticles": 3, "figures": 5, "segments": 30, "needsReview": 2 },
                   "createdAt": 0, "appliedAt": null },
-  "chapters": [{ "key": "ch01", "title": "...", "position": 0 }],
+  "chapters": [{ "key": "ch01", "title": "...", "position": 0,
+                 "articleLength": 2450, "hasArticle": true, "figureCount": 2 }],
   "knowledgePoints": [{ "key": "kp01", "chapterKey": "ch01", "title": "...",
                         "position": 0, "confidence": 0.82, "needsReview": false,
-                        "reviewReasons": [], "hasArticle": true,
-                        "startMs": 0, "endMs": 120000 }],
+                        "reviewReasons": [], "startMs": 0, "endMs": 120000 }],
+  "figures": [{ "key": "fg01", "chapterKey": "ch01", "kind": "keyframe|generated",
+                "caption": "...", "candidateCount": 2, "needsReview": false }],
   "segments": [{ "key": "sg0001", "pointKey": "kp01", "title": "...",
                  "startMs": 120000, "endMs": 245000 }] }
+// 预览不返回章节正文与图片字节，只返回长度、计数与待审原因。
 
 // POST /v1/admin/content/generations/{generationId}/apply
 { "generationId": "gen_...", "alreadyApplied": false, "courseId": "TC-101",
   "chapters": [{ "chapterId": "ch_...", "key": "ch01" }],
   "knowledgePoints": [{ "knowledgePointId": "kp_...", "key": "kp01" }],
+  "figures": [{ "figureId": "fig_...", "key": "fg01" }],
   "segments": [{ "segmentId": "seg-...", "key": "sg0001" }],
-  "articles": 12 }
+  "chapterArticles": 3, "figuresApplied": 5 }
 
 // POST /v1/admin/content/generations/{generationId}/discard → { "discarded": true }
 
 // POST /v1/admin/content/courses/{courseId}/publish
 { "courseId": "TC-101", "published": true, "indexed": true, "embedded": 30,
-  "counts": { "chapters": 3, "knowledgePoints": 12, "segments": 30, "articles": 12 } }
+  "counts": { "chapters": 3, "knowledgePoints": 12, "chapterArticles": 3,
+              "figures": 5, "segments": 30 } }
+
+// 409（存在未就绪图示引用）
+{ "error": { "code": "figure_unresolved", "message": "...",
+             "figureIds": ["fig_ab12cd34_f1"] } }
 ```
 
 - `assetId` 形如 `asset-[A-Za-z0-9._-]{1,58}`；`jobId/generationId/transcriptId` 为服务端生成的不透明 ID；`chapterId/knowledgePointId/segmentId` 在 apply 时确定性生成。
@@ -501,9 +575,11 @@ POST  /v1/admin/content/courses/{courseId}/publish
 - 任务：同一素材同类型同时最多一个 `queued/running`，重复 ingest/generate `409`；retry 仅 `failed/canceled` 且源文件存在；cancel 仅 `queued/running`；`errorCode` ≤64 且为稳定枚举。
 - 素材状态：`awaiting_upload → uploaded → processing → ready|failed`；`archived` 仅手动；不物理删除。重新上传未归档素材会重置转写与生成。
 - 转写：`GET .../transcript` 是唯一返回正文的管线接口；`segments` 按 `startMs` 升序、互不重叠，单段 1–4000 字符；未就绪时 `segments=[]`。
-- 生成：只有 `draft` generation 可 apply/discard；apply 要求课程 `draft` 且无章节/知识点/片段，否则 `409`；已 applied 再次 apply 返回原映射与 `alreadyApplied:true`。
-- 发布：课程必须存在且非 `archived`、至少 1 个片段；配置 embedding 时先 `reindex`，失败 `503` 且不翻状态；无 provider 时允许发布且 `indexed=false`。发布幂等，只把 `draft` 文章/片段/课程置 `published`。
-- 管线未启用（`PIPELINE_ENABLED=false`）时素材/上传/ingest/生成/任务接口 `503`；ASR 或 LLM 未配置时对应阶段/接口 `503`，不影响其它接口。
+- 生成：只有 `draft` generation 可 apply/discard；apply 要求课程 `draft` 且无章节/知识点/片段/图示，否则 `409`；已 applied 再次 apply 返回原映射与 `alreadyApplied:true`。章节教材每章一篇；知识点不再生成文章。
+- 图示：`illustrate` 仅针对 `draft` 课程且章节教材已 apply；每章 ≤3 张、每次 2 候选、每图重试 1 次；失败只标该图 `failed`，不阻塞课程发布。`select` 只接受 `ready` 候选；已选中图示的再生需显式 `regenerate`，不静默覆盖。候选预览接口走后台会话，不返回本地路径。
+- 图片预算：单课 ¥10、组织月度 ¥300；80% 预警，100% 硬停 `illustrate`/`regenerate` 并返回 `409 image_budget_exceeded`，图片标「待生成」，章节教材照常发布。
+- 发布：课程必须存在且非 `archived`、至少 1 个片段；先校验正文中每个 `figure:<figureId>` 都指向已选且就绪的 `published` 图示，否则 `409 figure_unresolved`；配置 embedding 时再 `reindex`，失败 `503` 且不翻状态；无 provider 时允许发布且 `indexed=false`。发布幂等，只把 `draft` 章节教材/图示/片段/课程置 `published`。
+- 管线未启用（`PIPELINE_ENABLED=false`）时素材/上传/ingest/生成/图示/任务接口 `503`；ASR、LLM 或图片模型未配置时对应阶段/接口 `503`，不影响其它接口；图片未配置时生成与发布照常。
 - 限流：`RATE_LIMIT_PIPELINE_PER_MINUTE`（默认 30，按后台账号）；上传按字节流不做请求级缓冲。
 - 日志与指标不记转写正文、源路径、provider 响应、完整 SHA；发布与索引失败只记类别。
 
@@ -514,9 +590,12 @@ POST  /v1/admin/content/courses/{courseId}/publish
 | 创建 draft 课程 → 素材 → 上传 → ingest | `201/200/202`；job 依次 `probe/transcode/transcribe/finalize`，转写 `ready` 且时间戳单调 |
 | 上传无音轨、超时长、SHA 不符、非 octet-stream、超 2GiB | `422/400/415/413`，半成品清理 |
 | 重复 ingest / 重复 generate | `409`；同素材同类型无重复 active job |
-| 生成 → 预览 | 章节/知识点/片段/文章草稿；待审原因与置信度可见；预览不含文章与片段正文 |
+| 生成 → 预览 | 章节/知识点/章节教材/图示计划/片段草稿；待审原因、置信度与教材长度可见；预览不含正文与图片字节 |
 | apply → 课程树 | 全部 `draft`，学员 catalog/检索/播放不可见；再次 apply 幂等 |
-| 发布 | 先索引（配置时）；catalog/检索/播放可见；索引失败 `503` 且课程仍 `draft` |
+| 图示生成 → 选图 | `illustrate` 任务走 `figure_plan/figure_render`；每章 ≤3 图、每次 2 候选；选图后 `selectedCandidateId` 落库 |
+| 缺图发布 | 正文引用未选图 → `409 figure_unresolved` 并列出 figureId；补齐后重试成功 |
+| 图片模型未配置 | `illustrate` 与 `regenerate` → `503`；生成、apply、发布仍可用 |
+| 发布 | 先校验图示引用再索引（配置时）；catalog/检索/播放可见；索引失败 `503` 且课程仍 `draft` |
 | 取消 / 重试 / 心跳超时 | 终态正确；重试从阶段续跑且成功块不重复请求 |
 | 学员令牌 / 未登录 / 运营与 admin | 学员 `403`；未登录 `401`；operator/admin 可用 |
 | 管线未启用或 ASR/LLM 未配置 | 对应接口 `503`；服务健康 |
@@ -528,10 +607,10 @@ POST  /v1/admin/content/courses/{courseId}/publish
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET/POST | `/llm` | 列出/新增 LLM 条目（`purpose=content\|embedding`） |
+| GET/POST | `/llm` | 列出/新增模型条目（`purpose=content\|embedding\|image`） |
 | GET/PATCH/DELETE | `/llm/{configId}` | 详情/修改/删除（删除默认项时自动提升同用途最早启用项） |
 | POST | `/llm/{configId}/set-default` | 切换同用途默认（按用途唯一） |
-| POST | `/llm/{configId}/test` | 连通性测试（content `max_tokens:1`，按 `protocol` 选择端点；embedding 校验 1024 维） |
+| POST | `/llm/{configId}/test` | 连通性测试（content `max_tokens:1`；embedding 校验 1024 维；image 生成 1 张 512 测试图，会产生约 ¥0.12 费用） |
 | GET/PATCH | `/asr` | 单行 ASR 渠道配置（`protocol=minimax\|openai`、`enabled`） |
 | POST | `/asr/test` | 用 1 秒 440Hz WAV 测试上游 |
 
@@ -540,6 +619,9 @@ POST  /v1/admin/content/courses/{courseId}/publish
 - `baseUrl` 仅接受 http(s) 绝对地址；粘贴完整端点（`/chat/completions`、`/embeddings`、`/audio/transcriptions`、`/v1/speech_to_text`、`/v1/messages`）时自动归一化到 base。
 - 内容 LLM `protocol=openai|anthropic`：`openai` 走 `/chat/completions` + `response_format=json_object`；`anthropic` 走 `/v1/messages` + `x-api-key` + `anthropic-version: 2023-06-01`。`purpose=embedding` 只允许 `openai`（Anthropic 无 embeddings 端点），否则 `400`。
 - embedding 请求显式带 `dimensions: 1024`（智谱 `embedding-3` 默认 2048）；模型以 4xx 拒绝该参数时重试一次不带 `dimensions`，最终仍要求返回 1024 维。
+- `purpose=image` 仅允许 `protocol=openai`（按 `purpose` 分流到图片端点）：`POST {base}/images/generations`，Header `Authorization: Bearer <key>`，body `{model, prompt, size, response_format:"url", watermark:false}`；默认 `baseUrl=https://ark.cn-beijing.volces.com/api/v3`、`model=doubao-seedream-5-0-260128`、`size=2K`；备用可配 `doubao-seedream-4-5-*`。`baseUrl` 粘贴完整 `/images/generations` 时自动归一化。
+- 图片条目新增 `imagePriceMicros`（每张，默认 `120000` = ¥0.12）；与 `input/output_price_micros_per_1k` 互斥：`purpose=image` 忽略 token 单价，非 image 忽略图片单价。成本 = `images × imagePriceMicros`，单价为空时成本返回 `null`。
+- 图片模型未配置或不可解密时 `illustrate`/`regenerate` 返回 `503`，课程生成、apply 与发布不受影响。
 - 保存后运行时在下一次任务/检索/发布时解析最新默认配置，无需重启；删除密钥或不可解密时按未配置处理。
 - 错误：`400` 入参/ID；`401/403` 鉴权与角色；`404` 不存在；`409` 停用项不可设默认；`429` 限流。
 
@@ -552,7 +634,10 @@ POST  /v1/admin/content/courses/{courseId}/publish
 | 同用途两个默认项 | 后者新增/设默认后前者自动取消，数据库仅一个 `is_default` |
 | `PATCH apiKey: ""` | 保留原密钥，掩码不变 |
 | embedding 用途测试非 1024 维 | `success=false`，detail 说明维度 |
+| image 用途新增并设默认 | `purpose` 唯一默认；`imagePriceMicros` 默认 120000；测试生成 1 张 512 图并记 1 次用量/成本 |
+| image 用途绑定到 content 任务 | `409`；`llm_task_bindings` 主备必须同用途 |
 | ASR 未启用/无 key | 转写阶段 `503`；其他管线阶段正常 |
+| image 未配置/无 key | `illustrate`、`regenerate` `503`；生成/apply/发布正常 |
 | 更换 `CREDENTIAL_ENCRYPTION_KEY` 后读取 | 掩码显示「无法解密，请重新录入」，不泄露密文 |
 
 ### 3.11 公开门户与自助账号（M7）
@@ -606,7 +691,7 @@ GET    /v1/portal/stats                # 公开；已发布内容计数
               "publishedAt": "2026-11-01T00:00:00Z", "notes": ["修复 ..."] } }
 
 // GET /v1/portal/stats → 200（max-age=60）
-{ "courses": 2, "knowledgePoints": 24, "segments": 30, "articles": 24 }
+{ "courses": 2, "knowledgePoints": 24, "segments": 30, "chapterArticles": 12, "figures": 18 }
 ```
 
 - 注册只创建 `student`；`username` 3–32、小写字母开头、`[a-z0-9._-]`；密码 10–128；`displayName` 1–200。
@@ -650,18 +735,19 @@ GET    /v1/portal/stats                # 公开；已发布内容计数
               "avgLatencyMs": 850, "costMicros": 12345 },
   "daily": [{ "date": "2026-10-25", "requests": 10, "inputTokens": 0,
               "outputTokens": 0, "costMicros": 0 }],
-  "byTask": [{ "taskKey": "content.article", "label": "文章生成",
+  "byTask": [{ "taskKey": "content.chapter", "label": "章节教材生成",
                "requests": 10, "errors": 0, "inputTokens": 0, "outputTokens": 0,
-               "audioSeconds": 0, "characters": 0, "costMicros": 0 }],
+               "audioSeconds": 0, "characters": 0, "images": 0, "costMicros": 0 }],
   "byModel": [{ "configId": "llmc_...", "provider": "minimax", "model": "...",
                 "requests": 10, "errors": 0, "inputTokens": 0,
-                "outputTokens": 0, "costMicros": 0 }] }
+                "outputTokens": 0, "images": 0, "costMicros": 0 }] }
 
 // GET /v1/admin/ai/usage/events → { "events": [...], "nextCursor": "123 | null" }
-{ "usageId": "123", "runId": "uuid | null", "taskKey": "content.article",
-  "label": "文章生成", "provider": "...", "model": "...", "configId": "llmc_... | null",
+{ "usageId": "123", "runId": "uuid | null", "taskKey": "content.image",
+  "label": "文生图", "provider": "volcengine-ark", "model": "doubao-seedream-5-0-260128",
+  "configId": "llmc_... | null",
   "inputTokens": 0, "outputTokens": 0, "cachedTokens": 0,
-  "audioSeconds": 0, "characters": 0, "latencyMs": 800,
+  "audioSeconds": 0, "characters": 0, "images": 2, "latencyMs": 800,
   "status": "success|error|fallback", "errorCode": null,
   "createdAt": "2026-11-01T00:00:00.000Z" }
 
@@ -679,8 +765,11 @@ GET    /v1/portal/stats                # 公开；已发布内容计数
   "usageId": "123 | null", "errorCode": null, "createdAt": "..." }] }
 
 // GET /v1/admin/ai/bindings
-{ "bindings": [{ "taskKey": "content.article", "label": "文章生成",
+{ "bindings": [{ "taskKey": "content.chapter", "label": "章节教材生成",
                  "purpose": "content", "primaryConfigId": "llmc_... | null",
+                 "fallbackConfigId": "llmc_... | null", "updatedAt": "..." },
+               { "taskKey": "content.image", "label": "文生图",
+                 "purpose": "image", "primaryConfigId": "llmc_... | null",
                  "fallbackConfigId": "llmc_... | null", "updatedAt": "..." }],
   "configs": [{ ...LlmModelConfig }] }
 
@@ -689,17 +778,17 @@ GET    /v1/portal/stats                # 公开；已发布内容计数
 
 // GET /v1/admin/ai/health
 { "configs": [{ "configId": "llmc_...", "name": "...", "provider": "...",
-                "model": "...", "purpose": "content|embedding", "isActive": true,
+                "model": "...", "purpose": "content|embedding|image", "isActive": true,
                 "consecutiveFailures": 0, "cooldownUntil": null,
                 "coolingDown": false, "lastError": null,
                 "lastFailureAt": null, "lastSuccessAt": "..." }] }
 ```
 
 - `from/to` 为 ISO 时间，缺省为最近 7 天；`from > to` 或格式非法 `400`；`limit` 1–200（默认 50）。
-- 任务键：`content.outline|content.points|content.article|embedding.query|embedding.segment|asr.longform`；绑定只接受 LLM 任务（ASR 不可绑定，`400`）。
+- 任务键：`content.outline|content.points|content.chapter|content.figure|content.image|embedding.query|embedding.segment|asr.longform`；绑定只接受 LLM/图片任务（ASR 不可绑定，`400`）。`content.image` 只接受 `purpose=image` 配置，其余内容任务只接受 `purpose=content`。
 - 绑定校验：主/备必须与任务用途一致且启用，主备相同 `400`，停用配置 `409`，配置不存在 `404`；未绑定回落同用途默认启用模型。
 - 主模型 429/5xx/网络/超时切备用，仅单跳；两次调用都记用量，运行标 `fallbackUsed=true`，失败配置进入 60s 冷却。
-- 成本为微美元；任一参与计费的模型单价缺失时该聚合 `costMicros=null`，前端显示「未配置价格」。
+- 成本为微美元；LLM/embedding 按 token 单价，图片按 `images × imagePriceMicros`；任一参与计费的模型单价缺失时该聚合 `costMicros=null`，前端显示「未配置价格」。
 - 日志与响应不含 prompt、回答、密钥或完整上游响应。
 
 **验收用例**
@@ -710,12 +799,12 @@ GET    /v1/portal/stats                # 公开；已发布内容计数
 | operator 写绑定 | `403`；admin `200` |
 | 绑定主备同用途且启用 | 保存后下一次调用生效 |
 | 主模型 429 → 备用 | 自动切换；`fallbackUsed=true`；健康进入冷却 |
-| 价格缺失 / 已配置 | `costMicros=null` / 按 token × 单价估算 |
+| 价格缺失 / 已配置 | `costMicros=null` / 按 token 单价或 `images × imagePriceMicros` 估算 |
 | 用量与运行一致性 | 每次尝试在 steps 中可见，并关联 `usageId` |
 
 ## 4. 数据与内容前置
 
-- M1 内容管线可产出带时间戳转写、章节/知识点切分、片段与文章草稿，经人工审核发布；真实样片与 ASR/内容 LLM/embedding 已完成验收。
+- M1 内容管线可产出带时间戳转写、章节/知识点切分、片段与文章草稿，经人工审核发布；真实样片与 ASR/内容 LLM/embedding 已完成验收。M8 起改为章节教材 + 图示，需另备至少 1 门样课验证章节教材与图片渲染。
 - 需要至少一门真实课程与加密 HLS 样片（含 key 与分片）用于联调；建议提供 2 门课程、10+ 片段的最小数据集。
 - 视频加密方案需确认（云点播私有加密 / AES-128）并与 hls.js 解密配置对齐；M1 产出未加密 HLS，靠签名 URL 保护。
 - 检索质量以本产品自建评估集把关，不复用 ai-invest 的库或评估结果。
@@ -758,8 +847,9 @@ GET    /v1/portal/stats                # 公开；已发布内容计数
 | 设备授权 | 学员账号批准 | 设备绑定账号；错误密码或未知账号 `401` |
 | 设备授权 | 运营会话代批 | 需 operator/admin 会话；学员令牌 `403` |
 | 内容管理 | operator 创建课程/章节/知识点/片段 | `200/201`；学员令牌 `403`；未发布内容学员不可见 |
-| 内容管理 | 发布 / 归档课程与文章 | 学员可见性即时变化；归档后 `404` |
-| 内容管理 | 文章保存与发布 | `version` 递增、发布写 `publishedAt`；超长或含可执行 HTML `400` |
+| 内容管理 | 发布 / 归档课程与章节教材 | 学员可见性即时变化；归档后 `404` |
+| 内容管理 | 章节教材保存与发布 | `version` 递增、发布写 `publishedAt`；超长或含可执行 HTML `400`；跨章 `figure` 引用 `400` |
+| 内容管理 | 图示选图 / 删除 | 只能选 `ready` 候选；被引用图示删除 `409 figure_in_use` |
 | 内容管理 | 片段时间轴或知识点归属非法 | `400`，不写入 |
 | 内容管理 | 修改片段文本后重建向量 | 旧向量清空；reindex 成功；未配置 embedding `409` |
 | 内容管理 | `/admin` 控制台 | 未登录不可操作；退出清除 `sessionStorage` 令牌 |
@@ -790,7 +880,7 @@ GET    /v1/portal/stats                # 公开；已发布内容计数
 
 1. 服务骨架与部署说明（staging / production），有效 TLS 证书。
 2. OpenAPI 3 文档，字段与本文一致；契约变更先改 PRD §6 与架构 §6。
-3. 数据库 schema 与迁移（课程、章节、知识点、片段、文章、进度、账号/会话/邀请码、用户/设备、令牌、事件、管线任务/转写/生成、AI 用量/运行/绑定/健康）。
+3. 数据库 schema 与迁移（课程、章节、知识点、片段、章节教材、图示与候选、进度、账号/会话/邀请码、用户/设备、令牌、事件、管线任务/转写/生成、AI 用量/运行/绑定/健康）。
 4. 学员接口（设备码、检索、片段、播放会话、体系/进度、事件、语音转写）、门户接口（注册/登录/个人中心/发布清单/统计）与后台接口（账号、内容管理、视频管线、模型配置、AI 运营）。
 5. 鉴权中间件（Bearer + `x-device-id`、门户 `scope`、后台角色）、限流（含 ASR、门户、AI 与管线按账号限流）、错误码映射、日志脱敏。
 6. 签名 HLS 下发与 CORS/Range 配置；管线 HLS 目录与媒体根一致。
@@ -819,3 +909,10 @@ GET    /v1/portal/stats                # 公开；已发布内容计数
 | 门户会话 | 令牌存 `sessionStorage`，无刷新令牌 | 新标签页需重新登录 |
 | 客服/联系入口 | 本期不做，后续单独立项 | 门户支持路径 |
 | AI 限流与冷却 | 单实例内存 + DB 健康记录 | 横向扩容前需共享存储 |
+| 章节教材粒度 | 已定：3–6 章、每章 ≥5 分钟素材、1500–3000 字；替换知识点短文 | 生成成本与阅读体验 |
+| 图示数量与候选 | 已定：每章 0–3 张、每图 2 候选、重试 1 次；≤24 张/课程 | 图片成本与审核工作量 |
+| 图片模型与价格 | 已定：直连火山方舟 `doubao-seedream-5-0-260128`，2K，¥0.12/张；后台 `purpose=image` 配置 | 成本核算与模型切换 |
+| 图片预算上限 | 已定：¥10/课程、¥300/月；超限暂停 `illustrate` 并提示 | 账单保护 |
+| 图示 URL 策略 | 已定：短时签名（默认 10 分钟）；插件需验证 dsh-web-app CSP 是否允许外部图片域 | 插件渲染与回退方案 |
+| 旧课程处置 | 已定：直接 `archived` 并重跑，不迁移；保留 30 天后清理 | 学员进度与通知 |
+| 体系契约版本 | 已定：M8 起 `contractVersion=2`，插件低版本提示升级 | 插件发版节奏 |

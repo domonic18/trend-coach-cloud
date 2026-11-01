@@ -16,7 +16,7 @@
 | 鉴权指标事件接收（M2） | 第三方分析 SDK |
 | 语音转写（M4.2，MiniMax ASR，仅语音→文字） | 学员侧生成式推理 |
 | 后台账号、内容管理与索引重建（M3） | 召回评估看板、插件版本与灰度 |
-| 视频→课程管线（M1）：流式上传、单码率 HLS、长音频转写、章节/知识点/片段切分、文章草稿、人工发布 | 多码率 ABR、对象存储、断点续传、自动发布 |
+| 视频→课程管线（M1/M8）：流式上传、单码率 HLS、长音频转写、章节/知识点/片段切分、章节教材与图示草稿、人工发布 | 多码率 ABR、对象存储、断点续传、自动发布 |
 | 公开门户（体系、功能、安装向导、下载、FAQ）与学员自助注册/个人中心（M7） | 邮件/短信验证、找回密码、客服工单 |
 | AI 用量账本、运行链路、任务级主备绑定与自动切换（M7） | 学员侧推理、第三方分析 SDK |
 
@@ -117,7 +117,7 @@ API Gateway ── 鉴权（Bearer + x-device-id）── 限流 ── 请求�
    ├── admin   : /v1/auth/session + /v1/admin/*（后台账号、内容管理、索引重建、视频管线、模型配置、AI 运营，M3/M1/M4.3/M7）
    └── events : GET/PUT /v1/events/consent + POST /v1/events（白名单）
    │
-PostgreSQL ── 课程 / 章节 / 知识点 / 片段 / 文章 / 向量 / 用户 / 设备 / 令牌 / 事件 / 会话 / 管线任务与转写 / AI 用量与运行
+PostgreSQL ── 课程 / 章节 / 知识点 / 片段 / 章节教材 / 图示 / 向量 / 用户 / 设备 / 令牌 / 事件 / 会话 / 管线任务与转写 / AI 用量与运行
 本地存储（MediaStore）── 源视频 / 工作区 / HLS；生产 HLS 由 CDN 或对象存储承接
 构建产物 ── dist/server（服务端）、dist/admin（后台 SPA）、dist/portal（预渲染门户）、dist/downloads（插件包）
 ```
@@ -153,7 +153,10 @@ erDiagram
   DEVICES ||--o{ TOKENS : holds
   USERS ||--o{ PLAYBACK_SESSIONS : starts
   USERS ||--o{ EVENTS : emits
-  KNOWLEDGE_POINTS ||--o{ ARTICLES : has
+  CHAPTERS ||--o| CHAPTER_ARTICLES : has
+  CHAPTERS ||--o{ FIGURES : illustrates
+  FIGURES ||--o{ FIGURE_CANDIDATES : renders
+  MEDIA_ASSETS ||--o{ FIGURES : sources
   USERS ||--o{ LEARNING_PROGRESS : tracks
   USERS ||--o{ SESSIONS : holds
   USERS ||--o{ INVITE_CODES : receives
@@ -173,7 +176,7 @@ erDiagram
 |---|---|---|
 | `courses` | `course_id`、`title`、`status` | `course_id` ≤64、`[A-Za-z0-9._-]`；仅 `published` 可检索 |
 | `chapters` | `chapter_id`、`course_id`、`title`、顺序 | `(course_id, chapter_id)` 唯一 |
-| `knowledge_points` | `knowledge_point_id`、`chapter_id`、`title` | 转写、文章、片段共用同一 ID |
+| `knowledge_points` | `knowledge_point_id`、`chapter_id`、`title` | 转写、片段共用同一 ID；检索与播放锚点，不再持有正文 |
 | `segments` | `segment_id`、`course_id/chapter_id/knowledge_point_id`、`start_sec`、`end_sec`、`text`、`embedding halfvec`、`tsv`、`status` | `segment_id` 全局唯一、跨版本稳定；`start_sec < end_sec` 整数秒；下架 `status` 使 GET 返回 404 |
 | `media_assets` | `asset_id`、`course_id`、`title`、`hls_path`、`encryption`、`status`、`source_rel_path`、`source_size_bytes`、`source_sha256`、`duration_ms`、`error_code` | 不对外暴露源站直链；状态 `awaiting_upload/uploaded/processing/ready/failed/archived`；播放只选 `ready`；`source_*` 仅内部使用 |
 | `users` | `user_id`、`username`、`display_name`、`role`、`status`、`password_hash`、`events_consent` | 账号由管理员创建；`username` 唯一且小写；密码只存 scrypt 哈希；禁用立即拒绝令牌 |
@@ -183,24 +186,26 @@ erDiagram
 | `tokens` | `token_hash`、`kind(access/refresh)`、`device_id`、`expires_at`、`revoked_at`、`rotated_from` | 只存哈希；旧 refresh 轮换后立即失效 |
 | `playback_sessions` | `session_id`、`user_id`、`device_id`、`segment_id`、`expires_at`、状态 | 绑定设备；并发受配额约束 |
 | `events` | `event_name`、`user_id`、`device_id_hash`、白名单字段、时间 | 无 query 原文、回答内容、完整播放地址 |
-| `articles`（M3 已落地） | `knowledge_point_id`、`markdown`、`version`、`status`、`published_at` | 仅 `published` 下发；单篇 ≤20000 字符，仅 Markdown 子集；每次保存 `version + 1`，发布时写 `published_at` |
+| `chapter_articles`（M8） | `chapter_id`、`course_id`、`markdown`、`version`、`status`、`published_at` | 每章至多一篇；仅 `published` 下发；1500–3000 字，≤20000 字符，仅 Markdown 子集；图片引用只允许 `![alt](figure:<figureId>)`；每次保存 `version + 1`，发布时写 `published_at` |
+| `figures`（M8） | `figure_id`、`chapter_id`、`course_id`、`asset_id`（关键帧来源）、`kind(keyframe/generated)`、`caption`、`prompt`、`model`、`seed`、`selected_candidate_id`、`status`、`published_at` | 每章 ≤3 张；引用方式为 `figure:<figureId>`；`published` 前必须有 `selected_candidate_id` 且候选已就绪；删除被引用图示需先改正文 |
+| `figure_candidates`（M8） | `candidate_id`、`figure_id`、`rel_path`、`width/height`、`bytes`、`sha256`、`source_sec`（关键帧）、`status(rendering/ready/failed)`、`error_code` | 关键帧 1 个候选、文生图 2 个候选；文件只存媒体目录，不落数据库；仅 `ready` 可被选定 |
 | `learning_progress`（M3 已落地） | `user_id`、`device_id`、`knowledge_point_id`、`watched_sec`、`completed`、`updated_at` | `(user_id, knowledge_point_id)` 唯一；`watched_sec` 取最大值；`completed` 不回退 |
-| `pipeline_jobs`（M1） | `job_id`、`asset_id`、`course_id`、`kind(ingest/generate)`、`status`、`stage`、`progress`、`attempts`、`run_after`、`locked_at/by`、`heartbeat_at`、`cancel_requested`、`error_code`、`options` | 同一素材同类型同时仅一个 `queued/running`；心跳超时回收；失败退避重试；取消为协作式 |
+| `pipeline_jobs`（M1/M8） | `job_id`、`asset_id`、`course_id`、`kind(ingest/generate/illustrate)`、`status`、`stage`、`progress`、`attempts`、`run_after`、`locked_at/by`、`heartbeat_at`、`cancel_requested`、`error_code`、`options` | 同一素材同类型同时仅一个 `queued/running`；心跳超时回收；失败退避重试；取消为协作式；`illustrate` 失败不影响课程发布 |
 | `media_transcripts`（M1） | `transcript_id`、`asset_id`、`job_id`、`status`、`language`、`model`、`duration_ms`、`chunk_count`、`segment_count` | 每素材一份；成功块缓存；全部完成后才写全局片段 |
 | `transcript_chunks`（M1） | `transcript_id`、`idx`、`start_ms/end_ms`、`status`、`sentences jsonb`、`attempt` | 块内时间戳为局部毫秒偏移；`(transcript_id, idx)` 唯一；成功块不重复请求 |
 | `transcript_segments`（M1） | `transcript_id`、`idx`、`start_ms/end_ms`、`text` | 全局毫秒时间戳、≤30s 分组、1–4000 字符；按 `start_ms` 排序 |
 | `content_generations`（M1） | `generation_id`、`asset_id`、`transcript_id`、`course_id`、`job_id`、`status`、`prompt_version`、`model`、计数、`payload jsonb`、`applied_content jsonb` | 每素材仅一个 `draft`；只存预览与待审原因；`apply` 后保留映射；不自动发布 |
-| `llm_configs`（M4.3/M7） | `config_id`、`name`、`provider`、`protocol`、`base_url`、`model`、`api_key_encrypted`、`purpose(content/embedding)`、`is_default`、`is_active`、`input_price_micros_per_1k`、`output_price_micros_per_1k`、测试状态 | 每个用途最多一个启用默认项（部分唯一索引）；密钥只存密文；embedding 必须 1024 维；单价可为空，空表示成本未知 |
+| `llm_configs`（M4.3/M7/M8） | `config_id`、`name`、`provider`、`protocol`、`base_url`、`model`、`api_key_encrypted`、`purpose(content/embedding/image)`、`is_default`、`is_active`、`input_price_micros_per_1k`、`output_price_micros_per_1k`、`image_price_micros`、测试状态 | 每个用途最多一个启用默认项（部分唯一索引）；密钥只存密文；embedding 必须 1024 维；`purpose=image` 用 `image_price_micros`（每张），默认 `120000`（¥0.12）；单价可为空，空表示成本未知 |
 | `asr_config`（M4.3） | 单行 `id=1`、`provider`、`protocol(minimax/openai)`、`base_url`、`model`、`api_key_encrypted`、`enabled`、测试状态 | 全局唯一渠道；`enabled` 且密钥可解密时才参与转写 |
 | `ai_runs`（M7） | `run_id`、`task_key`、`source(pipeline/admin)`、`source_id`、`status(running/succeeded/failed)`、`primary_config_id`、`fallback_used`、`step_seq`、`started_at`、`finished_at`、`error_code`、`summary jsonb` | 一次业务运行一行；不存 prompt 与正文；来源 ID 可空、≤200 |
-| `ai_usage_events`（M7） | `usage_id`、`run_id`、`task_key`、`provider`、`model`、`config_id`、`input/output/cached_tokens`、`audio_seconds`、`characters`、`latency_ms`、`status(success/error/fallback)`、`error_code`、`created_at` | 只记数字与模型标识；批量写入；按 `created_at`、`task_key`、`config_id` 建索引 |
+| `ai_usage_events`（M7/M8） | `usage_id`、`run_id`、`task_key`、`provider`、`model`、`config_id`、`input/output/cached_tokens`、`audio_seconds`、`characters`、`images`、`latency_ms`、`status(success/error/fallback)`、`error_code`、`created_at` | 只记数字与模型标识；批量写入；按 `created_at`、`task_key`、`config_id` 建索引；`images` 仅图片任务写入 |
 | `ai_run_steps`（M7） | `step_id`、`run_id`、`seq`、`task_key`、`config_id`、`provider`、`model`、`attempt`、`status(success/error)`、`latency_ms`、`usage_id`、`error_code`、`created_at` | `(run_id, seq)` 唯一；主/备每次尝试一行，关联用量 |
 | `llm_task_bindings`（M7） | `task_key`、`primary_config_id`、`fallback_config_id`、`updated_at` | 主备必须同用途且启用；备用可为空；主备不可相同；未绑定回落默认启用模型 |
 | `llm_config_health`（M7） | `config_id`、`consecutive_failures`、`cooldown_until`、`last_error`、`last_failure_at`、`last_success_at`、`updated_at` | 每个配置一行；冷却期内路由跳过该配置；内存 Map 只作加速 |
 
 建库插件：`pgvector`（`halfvec`）、`pg_trgm`；检索索引与向量索引分离于业务表，可在线重建（M3 后台触发）。
 
-`learning_progress` 按用户聚合、以 `device_id` 记录最后写入设备，进度写入不进入 `events`；`articles` 与账号/后台表分阶段迁移。
+`learning_progress` 按用户聚合、以 `device_id` 记录最后写入设备，进度写入不进入 `events`。M8 起 `chapter_articles` 取代 `articles`：旧表仅在迁移期保留只读视图供对照，新课程只写章节文章；学习进度仍按知识点记录。
 
 ## 6. 检索管线
 
@@ -209,10 +214,13 @@ erDiagram
 ```
 视频上传 → ffprobe 校验 → 单码率 HLS + 16kHz WAV
   → 静音切块 → MiniMax 长音频转写（块级缓存）→ 全局时间戳与 ≤30s 分组
-  → 内容 LLM 生成章节/知识点/文章草稿（逐字锚定 + 置信度）
+  → 内容 LLM 生成章节/知识点草稿（逐字锚定 + 置信度）
+  → 按章 map-reduce 生成章节教材（1500–3000 字，含 figure 占位）
+  → 图示：抽视频关键帧 + 文生图候选（独立 illustrate 任务，可失败）
   → 片段由知识点时间窗与转写片段交集确定性生成（≤120s）
-  → 人工预览 → apply 写入 draft 课程/文章/片段（embedding=NULL）
-  → 显式发布：reindex（配置 embedding 时）→ 文章/片段/课程置 published → 进入召回
+  → 人工预览与选图 → apply 写入 draft 课程/章节教材/图示/片段（embedding=NULL）
+  → 显式发布：校验每处 figure 引用已选图 → reindex（配置 embedding 时）
+    → 章节教材/图示/片段/课程置 published → 进入召回
 ```
 
 - 发布与索引分离：未审核内容不进入检索；生成结果只落 `draft`，无自动发布。
@@ -264,15 +272,18 @@ sequenceDiagram
 workspace/pipeline/            # 容器内挂载为 /data
   storage/                     # PIPELINE_STORAGE_DIR
     sources/<assetId>/source
-    work/<assetId>/{audio.wav,chunks/,hls/}
+    work/<assetId>/{audio.wav,chunks/,hls/,keyframes/}
   hls/                         # PIPELINE_HLS_DIR
     hls/<assetId>/{index.m3u8,seg_00000.ts}
+  figures/                     # PIPELINE_FIGURE_DIR（默认 <storage>/../figures）
+    <figureId>/<candidateId>.jpg
 ```
 
 - `MediaStore` 接口负责创建目录、流式写、SHA-256、原子 rename、清理与 HLS 校验；当前实现为本地文件系统，预留 S3/MinIO。
 - 设置 `MEDIA_LOCAL_DIR` 时要求 `PIPELINE_HLS_DIR` 与其解析后相等，否则启动失败；源目录不得位于媒体根下。
 - 存储目录与 HLS 目录必须同卷，HLS 从 `work/<assetId>/hls` 原子 rename 到 `PIPELINE_HLS_DIR/hls/<assetId>`；跨卷时启动或运行失败，不做复制降级。
 - `media_assets.hls_path = 'hls/<assetId>/index.m3u8'`；播放签名前缀自然限定到该目录，源文件永不进入签名范围。
+- 图示文件存 `figures/<figureId>/<candidateId>.jpg`，独立于课程媒体目录；签名按单文件签发，不能通过换 figureId 越权读取。
 
 #### 上传与媒体校验
 
@@ -299,6 +310,9 @@ ffmpeg -y -i audio.wav -af silencedetect=noise=-30dB:d=0.5 -f null -
 
 # 切块
 ffmpeg -y -ss <start> -t <duration> -i audio.wav -c:a pcm_s16le chunk.wav
+
+# 关键帧：按图示计划时间点抽单帧，最长边 ≤1600
+ffmpeg -y -ss <sec> -i source -frames:v 1 -vf "scale='min(1600,iw)':-2" -q:v 2 keyframes/<sec>.jpg
 ```
 
 - 一律 `spawn(FFMPEG_PATH, args)`，禁止 shell；启用时启动探活 `-version`（5s），缺失则启动失败。
@@ -323,7 +337,8 @@ queued ──claim──> running ──success──> succeeded
    └──cancel──> canceled          └──cancel_requested──> canceled
 ```
 
-- ingest 阶段 `probe → transcode → transcribe → finalize → done`；generate 阶段 `structure → generate → finalize → done`。
+- ingest 阶段 `probe → transcode → transcribe → finalize → done`；generate 阶段 `structure → generate → finalize → done`；illustrate 阶段 `figure_plan → figure_render → finalize → done`。
+- `illustrate` 依赖已 apply 的 `draft` 课程与章节教材；`generate` 先产出图示计划草稿，`figure_plan` 阶段校验并补全 `sourceHint`（关键帧不合格时降级为 `generated`），`figure_render` 阶段落候选。按章幂等，已就绪图示跳过，失败只标记该图 `failed` 并结束任务，不阻塞课程发布。
 - worker 默认并发 1、轮询 2s；`SELECT ... FOR UPDATE SKIP LOCKED` 认领到期任务，认领即 `attempts+1`、写 `locked_*` 与心跳。
 - 心跳默认 10s；启动时与每 30s 回收 `heartbeat_at < now()-PIPELINE_STALE_JOB_MS`（默认 120s）的 `running` 任务，置回 `queued` 或 `failed`（attempts 用尽）。
 - 重试仅针对可重试错误（网络、上游 429/5xx、ffmpeg 超时）；参数/媒体非法为终态失败。`error_code` ≤64，客户端只看到稳定码与静态文案。
@@ -332,20 +347,40 @@ queued ──claim──> running ──success──> succeeded
 
 #### 内容生成
 
-- 先做**全局大纲**：均匀采样转写（最多 150 句）连同总时长一次调用，输出 3–8 个有序章节（30 分钟内 3–6 个），按归一化标题去重；全局规划避免逐窗口各自成章导致目录碎片化。
+- 先做**全局大纲**：均匀采样转写（最多 150 句）连同总时长一次调用，输出 3–6 个有序章节，每章至少 5 分钟素材；单知识点成章的按时间相邻合并，按归一化标题去重。全局规划避免逐窗口各自成章导致目录碎片化。
 - 再以 600s 窗口切分转写，重叠 30s 或一个转写片段，最多 24 窗口；每窗口一次知识点调用（≤8 个 `{title,excerpt,chapterTitle,confidence}`），`chapterTitle` 从全局大纲中选择，未命中按时长比例落到最近章节。超预算直接失败 `generation_budget_exceeded`，不部分落库。
 - `excerpt` 必须在窗口转写中逐字锚定（归一化空白/标点后匹配）；不匹配保留但标 `excerpt_not_found`，无法定位时间的丢弃；`confidence < GENERATION_MIN_CONFIDENCE`（0.6）标 `low_confidence`；按标题去重，同一时间范围且摘录互相包含的重复知识点直接丢弃。
 - 生成后校验：没有被任何知识点命中的章节丢弃并重排位置，避免学员点进空章。
-- 片段由知识点时间窗与转写片段交集确定性生成，每段 ≤120s/4000 字，超限在转写片段边界拆分。
-- 每知识点一次文章调用，输入取知识点时间窗前后各 60s 的转写作为上下文，输出 200–800 字 `{markdown}`；复用安全 Markdown 校验与 20000 字上限；失败重试一次，仍失败标 `article_invalid`、`articleMarkdown=null`；正文 <200 字标 `article_short`，均不阻塞其它内容。
-- 生成结束一次性写 `content_generations`（`status=draft`，`prompt_version=m1-v2`，`payload` 含章节/知识点/片段/文章草稿与待审原因）。预览接口不返回文章与片段正文。
+- 片段由知识点时间窗与转写片段交集确定性生成，每段 ≤120s/4000 字，超限在转写片段边界拆分。知识点仍保留为检索与播放锚点，但不再各自成文。
+
+**章节教材（章节级 map-reduce）**
+
+- 每章取该章全部知识点的转写上下文，按知识点锚点切成 3–6 节分批 map，输出「事实卡片」（只含转写出现的事实、定义、步骤、数字与时间锚点）；reduce 输入全部事实卡片 + 章标题 + 相邻章标题，输出 1500–3000 字 Markdown。
+- 结构约束：首段为本章导语，随后 2–5 个 `##` 小节，末尾可含「本章要点」列表；只允许 Markdown 子集与 `![alt](figure:<figureId>)` 图片引用，禁止 HTML。
+- 事实必须能在本章转写中锚定（归一化后子串或关键词覆盖率阈值），无法锚定的句子整段丢弃并记 `ungrounded_removed`。
+- 复用安全 Markdown 校验与 20000 字上限；失败重试一次，仍失败标 `article_invalid`、`chapterMarkdown=null`；正文 <1200 字标 `article_short`，均不阻塞其它章节。
+- 章节教材不写入 `segments`，只作为阅读层；引用点击仍按知识点/片段定位。
+
+**图示（关键帧 + 文生图）**
+
+- 每章 0–3 张，`illustrate` 任务独立执行：`figure_plan` 一次调用输出 `[{kind, caption, prompt, sourceHint}]`，`kind` 仅 `keyframe|generated`。`sourceHint` 必须是该章知识点时间窗内的秒数，用于抽帧或作为文生图上下文。
+- `kind=keyframe`：按 `sourceHint` 抽 1 帧，校验非纯色/非黑屏（方差与亮度阈值），不合格直接丢弃并降为 `generated`。
+- `kind=generated`：直连火山方舟 `POST {base}/images/generations`，Bearer `ARK_API_KEY`/后台 `purpose=image` 配置，默认 `doubao-seedream-5-0-260128`（Seedream 5.0 lite）、`2K`、`response_format=url`、`watermark=false`；备用可配 `seedream-4.5`。每次 2 个候选，失败重试 1 次，仍失败标该图 `failed`。
+- 限额：每章 0–3 张（默认目标 2）、每课 ≤24、单课预算 ¥10、月度 ¥300；80% 预警，100% 硬停 `illustrate`/`regenerate`（`409 image_budget_exceeded`），图片标「待生成」，章节教材照常发布。
+- 禁止生成写实 K 线、收益曲线、行情截图或带品牌标识的假界面；提示词由服务端模板拼装，模型不得改写 `kind`、数量与安全约束。
+- 下载 `url` 后校验为 JPEG/PNG、单张 ≤8MiB、边缘 ≥800px，再压缩落 `figures/<figureId>/<candidateId>.jpg`；记录 `prompt/model/seed`，用量写 `ai_usage_events.images`。
+- 规划/渲染失败只影响图示，课程与章节教材照常进入审核。
+
+- 生成结束一次性写 `content_generations`（`status=draft`，`prompt_version=m8-v1`，`payload` 含章节/知识点/章节教材草稿/图示计划/片段及待审原因）。预览接口不返回正文，只返回长度、待审原因与图示候选数量。
 
 #### Apply 与发布
 
 - `POST /generations/{generationId}/apply`：仅 `draft` generation、`draft` 课程且课程无章节/知识点/片段；否则 `409`。
-- 确定性 ID：`ch_<hash8>_<chapterKey>`、`kp_<hash8>_<pointKey>`、`seg-<hash8>-<segmentKey>`，`hash8 = sha256(generationId)` 前 8 位小写 hex。
-- 单事务：章节 → 知识点 → 文章（`draft`，`version=1`）→ 片段（`draft`，`embedding=NULL`）→ 写 `applied_content` → generation `applied`；任一步失败整体回滚。
-- `POST /courses/{courseId}/publish`：课程非 `archived` 且至少 1 个片段；配置 embedding 时先同步 `reindex(courseId)`，失败 `503` 且不翻状态；随后单事务把 `draft` 文章/片段置 `published`（文章补 `published_at`）、课程置 `published`；幂等，返回 counts 与 `indexed/embedded`。
+- 确定性 ID：`ch_<hash8>_<chapterKey>`、`kp_<hash8>_<pointKey>`、`seg-<hash8>-<segmentKey>`、`fig_<hash8>_<figureKey>`、`cand_<hash8>_<candidateKey>`，`hash8 = sha256(generationId)` 前 8 位小写 hex。
+- 单事务：章节 → 知识点 → 章节教材（`draft`，`version=1`）→ 图示与候选（`draft`，候选文件已落盘）→ 片段（`draft`，`embedding=NULL`）→ 写 `applied_content` → generation `applied`；任一步失败整体回滚。
+- 审核期可单独触发 `illustrate`（如生成失败或需要补图）：只允许 `draft` 课程，按章幂等补齐候选；已选定图示不被覆盖。
+- `POST /courses/{courseId}/publish`：课程非 `archived` 且至少 1 个片段；**先校验每处 `figure:<figureId>` 引用对应图示已选候选、候选文件存在且状态就绪，缺失返回 `409 figure_unresolved` 并列出 figureId**；配置 embedding 时再同步 `reindex(courseId)`，失败 `503` 且不翻状态；随后单事务把 `draft` 章节教材/图示/片段置 `published`（补 `published_at`）、课程置 `published`；幂等，返回 counts 与 `indexed/embedded`。
+- 发布时把正文中的 `figure:<figureId>` 替换为短时签名 URL 由读取接口完成，数据库只存稳定引用。
 - 无 embedding provider 时允许发布，`indexed=false`（仅词法召回）；生成内容绝不自动进入检索。
 
 #### 错误映射
@@ -355,11 +390,11 @@ queued ──claim──> running ──success──> succeeded
 | `400` | 参数/ID/游标非法；SHA 不符 |
 | `401/403` | 未登录；角色不足或设备不匹配 |
 | `404` | 素材/任务/生成/课程不存在 |
-| `409` | 状态不允许（重复 ingest、非 draft apply、课程已有内容） |
+| `409` | 状态不允许（重复 ingest、非 draft apply、课程已有内容）；发布时存在未就绪图示引用 `figure_unresolved` |
 | `413/415` | 上传超限；Content-Type 非 octet-stream |
 | `422` | 媒体无音轨/超时长/损坏；源文件缺失 |
 | `429` | 管线接口限流 |
-| `503` | 管线未启用、ffmpeg 不可用、ASR/LLM/embedding 未配置 |
+| `503` | 管线未启用、ffmpeg 不可用、ASR/LLM/embedding/image 未配置（图片未配置时仅 `illustrate` 失败，不影响生成与发布） |
 
 ## 7. 鉴权与会话
 
@@ -409,10 +444,11 @@ sequenceDiagram
 
 ### 7.4 内容管理接口与控制台（M3.2）
 
-- 内容写接口位于 `/v1/admin/content/*`，要求 operator/admin 会话；课程、章节、知识点、文章、片段均支持创建与修改，发布/归档通过 `status` 切换，不提供物理删除。
-- 文章 `PUT` 为幂等 upsert：每次成功保存 `version + 1`、`updated_at = now()`；`status=published` 时写 `published_at`。Markdown 在服务端校验为纯 Markdown 子集，拒绝 `<script>`、`<iframe>`、事件属性与 `javascript:` 等可执行内容。
+- 内容写接口位于 `/v1/admin/content/*`，要求 operator/admin 会话；课程、章节、知识点、章节教材、图示、片段均支持创建与修改，发布/归档通过 `status` 切换，不提供物理删除。
+- 章节教材 `PUT` 为幂等 upsert：每次成功保存 `version + 1`、`updated_at = now()`；`status=published` 时写 `published_at`。Markdown 在服务端校验为纯 Markdown 子集，拒绝 `<script>`、`<iframe>`、事件属性与 `javascript:` 等可执行内容；图片引用只允许 `![alt](figure:<figureId>)` 且 figureId 必须属于该章节。
+- 图示按章节审核：`GET /figures` 列候选，`select` 只能选 `ready` 候选，`regenerate` 仅 `generated` 类且不覆盖已选图，`DELETE` 被正文引用时 `409 figure_in_use`。
 - 片段写入校验 `startSec < endSec`、标题/文本长度与知识点归属；文本变更时清空 `embedding`，避免旧向量参与检索，需通过 `POST /v1/admin/content/reindex` 重建。
-- 学员可见性由现有查询保证：课程非 `published`、片段或文章非 `published` 时不下发；后台写入不影响已签发的播放会话，但新会话需片段仍可用。
+- 学员可见性由现有查询保证：课程非 `published`、片段/章节教材/图示非 `published` 时不下发；后台写入不影响已签发的播放会话，但新会话需片段仍可用。
 - 控制台为 `/admin` 单页应用（Vite + React 18 + Ant Design 5 + React Router + TanStack Query），构建产物由 Fastify 静态托管；默认深色、可切换浅色，提供概览工作台与课程/片段/视频建课/模型/账号分组导航；浏览器对 `/admin/*` 深链的 HTML 导航回落 `index.html`（`no-store`），API 404 保持 JSON。会话令牌存 `sessionStorage`，不使用 cookie，静态入口不缓存；所有数据请求仍走 `/v1/auth/session` + 后台接口逐请求鉴权。
 - 账号管理页仅 admin 可见；operator 登录后仅显示内容管理，接口层同时校验角色，前端隐藏不作为安全边界。
 - M1 在内容管理下追加素材、上传、管线任务、转写、生成与发布接口（详见 §6.4 与对接清单 §3.9），均要求 operator/admin 会话；发布必须显式调用，生成内容不会自动发布。
@@ -500,7 +536,7 @@ web/portal (Vite + React 18 + AntD 5)
 | GET | `/v1/portal/me/devices` | 门户会话 | 本人设备列表 |
 | DELETE | `/v1/portal/me/devices/{deviceId}` | 门户会话 | 仅本人设备；吊销该设备令牌 |
 | GET | `/v1/portal/releases` | 公开 | 发布清单，`max-age=60` |
-| GET | `/v1/portal/stats` | 公开（IP 限流） | 已发布课程/知识点/片段/文章计数，`max-age=60` |
+| GET | `/v1/portal/stats` | 公开（IP 限流） | 已发布课程/知识点/片段/章节教材/图示计数，`max-age=60` |
 
 - `requirePortalSession` 只接受 `sessions.scope='portal'` 且账号 active；学员门户令牌访问 `/v1/admin/*` 因角色被拒（`403`）。
 - 注册只允许 `student`；后台账号仍由管理员创建，运营/管理员可用门户接口维护自己的资料与设备。
@@ -511,11 +547,12 @@ web/portal (Vite + React 18 + AntD 5)
 **任务模型**
 
 ```
-LLM_TASKS = content.outline | content.points | content.article
+LLM_TASKS = content.outline | content.points | content.chapter
+          | content.figure | content.image
           | embedding.query | embedding.segment | asr.longform
 ```
 
-- `resolveTaskModel(taskKey)`：优先 `llm_task_bindings` 的主/备；未绑定时回落到同用途（content/embedding）的 `is_default AND is_active` 配置；仍无则任务失败。
+- `resolveTaskModel(taskKey)`：优先 `llm_task_bindings` 的主/备；未绑定时回落到同用途（content/embedding/image）的 `is_default AND is_active` 配置；仍无则任务失败。`content.image` 只解析 `purpose=image`，其余内容任务只解析 `purpose=content`。
 - `withFailover(taskKey, call)`：主模型可重试错误（429/`rate_limited`/`unavailable`/5xx/网络/超时）时切备用，仅单跳；两次尝试都写 `ai_usage_events` 与 `ai_run_steps`，运行标 `fallback_used`。
 - `reportFailure(configId, code)` 累加 `llm_config_health.consecutive_failures` 并写 `cooldown_until = now()+60s`；`reportSuccess` 清零。冷却状态进程内 Map + DB 双写，单实例成立。
 - `UsageRecorder` 内存缓冲批量 `INSERT`，按容量/定时 flush，进程关闭时 flush；记录只含数字、模型标识与错误码，不含 prompt、回答、音频或转写正文。
@@ -550,6 +587,13 @@ LLM_TASKS = content.outline | content.points | content.article
 - `watermark.label` 仅含非敏感用户标识；客户端渲染动态覆盖层（插件侧 A11）。
 - 加密方案（云点播私有加密 / AES-128）需与插件 hls.js 配置对齐，见 PRD §9。
 
+**图示图片**
+
+- 章节教材读取接口返回 `figures: { [figureId]: { url, width, height, alt, caption } }`，`url` 为短时签名地址，TTL 与播放会话同量级（默认 10 分钟）；数据库只存 `figure:<figureId>` 稳定引用。
+- 签名按「文件路径 + 过期时间」范围限定，一个签名不能跨 `figureId`/`candidateId` 读取；过期后由插件重新拉取章节内容换取新 URL。
+- 图片域允许 CORS `GET/OPTIONS`，支持条件请求与 `Cache-Control: private, max-age=<ttl>`；不支持 Range（图片不需要）。
+- 仅 `published` 图示可签发；`draft`/`failed` 图示对学员一律 `404`。管理端预览走 `[authorize]` 的独立接口，不复用学员签名。
+
 ## 9. 安全与隐私
 
 | 面 | 措施 |
@@ -558,8 +602,9 @@ LLM_TASKS = content.outline | content.points | content.article
 | 凭据 | 设备令牌与会话令牌只存哈希；密码只存带盐 scrypt；签名密钥与 CDN 密钥走密钥管理；不在日志、响应、镜像中出现 |
 | 账号 | 后台账号由管理员创建、学员可自助注册；角色最小权限；门户会话 `scope=portal` 与后台隔离；禁用/改密吊销会话，禁用即时拒绝设备令牌 |
 | 门户 | 预渲染 HTML `no-store`；未知路径壳 `noindex`；公开接口只返回发布清单与聚合计数；下载强制 `attachment` |
-| 内容 | 只下发 Top-K；播放地址短时效、设备绑定、并发限制；不提供下载直链 |
-| 内容管理 | `/v1/admin/content/*` 仅 operator/admin 会话；Markdown 拒绝可执行 HTML/脚本；发布状态即时影响学员可见性 |
+| 内容 | 只下发 Top-K；播放地址与图示地址短时效、设备绑定（播放）或按文件限定（图示）；不提供下载直链 |
+| 内容管理 | `/v1/admin/content/*` 仅 operator/admin 会话；Markdown 拒绝可执行 HTML/脚本；图片引用只认 `figure:<id>` 白名单格式；发布状态即时影响学员可见性 |
+| 图示 | 提示词由服务端模板拼装；输出经类型/尺寸/内容校验；不生成写实行情截图与品牌标识；文件独立目录、单文件签名、不向日志/响应泄露本地路径 |
 | 视频管线 | 上传先鉴权/限流再消费 body；`Content-Type` 与体积校验；ffmpeg/ffprobe 参数数组、禁止 shell；源路径/SHA/ffmpeg stderr/provider 响应不外泄；生成内容人工发布 |
 | 模型密钥 | ASR、embedding、内容 LLM 密钥只存加密数据库；不序列化、不写日志/响应/镜像；内容 LLM 仅管理端调用 |
 | AI 运营 | 用量只记数字与模型标识；绑定写仅 admin；读接口限流；健康与降级状态不含密钥与正文 |
@@ -628,6 +673,8 @@ LLM_TASKS = content.outline | content.points | content.article
 | 媒体 | 加密 HLS 可解密、seek、Range 206、CORS、token 过期提示 |
 | 语音 | WAV 校验边界、provider 成功/业务错误/429/5xx/非 JSON/超时、空文本 422、鉴权与限流、日志脱敏；真实 MiniMax 待后台录入 ASR 密钥 |
 | 管线 | 纯算法（静音切块、转写合并、文本锚定、ID）、假 provider ingest→生成→apply→发布 E2E、取消/重试/心跳恢复、上传边界、OpenAPI 双向一致；`RUN_FFMPEG_TESTS=1` 跑真实 ffmpeg 合成视频 |
+| 教材与图示 | 章节聚合（最少 5 分钟/章、单 KP 章合并）、map-reduce 事实锚定与 `ungrounded_removed`、1500–3000 字边界与 `article_short`、`figure` 引用解析、缺图发布 `409 figure_unresolved`、图片类型/尺寸/体积校验、2 候选与重试、`illustrate` 失败不影响发布、图片签名跨 figureId 越权、用量 `images` 记账 |
+| 模型配置 | `purpose=image` 默认唯一、`image_price_micros` 默认 ¥0.12、图片模型连通性测试、未配置时 `illustrate` 503 而生成照常 |
 | 门户 | 注册/登录/限流、会话 scope 越权、资料与设备解绑、发布清单缺失、预渲染深链与 `/v1` 404 语义、静态缓存头 |
 | AI 运营 | 用量记账、run/steps 一致性、绑定校验、主备切换与冷却、成本缺失返回 `null`、operator 只读与 admin 写 |
 | 安全 | 越权/设备不匹配/过期令牌、门户令牌访问后台、日志脱敏抽查、限流 |
@@ -645,6 +692,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 | M4.2 | 语音转写：`/v1/asr/transcribe`、MiniMax provider、配置与限流 | 契约测试通过；真实 MiniMax 需后台录入 ASR 密钥 | 已落地；真实上游已验收 |
 | M6 | 限流、压测、备份、合规加固 | 公测放行 | 已落地加固项；账号注销/数据删除待完成 |
 | M7 | 公开门户、门户自助账号、AI 用量账本、运行链路、任务级主备绑定与切换 | 门户深链可刷新；注册/登录/个人中心闭环；AI 调用可计量、可降级 | 已落地；客服/联系入口后置 |
+| M8 | 章节教材、图示（关键帧 + 文生图）、图片模型配置与限额、体系契约升级 | 章节教材 1500–3000 字且可带 0–3 图；缺图发布被拦截；插件按新契约渲染；成本 ≤¥10/课程 | 设计已定；待实现（插件需同步升级） |
 
 **实现状态（2026-11-01）**
 
@@ -666,14 +714,15 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 |---|---|---|
 | 视频上传 / 转码 / HLS 切片 | 已实现 | 流式 `PUT`（≤2GiB）、ffprobe 校验、单码率 H.264/AAC HLS、原子发布 |
 | 长音频转写（带时间戳） | 已实现 | 16kHz WAV、静音切块 ≤480s、MiniMax verbose/sentence 时间戳、块级缓存、≤30s 分组 |
-| 章节 / 知识点切分 | 已实现（草稿） | 600s 窗口 LLM 生成，逐字锚定与置信度标记，需人工审核 |
-| 文章与要点生成 | 已实现（草稿） | 每知识点生成安全 Markdown 草稿；失败标 `article_invalid`，不自动发布 |
+| 章节 / 知识点切分 | 已实现（草稿） | 全局大纲 3–6 章 + 600s 窗口知识点，逐字锚定与置信度标记，需人工审核 |
+| 章节教材生成 | 待实现（M8） | 按章 map-reduce 输出 1500–3000 字 Markdown，替代每知识点 200–800 字短文 |
+| 图示生成 | 待实现（M8） | 每章 0–3 张：视频关键帧 + Seedream 文生图各 2 候选，独立 `illustrate` 任务，人工选图 |
 | 片段映射 | 已实现（确定性） | 知识点时间窗与转写片段交集，≤120s / 4000 字，超限按转写边界拆分 |
 | 审核 / 发布 | 已实现 | 生成 `draft` → apply 写 draft 课程 → 显式 `publish`；状态 `draft/published/archived` |
 | 索引重建 | 已实现 | 发布前自动 `reindex`（配置 embedding 时）；管理端也可手工触发；未配置返回 `409` 或发布 `indexed=false` |
 | 检索 / 播放 | 已实现 | `halfvec + pg_trgm + RRF` 检索、签名 HLS 播放会话；播放只选 `ready` 素材 |
 
-未实现：多码率 ABR、对象存储、断点续传、在线编辑转写、生成结果细粒度选择、自动发布、一课程多视频、说话人分离与字幕导出。
+未实现：章节教材与图示（M8 设计已定）、多码率 ABR、对象存储、断点续传、在线编辑转写、生成结果细粒度选择、自动发布、一课程多视频、说话人分离与字幕导出。
 
 ## 14. 关键设计决策（ADR）
 
@@ -697,6 +746,10 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 | C16 | 门户与后台共用会话表，以 `scope` 区分来源 | 复用 scrypt/会话实现，避免两套账号体系；审计与定向清理更简单 | 鉴权中间件需同时校验 scope 与角色 |
 | C17 | AI 任务级主/备绑定 + 健康冷却 + 单跳降级 | 429/5xx 时自动恢复；绑定与默认配置兼容；用量与步骤可追溯 | 冷却为单实例内存 + DB 双写，横向扩容需共享状态 |
 | C18 | 用量账本只记数字与模型标识，成本按配置单价估算 | 不落 prompt/正文，隐私面小；价格缺失返回未知而非猜测 | 成本依赖运营维护单价，跨供应商计价格式未统一 |
+| C19 | 阅读层改为章节教材，替换每知识点短文 | 逐知识点成文导致目录碎片化、上下文不足；章节视角更接近人工阅读；知识点仍服务检索与播放锚点 | 需新表与契约破坏性变更；生成成本随章节变长 |
+| C20 | 图示用稳定 `figure:<figureId>` 引用 + 短时签名 URL | 避免把长时 token 写进 Markdown；换签名无需改正文；可按文件鉴权 | 渲染层需解析引用；发布前必须校验引用完整 |
+| C21 | 文生图直连火山方舟 Seedream，并入 `purpose=image` 模型配置 | 已有可用密钥与稳定接口；与内容/embedding 复用同一套配置、绑定、用量与价格模型 | 新增外部依赖；提示词需服务端约束内容安全 |
+| C22 | 旧课程直接作废重跑，不做迁移 | 旧内容分片质量不达标，迁移只会保留问题；课程数量少，重跑成本可控 | 旧课程链接与进度失效，需提前通知学员 |
 
 ## 15. 开放问题
 
@@ -709,7 +762,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 7. 部署区域与 CDN 供应商：影响签名算法、CORS 配置与延迟预算。
 8. 真实 MiniMax ASR 已完成链路验证（2026-11-01，本地 33 分钟中文样片：5 块、49 段、时间戳单调），密钥由后台「模型配置」录入；假 provider 仍用于自动测试。
 9. 多供应商 ASR 切换本期不做；provider 接口保留。
-10. 内容 LLM 已用 `MiniMax-M3.1-Flash`（anthropic 协议）跑通生成→审核→apply→发布。`m1-v2` 改为全局大纲后，同一 33 分钟样片由 21 章（含 1 个空章，文章中位数 202 字）收敛为 8 章、无空章、文章中位数 511 字；同一 30s 转写分组内的不同知识点仍会共享播放区间（受 30s 分组粒度限制），后续若需要更细定位可将转写分组改到句级。
+10. 内容 LLM 已用 `MiniMax-M3.1-Flash`（anthropic 协议）跑通生成→审核→apply→发布。`m1-v2` 改为全局大纲后，同一 33 分钟样片由 21 章（含 1 个空章，文章中位数 202 字）收敛为 8 章、无空章、文章中位数 511 字；同一 30s 转写分组内的不同知识点仍会共享播放区间（受 30s 分组粒度限制），后续若需要更细定位可将转写分组改到句级。**该结论由 M8 章节教材取代**：知识点文章不再下发，8 章结构仍作为大纲基线。
 11. MiniMax `verbose_json` 真实时间戳字段已确认可用；解析器仍兼容多种键，无时间戳时退化为整块。
 12. 真实 embedding 已验收（2026-11-01，智谱 `embedding-3` + `dimensions: 1024`）：测试连通正常，已有课程重发布 `indexed=true`、`embedded=30`，检索为词法 + 向量混合召回。
 13. 源视频与转写留存期限、版权授权与归档策略待运营确认；未冻结前不自动清理。
@@ -718,6 +771,10 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 16. 门户会话只存 `sessionStorage`、无刷新令牌；新标签页需重新登录，后续可评估短时刷新机制。
 17. 客服/联系入口（原需求 5）本期不做，后续单独立项。
 18. AI 限流与配置冷却仍为单实例内存实现；横向扩容前需换 Redis 或 DB 共享状态。
+19. **P0 待验证**：dsh-web-app 的 CSP 是否允许 `img-src` 指向云端图片域。若被拦截，改为 Host 代理图片字节（插件内签名中转），不降级为内联 base64。
+20. 关键帧目前由服务端按 `sourceHint` 自动抽取并做质量过滤，人工只能在候选中选图，不能指定任意秒；是否需要「手动指定时间点补图」待运营试用后决定。
+21. 旧课程作废策略：直接 `archived` 并从体系页隐藏，保留数据库行与播放签名能力 30 天后清理；学员进度不迁移，需在客户端提示「课程已更新」。
+22. 体系契约破坏性变更需插件版本门禁：云端 `GET /v1/catalog/courses/{id}` 返回 `contractVersion`，插件低于最低版本时提示升级，不静默降级。
 
 ## 16. 关联文档
 
