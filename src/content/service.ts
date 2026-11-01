@@ -37,7 +37,8 @@ export interface AdminCourseSummary extends AdminCourse {
   chapterCount: number
   knowledgePointCount: number
   segmentCount: number
-  articleCount: number
+  chapterArticleCount: number
+  figureCount: number
 }
 
 export interface AdminArticleMeta {
@@ -55,7 +56,6 @@ export interface AdminKnowledgePoint {
   title: string
   position: number
   segmentCount: number
-  article: AdminArticleMeta | null
 }
 
 export interface AdminChapter {
@@ -65,6 +65,8 @@ export interface AdminChapter {
 }
 
 export interface AdminChapterTree extends AdminChapter {
+  article: AdminArticleMeta | null
+  figureCount: number
   knowledgePoints: AdminKnowledgePoint[]
 }
 
@@ -105,7 +107,8 @@ interface CourseSummaryRow extends CourseRow {
   chapter_count: number
   knowledge_point_count: number
   segment_count: number
-  article_count: number
+  chapter_article_count: number
+  figure_count: number
 }
 
 interface ChapterRow {
@@ -120,9 +123,6 @@ interface PointRow {
   title: string
   position: number
   segment_count: number
-  article_version: number | null
-  article_status: ContentStatus | null
-  article_published_at: Date | null
 }
 
 interface SegmentDbRow {
@@ -144,6 +144,20 @@ interface ArticleRow {
   status: ContentStatus
   published_at: Date | null
 }
+
+interface ChapterArticleMetaRow {
+  chapter_id: string
+  version: number
+  status: ContentStatus
+  published_at: Date | null
+}
+
+interface ChapterFigureCountRow {
+  chapter_id: string
+  figure_count: number
+}
+
+const ANY_INLINE_IMAGE = /!\[([^\]\n]*)\]\(([^)\n]*)\)/g
 
 export function parseContentId(raw: string, field: string): string {
   return stringField({ [field]: raw }, field, { max: 64, pattern: ID })
@@ -218,12 +232,8 @@ export class ContentService {
               (SELECT count(*)::int FROM chapters ch WHERE ch.course_id = c.course_id) AS chapter_count,
               (SELECT count(*)::int FROM knowledge_points kp WHERE kp.course_id = c.course_id) AS knowledge_point_count,
               (SELECT count(*)::int FROM segments sg WHERE sg.course_id = c.course_id) AS segment_count,
-              COALESCE((
-                SELECT count(*)::int
-                FROM articles a
-                JOIN knowledge_points kp ON kp.knowledge_point_id = a.knowledge_point_id
-                WHERE kp.course_id = c.course_id
-              ), 0) AS article_count
+              (SELECT count(*)::int FROM chapter_articles ca WHERE ca.course_id = c.course_id) AS chapter_article_count,
+              (SELECT count(*)::int FROM figures f WHERE f.course_id = c.course_id) AS figure_count
        FROM courses c
        ORDER BY c.created_at, c.course_id`,
     )
@@ -235,7 +245,8 @@ export class ContentService {
         chapterCount: row.chapter_count,
         knowledgePointCount: row.knowledge_point_count,
         segmentCount: row.segment_count,
-        articleCount: row.article_count,
+        chapterArticleCount: row.chapter_article_count,
+        figureCount: row.figure_count,
       })),
     }
   }
@@ -270,12 +281,8 @@ export class ContentService {
     )
     const { rows: pointRows } = await this.pool.query<PointRow>(
       `SELECT kp.knowledge_point_id, kp.chapter_id, kp.title, kp.position,
-              (SELECT count(*)::int FROM segments sg WHERE sg.knowledge_point_id = kp.knowledge_point_id) AS segment_count,
-              a.version AS article_version,
-              a.status AS article_status,
-              a.published_at AS article_published_at
+              (SELECT count(*)::int FROM segments sg WHERE sg.knowledge_point_id = kp.knowledge_point_id) AS segment_count
        FROM knowledge_points kp
-       LEFT JOIN articles a ON a.knowledge_point_id = kp.knowledge_point_id
        WHERE kp.course_id = $1
        ORDER BY kp.position, kp.knowledge_point_id`,
       [courseId],
@@ -283,23 +290,36 @@ export class ContentService {
 
     const byChapter = new Map<string, AdminKnowledgePoint[]>()
     for (const row of pointRows) {
-      const article = row.article_version === null
-        ? null
-        : {
-            version: row.article_version,
-            status: row.article_status ?? 'draft',
-            publishedAt: row.article_published_at?.getTime() ?? null,
-          }
       const list = byChapter.get(row.chapter_id) ?? []
       list.push({
         knowledgePointId: row.knowledge_point_id,
         title: row.title,
         position: row.position,
         segmentCount: row.segment_count,
-        article,
       })
       byChapter.set(row.chapter_id, list)
     }
+
+    const { rows: articleRows } = await this.pool.query<ChapterArticleMetaRow>(
+      `SELECT chapter_id, version, status, published_at
+       FROM chapter_articles WHERE course_id = $1`,
+      [courseId],
+    )
+    const articles = new Map<string, AdminArticleMeta>()
+    for (const row of articleRows) {
+      articles.set(row.chapter_id, {
+        version: row.version,
+        status: row.status,
+        publishedAt: row.published_at?.getTime() ?? null,
+      })
+    }
+
+    const { rows: figureRows } = await this.pool.query<ChapterFigureCountRow>(
+      `SELECT chapter_id, count(*)::int AS figure_count
+       FROM figures WHERE course_id = $1 GROUP BY chapter_id`,
+      [courseId],
+    )
+    const figureCounts = new Map(figureRows.map(row => [row.chapter_id, row.figure_count]))
 
     return {
       course: { courseId: course.course_id, title: course.title, status: course.status },
@@ -307,6 +327,8 @@ export class ContentService {
         chapterId: row.chapter_id,
         title: row.title,
         position: row.position,
+        article: articles.get(row.chapter_id) ?? null,
+        figureCount: figureCounts.get(row.chapter_id) ?? 0,
         knowledgePoints: byChapter.get(row.chapter_id) ?? [],
       })),
     }
@@ -388,7 +410,6 @@ export class ContentService {
       title: input.title,
       position: input.position ?? 0,
       segmentCount: 0,
-      article: null,
     }
   }
 
@@ -402,18 +423,12 @@ export class ContentService {
       title: string
       position: number
       segment_count: number
-      article_version: number | null
-      article_status: ContentStatus | null
-      article_published_at: Date | null
     }>(
       `UPDATE knowledge_points kp
        SET title = COALESCE($2, kp.title), position = COALESCE($3, kp.position)
        WHERE kp.knowledge_point_id = $1
        RETURNING kp.knowledge_point_id, kp.title, kp.position,
-         (SELECT count(*)::int FROM segments sg WHERE sg.knowledge_point_id = kp.knowledge_point_id) AS segment_count,
-         (SELECT version FROM articles a WHERE a.knowledge_point_id = kp.knowledge_point_id) AS article_version,
-         (SELECT status FROM articles a WHERE a.knowledge_point_id = kp.knowledge_point_id) AS article_status,
-         (SELECT published_at FROM articles a WHERE a.knowledge_point_id = kp.knowledge_point_id) AS article_published_at`,
+         (SELECT count(*)::int FROM segments sg WHERE sg.knowledge_point_id = kp.knowledge_point_id) AS segment_count`,
       [knowledgePointId, input.title ?? null, input.position ?? null],
     )
     const row = rows[0]
@@ -423,50 +438,48 @@ export class ContentService {
       title: row.title,
       position: row.position,
       segmentCount: row.segment_count,
-      article: row.article_version === null
-        ? null
-        : {
-            version: row.article_version,
-            status: row.article_status ?? 'draft',
-            publishedAt: row.article_published_at?.getTime() ?? null,
-          },
     }
   }
 
-  async getArticle(rawKnowledgePointId: string): Promise<AdminArticle | null> {
-    const knowledgePointId = parseContentId(rawKnowledgePointId, 'knowledgePointId')
-    await this.requireKnowledgePoint(knowledgePointId)
+  async getChapterArticle(rawCourseId: string, rawChapterId: string): Promise<AdminArticle | null> {
+    const courseId = parseContentId(rawCourseId, 'courseId')
+    const chapterId = parseContentId(rawChapterId, 'chapterId')
+    await this.requireChapter(courseId, chapterId)
     const { rows } = await this.pool.query<ArticleRow>(
-      `SELECT markdown, version, status, published_at FROM articles WHERE knowledge_point_id = $1`,
-      [knowledgePointId],
+      `SELECT markdown, version, status, published_at
+       FROM chapter_articles WHERE course_id = $1 AND chapter_id = $2`,
+      [courseId, chapterId],
     )
     const row = rows[0]
     return row === undefined ? null : toArticle(row)
   }
 
-  async putArticle(
-    rawKnowledgePointId: string,
+  async putChapterArticle(
+    rawCourseId: string,
+    rawChapterId: string,
     input: { markdown: string; status: ContentStatus },
   ): Promise<AdminArticle> {
-    const knowledgePointId = parseContentId(rawKnowledgePointId, 'knowledgePointId')
-    await this.requireKnowledgePoint(knowledgePointId)
+    const courseId = parseContentId(rawCourseId, 'courseId')
+    const chapterId = parseContentId(rawChapterId, 'chapterId')
+    await this.requireChapter(courseId, chapterId)
+    await this.requireChapterFigures(courseId, chapterId, input.markdown)
     const { rows } = await this.pool.query<ArticleRow>(
-      `INSERT INTO articles (knowledge_point_id, markdown, version, status, published_at, updated_at)
-       VALUES ($1, $2, 1, $3, CASE WHEN $3 = 'published' THEN now() END, now())
-       ON CONFLICT (knowledge_point_id) DO UPDATE
+      `INSERT INTO chapter_articles (course_id, chapter_id, markdown, version, status, published_at, updated_at)
+       VALUES ($1, $2, $3, 1, $4, CASE WHEN $4 = 'published' THEN now() END, now())
+       ON CONFLICT (course_id, chapter_id) DO UPDATE
        SET markdown = EXCLUDED.markdown,
-           version = articles.version + 1,
+           version = chapter_articles.version + 1,
            status = EXCLUDED.status,
            published_at = CASE
              WHEN EXCLUDED.status = 'published' THEN now()
-             ELSE articles.published_at
+             ELSE chapter_articles.published_at
            END,
            updated_at = now()
        RETURNING markdown, version, status, published_at`,
-      [knowledgePointId, input.markdown, input.status],
+      [courseId, chapterId, input.markdown, input.status],
     )
     const row = rows[0]
-    if (row === undefined) throw new HttpError(500, 'article save failed')
+    if (row === undefined) throw new HttpError(500, 'chapter article save failed')
     return toArticle(row)
   }
 
@@ -645,12 +658,23 @@ export class ContentService {
     if (rowCount === 0) throw notFound('chapter not found')
   }
 
-  private async requireKnowledgePoint(knowledgePointId: string): Promise<void> {
-    const { rowCount } = await this.pool.query(
-      `SELECT 1 FROM knowledge_points WHERE knowledge_point_id = $1`,
-      [knowledgePointId],
+  /** 正文只允许引用本章已存在的 figure，避免跨章引用或外链图片绕过签名。 */
+  private async requireChapterFigures(
+    courseId: string,
+    chapterId: string,
+    markdown: string,
+  ): Promise<void> {
+    const { rows } = await this.pool.query<{ figure_id: string }>(
+      `SELECT figure_id FROM figures WHERE course_id = $1 AND chapter_id = $2`,
+      [courseId, chapterId],
     )
-    if (rowCount === 0) throw notFound('knowledge point not found')
+    const owned = new Set(rows.map(row => row.figure_id))
+    for (const match of markdown.matchAll(ANY_INLINE_IMAGE)) {
+      const target = match[2] ?? ''
+      if (!target.startsWith('figure:') || !owned.has(target.slice('figure:'.length))) {
+        throw badRequest('markdown images must reference figures in this chapter')
+      }
+    }
   }
 
   private async requireKnowledgePointIn(

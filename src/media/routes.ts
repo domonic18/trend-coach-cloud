@@ -6,6 +6,7 @@ import type { Pool } from 'pg'
 import type { AppConfig } from '../config.js'
 import { HttpError } from '../errors.js'
 import { verifyPlaybackToken } from '../playback/sign.js'
+import { isFigurePath, verifyFigureSignature } from './figure-sign.js'
 import { parseRange } from './range.js'
 
 const MEDIA_FILE = /\.(m3u8|key|ts|m4s|mp4)$/i
@@ -16,6 +17,8 @@ const MIME_TYPES: Record<string, string> = {
   '.ts': 'video/mp2t',
   '.m4s': 'video/iso.segment',
   '.mp4': 'video/mp4',
+  '.jpg': 'image/jpeg',
+  '.png': 'image/png',
 }
 
 export interface MediaRouteDeps {
@@ -79,6 +82,34 @@ export function registerMediaRoutes(app: FastifyInstance, deps: MediaRouteDeps):
       .header('content-length', String(end - start + 1))
       .send(createReadStream(filePath, { start, end }))
   })
+
+  const figureRoot = config.figureLocalDir === undefined ? undefined : resolve(config.figureLocalDir)
+  if (figureRoot !== undefined) {
+    app.get('/media/figures/*', async (request, reply) => {
+      const wildcard = (request.params as Record<string, string>)['*'] ?? ''
+      let relative: string
+      try {
+        relative = decodeURIComponent(wildcard)
+      } catch {
+        throw new HttpError(400, 'invalid figure path')
+      }
+      const query = request.query as Record<string, unknown>
+      if (!isFigurePath(relative)
+        || !verifyFigureSignature(config.mediaSigningSecret, relative, query.expires, query.sig)) {
+        throw new HttpError(403, 'figure signature invalid or expired')
+      }
+      const filePath = resolve(figureRoot, relative)
+      if (!filePath.startsWith(figureRoot + sep)) throw new HttpError(404, 'not found')
+      const info = await stat(filePath).catch(() => undefined)
+      if (info === undefined || !info.isFile()) throw new HttpError(404, 'not found')
+      const extension = relative.slice(relative.lastIndexOf('.')).toLowerCase()
+      return reply
+        .type(MIME_TYPES[extension] ?? 'application/octet-stream')
+        .header('cache-control', `private, max-age=${config.figureSigningTtlSec}`)
+        .header('x-content-type-options', 'nosniff')
+        .send(createReadStream(filePath))
+    })
+  }
 }
 
 function rewritePlaylist(body: string, token: string): string {

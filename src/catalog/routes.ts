@@ -35,6 +35,12 @@ export function registerCatalogRoutes(app: FastifyInstance, deps: CatalogRouteDe
     return catalog.getCourse(courseId, principal.userId)
   })
 
+  app.get('/v1/catalog/courses/:courseId/chapters/:chapterId', async request => {
+    await guard(request)
+    const { courseId, chapterId } = request.params as { courseId: string; chapterId: string }
+    return catalog.getChapter(courseId, chapterId)
+  })
+
   app.get('/v1/catalog/knowledge-points/:knowledgePointId', async request => {
     await guard(request)
     const { knowledgePointId } = request.params as { knowledgePointId: string }

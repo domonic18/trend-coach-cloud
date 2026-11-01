@@ -172,22 +172,28 @@ export function registerContentRoutes(app: FastifyInstance, deps: ContentRouteDe
     }
   })
 
-  app.get('/v1/admin/content/knowledge-points/:knowledgePointId/article', async request => {
-    await guard(request)
-    const { knowledgePointId } = request.params as { knowledgePointId: string }
-    return { article: await content.getArticle(knowledgePointId) }
-  })
+  app.get(
+    '/v1/admin/content/courses/:courseId/chapters/:chapterId/article',
+    async request => {
+      await guard(request)
+      const { courseId, chapterId } = request.params as { courseId: string; chapterId: string }
+      return { article: await content.getChapterArticle(courseId, chapterId) }
+    },
+  )
 
-  app.put('/v1/admin/content/knowledge-points/:knowledgePointId/article', async request => {
-    await guard(request)
-    const { knowledgePointId } = request.params as { knowledgePointId: string }
-    const body = asObject(request.body)
-    const article = await content.putArticle(knowledgePointId, {
-      markdown: markdownField(body),
-      status: parseStatus(body.status),
-    })
-    return { article }
-  })
+  app.put(
+    '/v1/admin/content/courses/:courseId/chapters/:chapterId/article',
+    async request => {
+      await guard(request)
+      const { courseId, chapterId } = request.params as { courseId: string; chapterId: string }
+      const body = asObject(request.body)
+      const article = await content.putChapterArticle(courseId, chapterId, {
+        markdown: markdownField(body),
+        status: parseStatus(body.status),
+      })
+      return { article }
+    },
+  )
 
   app.get('/v1/admin/content/segments', async request => {
     await guard(request)

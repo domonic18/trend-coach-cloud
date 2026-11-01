@@ -14,8 +14,9 @@ export interface SeedSegment {
   text: string
 }
 
-export interface SeedArticle {
-  knowledgePointId: string
+export interface SeedChapterArticle {
+  courseId: string
+  chapterId: string
   markdown: string
   version: number
   publishedAt: string
@@ -27,7 +28,7 @@ export interface Seed {
   knowledgePoints: { knowledgePointId: string; courseId: string; chapterId: string; title: string; position: number }[]
   segments: SeedSegment[]
   mediaAssets: { assetId: string; courseId: string; hlsPath: string; encryption: string }[]
-  articles?: SeedArticle[]
+  chapterArticles?: SeedChapterArticle[]
 }
 
 export const DEFAULT_SEED_PATH = fileURLToPath(new URL('../data/seed.json', import.meta.url))
@@ -74,14 +75,14 @@ export async function seedDatabase(pool: Pool, seedPath = DEFAULT_SEED_PATH): Pr
         ],
       )
     }
-    for (const article of seed.articles ?? []) {
+    for (const article of seed.chapterArticles ?? []) {
       await client.query(
-        `INSERT INTO articles (knowledge_point_id, markdown, version, status, published_at, updated_at)
-         VALUES ($1, $2, $3, 'published', $4, now())
-         ON CONFLICT (knowledge_point_id) DO UPDATE
+        `INSERT INTO chapter_articles (course_id, chapter_id, markdown, version, status, published_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'published', $5, now())
+         ON CONFLICT (course_id, chapter_id) DO UPDATE
          SET markdown = EXCLUDED.markdown, version = EXCLUDED.version,
              status = 'published', published_at = EXCLUDED.published_at, updated_at = now()`,
-        [article.knowledgePointId, article.markdown, article.version, new Date(article.publishedAt)],
+        [article.courseId, article.chapterId, article.markdown, article.version, new Date(article.publishedAt)],
       )
     }
     for (const asset of seed.mediaAssets) {

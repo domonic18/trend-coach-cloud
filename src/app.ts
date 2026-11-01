@@ -28,7 +28,7 @@ import { ContentService } from './content/service.js'
 import { registerContentRoutes } from './content/routes.js'
 import { EventService } from './events/service.js'
 import { registerEventRoutes } from './events/routes.js'
-import { HttpError } from './errors.js'
+import { CodedHttpError, HttpError } from './errors.js'
 import { createMetrics, type Metrics } from './metrics.js'
 import { RateLimiter } from './rate-limit.js'
 import type { EmbeddingResolver } from './kb/embedding.js'
@@ -36,6 +36,7 @@ import { KnowledgeService } from './kb/service.js'
 import { ModelConfigService } from './model-config/service.js'
 import { registerModelConfigRoutes } from './model-config/routes.js'
 import { registerKbRoutes } from './kb/routes.js'
+import { signFigureUrl } from './media/figure-sign.js'
 import { registerMediaRoutes } from './media/routes.js'
 import { PlaybackService } from './playback/service.js'
 import { registerPlaybackRoutes } from './playback/routes.js'
@@ -121,6 +122,13 @@ export async function buildApp({
   })
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
+    if (error instanceof CodedHttpError) {
+      reply.code(error.statusCode).send({
+        error: { code: error.code, message: error.message, ...error.details },
+        requestId: request.id,
+      })
+      return
+    }
     if (error instanceof HttpError) {
       if (error.statusCode === 429) reply.header('retry-after', '60')
       reply.code(error.statusCode).send({ error: error.message, requestId: request.id })
@@ -178,7 +186,10 @@ export async function buildApp({
   const kb = new KnowledgeService(pool, config, embedding)
   const playback = new PlaybackService(pool, config, auth)
   const events = new EventService(pool)
-  const catalog = new CatalogService(pool)
+  const catalog = new CatalogService(
+    pool,
+    relPath => signFigureUrl(config.mediaSigningSecret, config.mediaBaseUrl, relPath, config.figureSigningTtlSec),
+  )
   const progress = new ProgressService(pool)
   const content = new ContentService(pool, embedding)
   const resolveAsr = async (): Promise<AsrProvider | undefined> => {
