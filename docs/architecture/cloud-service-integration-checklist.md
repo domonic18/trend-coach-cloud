@@ -529,13 +529,14 @@ POST  /v1/admin/content/courses/{courseId}/publish
 | GET/POST | `/llm` | 列出/新增 LLM 条目（`purpose=content\|embedding`） |
 | GET/PATCH/DELETE | `/llm/{configId}` | 详情/修改/删除（删除默认项时自动提升同用途最早启用项） |
 | POST | `/llm/{configId}/set-default` | 切换同用途默认（按用途唯一） |
-| POST | `/llm/{configId}/test` | 连通性测试（content `max_tokens:1`；embedding 校验 1024 维） |
+| POST | `/llm/{configId}/test` | 连通性测试（content `max_tokens:1`，按 `protocol` 选择端点；embedding 校验 1024 维） |
 | GET/PATCH | `/asr` | 单行 ASR 渠道配置（`protocol=minimax\|openai`、`enabled`） |
 | POST | `/asr/test` | 用 1 秒 440Hz WAV 测试上游 |
 
 - 响应字段：`apiKeyConfigured`、`apiKeyMasked`（前 4 + `*` + 后 4；短密钥整体打码）；**从不返回明文密钥**，请求日志与响应中不得出现 key。
 - `PATCH` 中 `apiKey: ""` 表示保留原密钥；新增时空串/缺省表示不配置密钥。
-- `baseUrl` 仅接受 http(s) 绝对地址；粘贴完整端点（`/chat/completions`、`/embeddings`、`/audio/transcriptions`、`/v1/speech_to_text`）时自动归一化到 base。
+- `baseUrl` 仅接受 http(s) 绝对地址；粘贴完整端点（`/chat/completions`、`/embeddings`、`/audio/transcriptions`、`/v1/speech_to_text`、`/v1/messages`）时自动归一化到 base。
+- 内容 LLM `protocol=openai|anthropic`：`openai` 走 `/chat/completions` + `response_format=json_object`；`anthropic` 走 `/v1/messages` + `x-api-key` + `anthropic-version: 2023-06-01`。`purpose=embedding` 只允许 `openai`（Anthropic 无 embeddings 端点），否则 `400`。
 - 保存后运行时在下一次任务/检索/发布时解析最新默认配置，无需重启；删除密钥或不可解密时按未配置处理。
 - 错误：`400` 入参/ID；`401/403` 鉴权与角色；`404` 不存在；`409` 停用项不可设默认；`429` 限流。
 
@@ -638,7 +639,7 @@ POST  /v1/admin/content/courses/{courseId}/publish
 | 相邻知识点阈值 | 空召回或最高分低于阈值（待定数值） | F1.4 召回质量 |
 | ASR 供应商与模型 | MiniMax `asr-1.0`；provider 接口保留 | 供应商抖动与成本 |
 | 语音成本上限 | 单次 ≤60s、每设备 20 次/分钟；不自动重试 | 滥用与账单 |
-| 内容 LLM 供应商与模型 | OpenAI 兼容 `/chat/completions`；模型在后台「模型配置」维护 | 生成质量与成本 |
+| 内容 LLM 供应商与模型 | OpenAI 兼容 `/chat/completions` 或 Anthropic `/v1/messages`；模型在后台「模型配置」维护 | 生成质量与成本 |
 | 长音频切块与重试 | ≤480s/块、3 次重试、30s 分组；真实时间戳字段待联调 | 计费与对齐精度 |
 | 源视频与转写留存 | 默认保留，不自动清理；按版权授权人工归档 | 存储与合规 |
 | 多码率与对象存储 | 本期单码率本地存储；`MediaStore` 预留 | 带宽与扩容 |

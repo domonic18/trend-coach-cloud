@@ -434,8 +434,9 @@ ASR / 内容 LLM / embedding 的连接信息不再读环境变量，统一存数
 
 ### 7.1 模型配置（数据库）
 
-- `llm_configs`：多条目，`purpose=content|embedding`；部分唯一索引保证每个用途最多一个 `is_default AND is_active`；`embedding` 必须返回 1024 维。
+- `llm_configs`：多条目，`purpose=content|embedding`；`protocol=openai|anthropic`（content 两者均可，embedding 只能 `openai`）；部分唯一索引保证每个用途最多一个 `is_default AND is_active`；`embedding` 必须返回 1024 维。
 - `asr_config`：单行（`id=1`），`protocol=minimax|openai`，`enabled` 控制是否可用于转写。
+- 内容 LLM 调用：`openai` 走 `{baseUrl}/chat/completions`（`response_format=json_object`）；`anthropic` 走 `{baseUrl}/v1/messages`（`x-api-key` + `anthropic-version: 2023-06-01`，拼接 `content[].text`，`stop_reason=max_tokens` 视为截断）。连通性测试与正式调用使用同一协议分支。
 - `api_key_encrypted` 形如 `v1:<iv>:<tag>:<ciphertext>`（AES-256-GCM，base64url）；解密失败按未配置处理，DTO 只回 `apiKeyMasked`（前 4 + `*` + 后 4）或「无法解密，请重新录入」；明文密钥永不落库、日志与响应。
 - API `/v1/admin/model-configs/*` 仅 `admin`；`PATCH apiKey=""` 保留原密钥；`baseUrl` 自动剥离常见端点后缀。
 - 运行时按操作解析：ingest 开始时取 ASR、generate 开始时取 content LLM、检索/发布建索引时取 embedding；管理员保存后下一次操作即生效，无需重启。

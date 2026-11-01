@@ -104,7 +104,7 @@ deploy/           # staging/production 部署与密钥注入说明（不含密�
 | 检索排序/阈值参数 | `src/config.ts` 配置项，可调；默认值写进架构文档 |
 | 媒体签名逻辑 | `src/playback/`，与 CDN 配置分离 |
 | 管线任务与生成 | `src/pipeline/`；任务表见 `004_pipeline.sql`，不把业务状态塞进 `options` |
-| 模型连接与密钥 | `src/model-config/`；表见 `005_model_config.sql`；密钥只存 AES-256-GCM 密文，不读环境变量、不回显明文 |
+| 模型连接与密钥 | `src/model-config/`；表见 `005_model_config.sql`（`006_llm_protocol.sql` 放开 anthropic）；密钥只存 AES-256-GCM 密文，不读环境变量、不回显明文；content 支持 openai 兼容与 anthropic Messages，embedding 仅 openai |
 | 源视频与 HLS | `workspace/pipeline/{storage,hls}`（已 gitignore）；容器内由 `/data` 单挂载点提供，两目录必须同卷 |
 | 契约测试夹具 | `data/seed.json`，与插件 `spike/fixtures.json` 的响应形状对齐 |
 | 文档 | `docs/<类别>/`，索引见 `docs/ai-context/docs-overview.md` |
