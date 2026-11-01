@@ -53,7 +53,7 @@ async function startStub(
 }
 
 function asrConfig(baseUrl: string, timeoutMs = 1000): AsrConfig {
-  return { baseUrl, apiKey: 'test-asr-key', model: 'asr-1.0', timeoutMs }
+  return { protocol: 'minimax', baseUrl, apiKey: 'test-asr-key', model: 'asr-1.0', timeoutMs }
 }
 
 function jsonResponse(response: ServerResponse, payload: unknown, status = 200): void {

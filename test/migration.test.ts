@@ -127,6 +127,52 @@ test('pipeline_jobs 校验 ID、状态与同素材活跃任务唯一', async () 
   )
 })
 
+test('005 迁移创建模型配置表与唯一默认约束', async () => {
+  const tables = await pool.query<{ table_name: string }>(
+    `SELECT table_name FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = ANY($1)`,
+    [['llm_configs', 'asr_config']],
+  )
+  assert.deepEqual(tables.rows.map(row => row.table_name).sort(), ['asr_config', 'llm_configs'])
+
+  const indexes = await pool.query<{ indexname: string }>(
+    `SELECT indexname FROM pg_indexes WHERE schemaname = 'public'`,
+  )
+  const names = new Set(indexes.rows.map(row => row.indexname))
+  for (const index of ['llm_configs_default_idx', 'llm_configs_purpose_active_idx']) {
+    assert.ok(names.has(index), index)
+  }
+
+  await pool.query(
+    `INSERT INTO llm_configs (config_id, name, provider, base_url, model, purpose, is_default)
+     VALUES ('llmc_0000000000000001', 'primary', 'openai', 'https://api.example.com/v1', 'm1', 'content', true)`,
+  )
+  await rejectsWithCode(
+    pool.query(
+      `INSERT INTO llm_configs (config_id, name, provider, base_url, model, purpose, is_default)
+       VALUES ('llmc_0000000000000002', 'second', 'openai', 'https://api.example.com/v1', 'm2', 'content', true)`,
+    ),
+    '23505',
+  )
+  await pool.query(
+    `INSERT INTO llm_configs (config_id, name, provider, base_url, model, purpose, is_default)
+     VALUES ('llmc_0000000000000003', 'embed', 'openai', 'https://api.example.com/v1', 'e1', 'embedding', true)`,
+  )
+  await rejectsWithCode(
+    pool.query(
+      `INSERT INTO llm_configs (config_id, name, provider, base_url, model, purpose)
+       VALUES ('llmc_0000000000000004', 'bad', 'openai', 'https://api.example.com/v1', 'x', 'image')`,
+    ),
+    '23514',
+  )
+
+  await pool.query('INSERT INTO asr_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING')
+  await rejectsWithCode(
+    pool.query('INSERT INTO asr_config (id) VALUES (2)'),
+    '23514',
+  )
+})
+
 test('转写块拒绝非正时间范围', async () => {
   await pool.query(
     `INSERT INTO media_transcripts (transcript_id, asset_id, model)

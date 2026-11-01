@@ -62,7 +62,6 @@ function env(overrides: Record<string, string> = {}): Record<string, string> {
     RATE_LIMIT_REFRESH_PER_MINUTE: '1000',
     RATE_LIMIT_CATALOG_PER_MINUTE: '1000',
     RATE_LIMIT_CONTENT_PER_MINUTE: '1000',
-    ASR_API_KEY: 'test-asr-key',
     ...overrides,
   }
 }
@@ -218,8 +217,11 @@ test('OpenAPI 与注册路由双向一致', async () => {
     await readFile(new URL('../openapi/openapi.yaml', import.meta.url), 'utf8'),
   ) as { paths: Record<string, Record<string, unknown>> }
   const documented = new Set<string>()
+  const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete'])
   for (const [path, item] of Object.entries(document.paths)) {
-    for (const method of Object.keys(item)) documented.add(`${method.toUpperCase()} ${path}`)
+    for (const method of Object.keys(item)) {
+      if (METHODS.has(method)) documented.add(`${method.toUpperCase()} ${path}`)
+    }
   }
   const registered = new Set(
     routes
@@ -1974,4 +1976,250 @@ test('语音转写限流：单设备超出配额返回 429', async () => {
   } finally {
     await limited.close()
   }
+})
+
+test('模型配置：仅管理员可读，密钥加密落库且只回显掩码', async () => {
+  const operator = await adminCreateUser({
+    username: 'model-operator-01',
+    displayName: '模型运营',
+    role: 'operator',
+    password: 'operator-password-123',
+  })
+  assert.equal(operator.statusCode, 201, JSON.stringify(operator.body))
+  const operatorLogin = await loginSession('model-operator-01', 'operator-password-123')
+  assert.equal(operatorLogin.statusCode, 200, JSON.stringify(operatorLogin.body))
+  const operatorHeaders = { authorization: `Bearer ${operatorLogin.body.token}` }
+
+  const anonymous = await app.inject({ method: 'GET', url: '/v1/admin/model-configs/llm' })
+  assert.equal(anonymous.statusCode, 401)
+  const deviceToken = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/model-configs/llm',
+    headers: authHeaders(mainGrant),
+  })
+  assert.equal(deviceToken.statusCode, 401)
+  const denied = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/model-configs/llm',
+    headers: operatorHeaders,
+  })
+  assert.equal(denied.statusCode, 403)
+
+  const empty = await app.inject({ method: 'GET', url: '/v1/admin/model-configs/llm', headers: adminHeaders() })
+  assert.equal(empty.statusCode, 200)
+  assert.deepEqual(empty.json(), [])
+
+  const apiKey = 'sk-contract-key-123456'
+  const created = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/model-configs/llm',
+    headers: adminHeaders(),
+    payload: {
+      name: 'primary',
+      provider: 'openai',
+      baseUrl: 'https://api.example.com/v1/chat/completions',
+      model: 'gpt-test',
+      purpose: 'content',
+      apiKey,
+      isDefault: true,
+    },
+  })
+  assert.equal(created.statusCode, 201, created.body)
+  const first = created.json() as {
+    configId: string
+    baseUrl: string
+    apiKeyConfigured: boolean
+    apiKeyMasked: string | null
+    isDefault: boolean
+    protocol: string
+  }
+  assert.match(first.configId, /^llmc_[0-9a-f]{16}$/)
+  assert.equal(first.baseUrl, 'https://api.example.com')
+  assert.equal(first.protocol, 'openai')
+  assert.equal(first.apiKeyConfigured, true)
+  assert.equal(first.apiKeyMasked, 'sk-c********3456')
+  assert.equal(created.body.includes(apiKey), false)
+
+  const { rows } = await pool.query<{ api_key_encrypted: string }>(
+    'SELECT api_key_encrypted FROM llm_configs WHERE config_id = $1',
+    [first.configId],
+  )
+  const stored = rows[0]?.api_key_encrypted ?? ''
+  assert.match(stored, /^v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/)
+  assert.equal(stored.includes(apiKey), false)
+
+  const second = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/model-configs/llm',
+    headers: adminHeaders(),
+    payload: {
+      name: 'backup',
+      provider: 'openai',
+      baseUrl: 'https://api.example.com/v1',
+      model: 'gpt-backup',
+      purpose: 'content',
+      apiKey: 'sk-second-key-654321',
+      isDefault: true,
+    },
+  })
+  assert.equal(second.statusCode, 201, second.body)
+  const secondId = (second.json() as { configId: string }).configId
+
+  const list = await app.inject({ method: 'GET', url: '/v1/admin/model-configs/llm', headers: adminHeaders() })
+  const configs = (list.json() as { configId: string; isDefault: boolean; apiKeyMasked: string }[])
+  assert.equal(configs.length, 2)
+  const defaults = configs.filter(config => config.isDefault)
+  assert.deepEqual(defaults.map(config => config.configId), [secondId])
+  assert.equal(list.body.includes('sk-second-key-654321'), false)
+
+  const patched = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/model-configs/llm/${first.configId}`,
+    headers: adminHeaders(),
+    payload: { apiKey: '', name: 'primary-renamed' },
+  })
+  assert.equal(patched.statusCode, 200, patched.body)
+  const patchedBody = patched.json() as { name: string; apiKeyConfigured: boolean; apiKeyMasked: string }
+  assert.equal(patchedBody.name, 'primary-renamed')
+  assert.equal(patchedBody.apiKeyConfigured, true)
+  assert.equal(patchedBody.apiKeyMasked, 'sk-c********3456')
+
+  const embedding = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/model-configs/llm',
+    headers: adminHeaders(),
+    payload: {
+      name: 'embed',
+      provider: 'openai',
+      baseUrl: 'https://api.example.com',
+      model: 'embed-test',
+      purpose: 'embedding',
+      isDefault: true,
+    },
+  })
+  assert.equal(embedding.statusCode, 201, embedding.body)
+  const embeddingBody = embedding.json() as { apiKeyConfigured: boolean; apiKeyMasked: string | null; isDefault: boolean }
+  assert.equal(embeddingBody.apiKeyConfigured, false)
+  assert.equal(embeddingBody.apiKeyMasked, null)
+  assert.equal(embeddingBody.isDefault, true)
+
+  const switched = await app.inject({
+    method: 'POST',
+    url: `/v1/admin/model-configs/llm/${first.configId}/set-default`,
+    headers: adminHeaders(),
+  })
+  assert.equal(switched.statusCode, 200, switched.body)
+  assert.equal((switched.json() as { isDefault: boolean }).isDefault, true)
+
+  const badId = await app.inject({ method: 'GET', url: '/v1/admin/model-configs/llm/nope', headers: adminHeaders() })
+  assert.equal(badId.statusCode, 400)
+  const missing = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/model-configs/llm/llmc_0123456789abcdef',
+    headers: adminHeaders(),
+  })
+  assert.equal(missing.statusCode, 404)
+  const missingTest = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/model-configs/llm/llmc_0123456789abcdef/test',
+    headers: adminHeaders(),
+  })
+  assert.equal(missingTest.statusCode, 404)
+
+  for (const payload of [
+    { name: 'x', provider: 'openai', baseUrl: 'https://api.example.com', model: 'm', purpose: 'image' },
+    { name: 'x', provider: 'openai', baseUrl: 'not-a-url', model: 'm', purpose: 'content' },
+    { name: '', provider: 'openai', baseUrl: 'https://api.example.com', model: 'm', purpose: 'content' },
+    { name: 'x', provider: 'bad provider', baseUrl: 'https://api.example.com', model: 'm', purpose: 'content' },
+  ]) {
+    const invalid = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/model-configs/llm',
+      headers: adminHeaders(),
+      payload,
+    })
+    assert.equal(invalid.statusCode, 400, JSON.stringify(payload))
+  }
+
+  const deleted = await app.inject({
+    method: 'DELETE',
+    url: `/v1/admin/model-configs/llm/${secondId}`,
+    headers: adminHeaders(),
+  })
+  assert.equal(deleted.statusCode, 204)
+  const afterDelete = await app.inject({
+    method: 'GET',
+    url: `/v1/admin/model-configs/llm/${secondId}`,
+    headers: adminHeaders(),
+  })
+  assert.equal(afterDelete.statusCode, 404)
+})
+
+test('模型配置：ASR 单行配置、默认值与密钥掩码', async () => {
+  const initial = await app.inject({ method: 'GET', url: '/v1/admin/model-configs/asr', headers: adminHeaders() })
+  assert.equal(initial.statusCode, 200, initial.body)
+  const defaults = initial.json() as {
+    provider: string
+    protocol: string
+    baseUrl: string
+    model: string
+    apiKeyConfigured: boolean
+    apiKeyMasked: string | null
+    enabled: boolean
+  }
+  assert.equal(defaults.provider, 'minimax')
+  assert.equal(defaults.protocol, 'minimax')
+  assert.equal(defaults.baseUrl, 'https://api.minimaxi.com')
+  assert.equal(defaults.apiKeyConfigured, false)
+  assert.equal(defaults.apiKeyMasked, null)
+  assert.equal(defaults.enabled, false)
+
+  const updated = await app.inject({
+    method: 'PATCH',
+    url: '/v1/admin/model-configs/asr',
+    headers: adminHeaders(),
+    payload: {
+      protocol: 'openai',
+      baseUrl: 'https://asr.example.com/v1/audio/transcriptions',
+      model: 'whisper-test',
+      apiKey: 'asr-contract-key-123456',
+      enabled: true,
+    },
+  })
+  assert.equal(updated.statusCode, 200, updated.body)
+  const body = updated.json() as {
+    protocol: string
+    baseUrl: string
+    model: string
+    apiKeyConfigured: boolean
+    apiKeyMasked: string
+    enabled: boolean
+  }
+  assert.equal(body.protocol, 'openai')
+  assert.equal(body.baseUrl, 'https://asr.example.com')
+  assert.equal(body.model, 'whisper-test')
+  assert.equal(body.apiKeyConfigured, true)
+  assert.equal(body.apiKeyMasked, 'asr-********3456')
+  assert.equal(body.enabled, true)
+  assert.equal(updated.body.includes('asr-contract-key-123456'), false)
+
+  const kept = await app.inject({
+    method: 'PATCH',
+    url: '/v1/admin/model-configs/asr',
+    headers: adminHeaders(),
+    payload: { apiKey: '', model: 'whisper-kept' },
+  })
+  assert.equal(kept.statusCode, 200, kept.body)
+  const keptBody = kept.json() as { model: string; apiKeyConfigured: boolean; apiKeyMasked: string }
+  assert.equal(keptBody.model, 'whisper-kept')
+  assert.equal(keptBody.apiKeyConfigured, true)
+  assert.equal(keptBody.apiKeyMasked, 'asr-********3456')
+
+  const invalid = await app.inject({
+    method: 'PATCH',
+    url: '/v1/admin/model-configs/asr',
+    headers: adminHeaders(),
+    payload: { protocol: 'whisper' },
+  })
+  assert.equal(invalid.statusCode, 400)
 })

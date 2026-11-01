@@ -61,7 +61,7 @@ function jsonResponse(response: ServerResponse, payload: unknown, status = 200):
 }
 
 function asrConfig(baseUrl: string): AsrConfig {
-  return { baseUrl, apiKey: 'test-asr-key', model: 'asr-1.0', timeoutMs: 1000 }
+  return { protocol: 'minimax', baseUrl, apiKey: 'test-asr-key', model: 'asr-1.0', timeoutMs: 1000 }
 }
 
 function llmConfig(baseUrl: string, overrides: Partial<LlmConfig> = {}): LlmConfig {

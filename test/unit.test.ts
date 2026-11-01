@@ -6,6 +6,7 @@ import { loadConfig } from '../src/config.js'
 import { parseEventBody } from '../src/events/service.js'
 import { fuse, parseSearchBody, type Candidate, type SegmentRow } from '../src/kb/service.js'
 import { parseRange } from '../src/media/range.js'
+import { decryptSecret, encryptSecret, maskSecret } from '../src/model-config/crypto.js'
 import { signPlaybackToken, verifyPlaybackToken } from '../src/playback/sign.js'
 import { RateLimiter } from '../src/rate-limit.js'
 
@@ -38,10 +39,10 @@ test('staging/production 强制 HTTPS；production 拒绝本机地址', () => {
     APP_ENV: 'production',
     PUBLIC_BASE_URL: 'https://api.example.com',
     MEDIA_BASE_URL: 'https://media.example.com',
-    ASR_API_KEY: 'test-asr-key',
+    CREDENTIAL_ENCRYPTION_KEY: '0123456789abcdef0123456789abcdef',
   })
   assert.equal(config.env, 'production')
-  assert.equal(config.asr?.apiKey, 'test-asr-key')
+  assert.equal(config.credentialEncryptionKey, '0123456789abcdef0123456789abcdef')
 })
 
 test('staging/production 拒绝本地默认密钥', () => {
@@ -62,6 +63,15 @@ test('staging/production 拒绝本地默认密钥', () => {
       MEDIA_SIGNING_SECRET: 'local-media-signing-secret',
     }),
     /MEDIA_SIGNING_SECRET/,
+  )
+  assert.throws(
+    () => loadConfig({
+      ...baseEnv,
+      APP_ENV: 'staging',
+      PUBLIC_BASE_URL: 'https://api.example.com',
+      CREDENTIAL_ENCRYPTION_KEY: 'local-credential-encryption-key',
+    }),
+    /CREDENTIAL_ENCRYPTION_KEY/,
   )
 })
 
@@ -85,14 +95,19 @@ test('检索阈值必须在 0–1 且置信阈值不低于召回阈值', () => {
   )
 })
 
-test('embedding 必须成对配置', () => {
-  assert.throws(() => loadConfig({ ...baseEnv, EMBEDDING_BASE_URL: 'https://embed.example.com/v1' }), /同时配置/)
-  const config = loadConfig({
-    ...baseEnv,
-    EMBEDDING_BASE_URL: 'https://embed.example.com/v1/',
-    EMBEDDING_MODEL: 'text-embedding-3-large',
-  })
-  assert.equal(config.embedding?.baseUrl, 'https://embed.example.com/v1')
+test('模型密钥加密串：local 有默认值，非 local 必填且不得用默认值', () => {
+  assert.equal(loadConfig(baseEnv).credentialEncryptionKey, 'local-credential-encryption-key-01')
+  assert.throws(
+    () => loadConfig({
+      ...baseEnv,
+      APP_ENV: 'staging',
+      PUBLIC_BASE_URL: 'https://api.example.com',
+    }),
+    /CREDENTIAL_ENCRYPTION_KEY 必填/,
+  )
+  assert.throws(() => loadConfig({ ...baseEnv, CREDENTIAL_ENCRYPTION_KEY: 'short' }), /至少 32/)
+  const config = loadConfig({ ...baseEnv, CREDENTIAL_ENCRYPTION_KEY: 'k'.repeat(32) })
+  assert.equal(config.credentialEncryptionKey, 'k'.repeat(32))
 })
 
 test('search 入参：trim、长度、topK、courseId', () => {
@@ -224,7 +239,6 @@ test('事件白名单：字段、名称与时间范围', () => {
 test('管线默认关闭；启用时要求成对目录且 HLS 目录与媒体目录一致', () => {
   const disabled = loadConfig(baseEnv)
   assert.equal(disabled.pipeline, undefined)
-  assert.equal(disabled.llm, undefined)
   assert.equal(disabled.asrLongTimeoutMs, 600_000)
   assert.equal(disabled.rateLimitPipelinePerMinute, 30)
 
@@ -282,46 +296,26 @@ test('管线默认关闭；启用时要求成对目录且 HLS 目录与媒体目
   assert.equal(config.rateLimitPipelinePerMinute, 5)
 })
 
-test('内容 LLM 必须成对配置，非本机地址要求 key', () => {
-  assert.throws(
-    () => loadConfig({ ...baseEnv, CONTENT_LLM_BASE_URL: 'https://llm.example.com/v1' }),
-    /同时配置/,
-  )
-  assert.throws(
-    () => loadConfig({ ...baseEnv, CONTENT_LLM_MODEL: 'qwen' }),
-    /同时配置/,
-  )
-  assert.throws(
-    () => loadConfig({
-      ...baseEnv,
-      APP_ENV: 'staging',
-      PUBLIC_BASE_URL: 'https://api.example.com',
-      ASR_API_KEY: 'test-asr-key',
-      CONTENT_LLM_BASE_URL: 'https://llm.example.com/v1',
-      CONTENT_LLM_MODEL: 'qwen',
-    }),
-    /CONTENT_LLM_API_KEY/,
-  )
-  assert.throws(
-    () => loadConfig({
-      ...baseEnv,
-      APP_ENV: 'staging',
-      PUBLIC_BASE_URL: 'https://api.example.com',
-      ASR_API_KEY: 'test-asr-key',
-      CONTENT_LLM_BASE_URL: 'http://llm.example.com/v1',
-      CONTENT_LLM_MODEL: 'qwen',
-      CONTENT_LLM_API_KEY: 'llm-key',
-    }),
-    /HTTPS/,
-  )
-  const config = loadConfig({
-    ...baseEnv,
-    CONTENT_LLM_BASE_URL: 'https://llm.example.com/v1/',
-    CONTENT_LLM_MODEL: 'qwen',
-    CONTENT_LLM_API_KEY: 'llm-key',
-    CONTENT_LLM_TEMPERATURE: '0.4',
-  })
-  assert.equal(config.llm?.baseUrl, 'https://llm.example.com/v1')
-  assert.equal(config.llm?.temperature, 0.4)
-  assert.equal(config.llm?.maxTokens, 8192)
+test('模型连接信息不再读环境变量，只保留生成侧调参', () => {
+  const config = loadConfig({ ...baseEnv, CONTENT_LLM_TEMPERATURE: '0.4' })
+  assert.equal(config.llmTuning.timeoutMs, 120_000)
+  assert.equal(config.llmTuning.temperature, 0.4)
+  assert.equal(config.llmTuning.maxTokens, 8192)
+  assert.equal(config.llmTuning.maxInputChars, 120_000)
+  assert.throws(() => loadConfig({ ...baseEnv, CONTENT_LLM_TEMPERATURE: '2.5' }), /CONTENT_LLM_TEMPERATURE/)
+})
+
+test('模型密钥：AES-256-GCM 往返、随机 IV 与掩码', () => {
+  const secret = 'unit-test encryption secret 0123456789'
+  const plain = 'sk-live-abcdefghijklmnop'
+  const first = encryptSecret(plain, secret)
+  const second = encryptSecret(plain, secret)
+  assert.notEqual(first, second)
+  assert.match(first, /^v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/)
+  assert.equal(first.includes(plain), false)
+  assert.equal(decryptSecret(first, secret), plain)
+  assert.throws(() => decryptSecret(first, `${secret}x`))
+  assert.throws(() => decryptSecret('v2:a:b:c', secret))
+  assert.equal(maskSecret(plain), 'sk-l********mnop')
+  assert.equal(maskSecret('short'), '*****')
 })
