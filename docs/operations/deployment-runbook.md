@@ -1,14 +1,16 @@
 # 部署 Runbook
 
-版本：v0.2（2026-10-31）
+版本：v0.3（2026-11-01）
 
-面向运维与开发：把云端服务部署到一台 Linux 主机，覆盖 TLS、数据库迁移、备份恢复、媒体 CDN 与本地 staging 验证。监控见 [监控与告警](./monitoring.md)。
+面向运维与开发：把云端服务部署到一台 Linux 主机，覆盖 TLS、数据库迁移、备份恢复、媒体 CDN、视频管线与本地 staging 验证。监控见 [监控与告警](./monitoring.md)。
 
 ## 1. 拓扑与前置条件
 
 ```
-Internet ── Caddy(80/443, 自动 TLS) ── app(Fastify, 3939)
+Internet ── Caddy(80/443, 自动 TLS) ── app(Fastify, 3939, 镜像内置 ffmpeg/ffprobe)
                                           ├── db(PostgreSQL 17 + pgvector)
+                                          ├── pipeline-storage volume（源视频 / 工作区）
+                                          ├── pipeline-hls volume（HLS，供 CDN 回源）
                                           └── 媒体：生产走 CDN；仅本地 staging 由 app 的 /media 提供
 Prometheus(可选) ── 抓取 app:/metrics（Bearer METRICS_TOKEN）
 Grafana(可选) ── 查询 Prometheus
@@ -16,9 +18,10 @@ Grafana(可选) ── 查询 Prometheus
 
 主机要求：
 
-- Linux + Docker Engine 24+、Compose v2；2 vCPU / 2 GB 内存起步。
+- Linux + Docker Engine 24+、Compose v2；2 vCPU / 4 GB 内存起步（启用转码建议 ≥4 vCPU）。
 - 公网域名（A/AAAA 指向主机），放行 80/443；数据库与 3939 不对公网暴露。
 - 生产媒体域名与对象存储/CDN 已就绪（见 §7）。
+- 管线磁盘：按源视频与 HLS 预留容量，至少为单次最大上传（默认 2GiB）的 3–4 倍；`PIPELINE_STORAGE_DIR` 与 `PIPELINE_HLS_DIR` 必须同卷。
 
 ## 2. 准备配置与密钥
 
@@ -27,7 +30,7 @@ cp .env.prod.example .env.prod
 chmod 600 .env.prod
 ```
 
-至少填写：`APP_ENV`、`PUBLIC_BASE_URL`、`MEDIA_BASE_URL`、`DOMAIN`、`POSTGRES_USER/PASSWORD/DB`、`METRICS_TOKEN`、`MEDIA_SIGNING_SECRET`；首次部署另填 `BOOTSTRAP_ADMIN_USERNAME` 与 `BOOTSTRAP_ADMIN_PASSWORD`。
+至少填写：`APP_ENV`、`PUBLIC_BASE_URL`、`MEDIA_BASE_URL`、`DOMAIN`、`POSTGRES_USER/PASSWORD/DB`、`METRICS_TOKEN`、`MEDIA_SIGNING_SECRET`；首次部署另填 `BOOTSTRAP_ADMIN_USERNAME` 与 `BOOTSTRAP_ADMIN_PASSWORD`。启用管线还需 `PIPELINE_ENABLED=true`、`PIPELINE_STORAGE_DIR`、`PIPELINE_HLS_DIR`；真实转写与文章生成另配 `ASR_API_KEY` 与 `CONTENT_LLM_BASE_URL/MODEL/API_KEY`。
 
 ```bash
 openssl rand -hex 32   # METRICS_TOKEN
@@ -41,6 +44,8 @@ openssl rand -hex 24   # POSTGRES_PASSWORD
 - `METRICS_TOKEN`、`MEDIA_SIGNING_SECRET` 至少 16 字符，且不能是本地默认值。
 - `BOOTSTRAP_ADMIN_USERNAME` 与 `BOOTSTRAP_ADMIN_PASSWORD` 必须成对配置；用户名匹配 `[a-z][a-z0-9._-]{2,31}`，密码至少 12 字符。首个管理员只在库中无 active admin 时创建，创建成功后应移除这两个变量并重启。
 - `POSTGRES_PASSWORD` 含 `:/@?#[]%` 等字符时，`DATABASE_URL` 需要 URL 编码；建议直接用字母数字。
+- 管线启用时必须能写 `PIPELINE_STORAGE_DIR` 与 `PIPELINE_HLS_DIR`，两目录解析后不同且同卷；设置 `MEDIA_LOCAL_DIR` 时 `PIPELINE_HLS_DIR` 必须与其相同，否则启动失败。启动会用 `ffmpeg -version` / `ffprobe -version` 探活，失败则启动失败。
+- `CONTENT_LLM_BASE_URL` 与 `CONTENT_LLM_MODEL` 必须成对配置；非 local 必须 HTTPS，非本机 base 必须提供 `CONTENT_LLM_API_KEY`。ASR/LLM 缺失不阻止服务启动，但对应阶段返回 `503`。
 
 ## 3. 首次部署
 
@@ -82,6 +87,7 @@ curl -fsS -X POST https://$DOMAIN/v1/auth/device/approve \
 ```
 
 - 内容管理控制台：浏览器打开 `https://$DOMAIN/admin/`，用 operator/admin 账号登录，管理课程、章节、知识点、文章与片段。镜像构建已包含 `web/admin` 并输出到 `dist/admin`；服务端只在 `dist/admin/index.html` 存在时挂载 `/admin/`，缺失时该路径 404 而 API 不受影响。前端是纯静态 SPA，会话令牌存 `sessionStorage`，关标签即失效，不使用 Cookie，因此 `/admin/` 反向代理无需额外鉴权配置（接口本身仍校验 Bearer）。
+- 视频建课：「视频建课」页创建 draft 课程与素材 → 上传 → 处理 → 查看转写 → 生成 → 预览 → 应用到草稿 → 发布。发布前会按配置重建索引；索引失败返回 `503` 且课程保持 draft。源视频默认保留在 `pipeline-storage` 卷，清理策略未冻结前不要手工删除 `sources/`。
 
 ## 4. TLS
 
@@ -123,6 +129,8 @@ RESTORE_CONFIRM=yes scripts/restore.sh backups/trend-coach-20261031T031700Z.sql.
 ## 7. 媒体、CORS 与 Range
 
 生产不在业务进程代理媒体：`MEDIA_BASE_URL` 指向 CDN 根，播放地址为 `MEDIA_BASE_URL + hlsPath?token=...`。
+
+管线产出的 HLS 写入 `PIPELINE_HLS_DIR/hls/<assetId>/`，CDN 需把 `MEDIA_BASE_URL` 根映射到 `PIPELINE_HLS_DIR`（或同步该目录到对象存储）。`media_assets.hls_path` 形如 `hls/<assetId>/index.m3u8`，签名只覆盖该素材目录；源视频位于 `PIPELINE_STORAGE_DIR/sources/`，不得对 CDN 暴露。
 
 CDN/对象存储必须满足：
 
@@ -177,6 +185,11 @@ MEDIA_BASE_URL=https://localhost/media
 DOMAIN=localhost
 MEDIA_HOST_DIR=../dsh-plugin-trend-coach/spike/media
 MEDIA_LOCAL_DIR=/media
+PIPELINE_ENABLED=true
+PIPELINE_STORAGE_DIR=/data/pipeline
+PIPELINE_HLS_DIR=/media
+PIPELINE_STORAGE_HOST_DIR=./pipeline-data
+# 本地 staging 的 HLS 与媒体共用同一宿主目录
 ```
 
 ```bash
@@ -186,3 +199,33 @@ curl -kfsS https://localhost/health
 ```
 
 验证通过后即可把同一 Compose 指向真实域名与 CDN；两者差异只在 `.env.prod`。
+
+## 11. 视频管线运维
+
+**启用检查**
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml exec app ffmpeg -version
+docker compose --env-file .env.prod -f docker-compose.prod.yml exec app ffprobe -version
+curl -fsS -H "Authorization: Bearer $SESSION_TOKEN" \
+  "https://$DOMAIN/v1/admin/content/pipeline/jobs?status=failed"
+```
+
+- 管线关闭时素材/上传/转写/生成/任务接口返回 `503`，其余 API 正常。
+- 任务状态在 `pipeline_jobs`；心跳超 120s 的 running 任务会被自动回收。频繁回收通常是 ffmpeg 超时、磁盘满或进程被 OOM kill。
+- 失败任务先看 `errorCode`；ffmpeg stderr 与 provider 响应只在内部日志（已脱敏），不返回客户端。
+
+**真实密钥验收（待环境具备）**
+
+1. 配置 `ASR_API_KEY` 与 `CONTENT_LLM_BASE_URL/MODEL/API_KEY`，重启 app。
+2. 上传 2–5 分钟中文样片，确认转写 `ready` 且时间戳单调；核对 `transcript_segments` 条数与音频时长。
+3. 生成草稿，检查章节/知识点/待审原因与文章 Markdown；apply 后课程树为 draft。
+4. 发布后确认 catalog、检索与签名播放可见；检查 `embedded` 与索引状态。
+5. 再用 30–60 分钟样本验证静音切块、块级缓存与 ASR 请求数（成功块重试不应重复计费）。
+6. 抽查日志：无 token、完整 deviceId、完整 query、转写正文、源路径、完整媒体 URL、provider 响应体。
+
+**容量与清理**
+
+- `sources/<assetId>/source` 默认保留；`work/<assetId>/` 成功或失败后清理。
+- 磁盘告警阈值建议 ≤75%；不要手工删除 `sources/`，除非已确认版权与重试需求。
+- `PIPELINE_MAX_CONCURRENT_JOBS` 默认 1；提高前先评估 CPU 与内存，转码阻塞会影响 API 延迟。

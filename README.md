@@ -1,6 +1,6 @@
 # trend-coach-cloud
 
-`dsh-plugin-trend-coach` 的云端服务仓库：提供课程知识检索、片段元数据、签名 HLS 播放会话、设备码授权、后台账号与内容管理、指标事件接收，以及语音转写（M4.2，MiniMax ASR）。
+`dsh-plugin-trend-coach` 的云端服务仓库：提供课程知识检索、片段元数据、签名 HLS 播放会话、设备码授权、后台账号与内容管理、指标事件接收、语音转写（M4.2，MiniMax ASR），以及视频→课程管线（M1：上传、转码、带时间戳转写、切分、文章草稿与人工发布）。
 
 ## 边界
 
@@ -11,9 +11,10 @@
 | 签名 HLS 播放会话 | 直链 / 可下载源站地址 |
 | 设备码授权与令牌轮换 | 学员自助注册（短信后置） |
 | 后台账号管理（operator/admin 会话） | 第三方分析 SDK |
-| 内容管理 API 与 React 控制台（课程/章节/知识点/文章/片段） | 媒体上传、召回评估看板、插件版本与灰度 |
+| 内容管理 API 与 React 控制台（课程/章节/知识点/文章/片段） | 召回评估看板、插件版本与灰度 |
+| 视频→课程管线：流式上传、单码率 HLS、长音频转写、章节/知识点/片段切分、文章草稿、人工审核发布 | 多码率 ABR、对象存储、断点续传 |
 | 鉴权指标事件接收 | 明文令牌落盘 |
-| 语音转写（仅语音→文字，密钥在云端） | 生成式推理 / 内容生成 |
+| 语音转写（仅语音→文字，密钥在云端） | 学员侧生成式推理 |
 
 不耦合 `ai-invest`：独立实现，只借鉴 PostgreSQL halfvec + pg_trgm + RRF 的技术选型。
 
@@ -44,6 +45,20 @@
 | `GET/POST /v1/admin/content/segments` | 片段列表 / 创建片段 |
 | `PATCH /v1/admin/content/segments/{segmentId}` | 修改片段（正文变更会清空向量） |
 | `POST /v1/admin/content/reindex` | 按课程重建片段向量 |
+| `GET/POST /v1/admin/content/media-assets` | 媒体素材列表 / 创建 |
+| `PATCH /v1/admin/content/media-assets/{assetId}` | 修改标题或归档素材 |
+| `PUT /v1/admin/content/media-assets/{assetId}/source` | 流式上传源视频（`application/octet-stream`） |
+| `POST /v1/admin/content/media-assets/{assetId}/ingest` | 入队转码与转写 |
+| `GET /v1/admin/content/media-assets/{assetId}/transcript` | 查看带时间戳转写（仅管理端） |
+| `POST /v1/admin/content/media-assets/{assetId}/generations` | 入队章节/知识点/文章草稿生成 |
+| `GET /v1/admin/content/pipeline/jobs` | 管线任务列表 |
+| `GET /v1/admin/content/pipeline/jobs/{jobId}` | 任务详情 |
+| `POST /v1/admin/content/pipeline/jobs/{jobId}/retry` | 重试失败/取消任务 |
+| `POST /v1/admin/content/pipeline/jobs/{jobId}/cancel` | 取消排队/运行任务 |
+| `GET /v1/admin/content/generations/{generationId}` | 生成预览 |
+| `POST /v1/admin/content/generations/{generationId}/apply` | 应用为草稿课程 |
+| `POST /v1/admin/content/generations/{generationId}/discard` | 丢弃草稿 |
+| `POST /v1/admin/content/courses/{courseId}/publish` | 发布课程并按需重建索引 |
 | `POST /v1/kb/search` | Top-K 片段检索 |
 | `GET /v1/kb/segments/{segmentId}` | 片段详情 |
 | `GET /v1/catalog/courses` | 已发布课程列表 |
@@ -110,9 +125,11 @@ npm test                       # 单元 + 契约测试（自动重置测试库�
 
 本地媒体需在 `.env` 设置 `MEDIA_LOCAL_DIR` 指向含 `hls/index.m3u8` 的目录；生产媒体走 CDN，不设该项。配置项与默认值见 `.env.example`。
 
+视频建课管线默认 `PIPELINE_ENABLED=false`。启用需本机安装 `ffmpeg`/`ffprobe`，并设置 `PIPELINE_STORAGE_DIR` 与 `PIPELINE_HLS_DIR`（两目录同卷；设置 `MEDIA_LOCAL_DIR` 时必须与其相同）。真实转写与文章生成还需 `ASR_API_KEY` 与 `CONTENT_LLM_BASE_URL/MODEL/API_KEY`；缺失时对应阶段返回 `503`，不影响服务启动。管理端「视频建课」页按“上传 → 处理 → 转写 → 生成 → 应用 → 发布”操作，生成内容始终先落 `draft`。
+
 ## 部署
 
-生产使用 Docker Compose + Caddy（自动 TLS），数据库为 pgvector；迁移在应用启动时执行。
+生产使用 Docker Compose + Caddy（自动 TLS），数据库为 pgvector；镜像内置 ffmpeg，管线源文件与 HLS 通过卷持久化。迁移在应用启动时执行。
 
 ```bash
 cp .env.prod.example .env.prod   # 填域名、数据库与两个密钥
@@ -125,16 +142,16 @@ scripts/backup.sh                # 备份（可配 cron）
 ## 目录
 
 ```
-src/            # Fastify 服务：accounts/auth/content/kb/playback/events/media/http
+src/            # Fastify 服务：accounts/auth/content/kb/playback/events/media/asr/pipeline/http
 web/admin/      # React + Vite 管理端源码（构建产物 dist/admin）
-migrations/     # SQL 迁移（启动时自动执行）
+migrations/     # SQL 迁移（启动时自动执行；004 为视频管线）
 data/seed.json  # 本地种子数据（与插件 mock 对齐）
 openapi/        # OpenAPI 3.1 契约
-test/           # 单元与契约测试
+test/           # 单元、契约与管线 E2E
 docs/           # 需求、架构、规范、部署与监控
 docker/         # 本地数据库初始化
 deploy/         # Caddy 与可选监控模板（不随 Compose 启动）
 scripts/        # migrate/seed 与备份恢复入口
 ```
 
-当前为 M4.2 实现阶段：M2 业务接口、设备码授权、签名 HLS、事件接收已落地；M3.1 账号与后台登录、M3.2 内容管理 API 与 React 控制台、M3.3 体系与进度接口已落地；M4.2 语音转写已落地（真实 MiniMax 待 `ASR_API_KEY`）；M1 视频→课程管线（上传/转码、带时间戳转写、自动切分与文章生成）未实现。
+当前为 M1 实现阶段：M2 业务接口、设备码授权、签名 HLS、事件接收已落地；M3.1 账号与后台登录、M3.2 内容管理 API 与 React 控制台、M3.3 体系与进度接口已落地；M4.2 语音转写已落地（真实 MiniMax 待 `ASR_API_KEY`）；M1 视频→课程管线已落地（上传、单码率 HLS、长音频转写、切分、文章草稿、人工发布；真实 ASR/LLM 待密钥验收），多码率 HLS 与召回评估后置。

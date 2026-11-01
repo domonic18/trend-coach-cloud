@@ -1,6 +1,6 @@
 # 云端服务对接清单
 
-本文用于启动**独立的云端服务仓库**，供 `dsh-plugin-trend-coach` 插件对接。接口口径以 PRD v0.2 §6 与架构 v0.2 §6、§7.5、§9、§10、§12 为准；冲突时先改那两份文档，再同步本文。
+本文用于启动**独立的云端服务仓库**，供 `dsh-plugin-trend-coach` 插件对接。接口口径以 PRD v0.3 §6 与架构 v0.4 §6、§7.5、§9、§10、§12 为准；冲突时先改那两份文档，再同步本文。
 
 ## 1. 边界
 
@@ -13,11 +13,12 @@
 | 签名 HLS 播放会话 | 直链 / 可下载源站地址 |
 | 设备码授权与令牌轮换 | 学员侧内容写接口（一期只读） |
 | 鉴权指标事件接收（M2） | 第三方分析 SDK |
-| 语音转写（M4.2，MiniMax ASR，仅语音→文字） | 生成式推理 / 内容生成 |
+| 语音转写（M4.2，MiniMax ASR，仅语音→文字） | 学员侧生成式推理 |
+| 视频→课程管线（M1）：上传、转码、长音频转写、切分、文章草稿、人工发布 | 多码率 ABR、对象存储、断点续传、自动发布 |
 
 **不耦合 ai-invest**：不进其库、不调其服务、不共享代码与数据；只借鉴 PostgreSQL halfvec + pg_trgm + RRF 的技术选型（PRD D2）。
 
-**内容生产管线现状（2026-11-01）**：M1 视频→课程管线未实现；当前课程、章节、知识点、文章与片段由管理端手工录入或种子数据导入，媒体 HLS 由外部准备。插件侧契约不受影响。
+**内容生产管线现状（2026-11-01）**：M1 视频→课程管线已落地，覆盖素材上传、单码率 HLS、带时间戳长音频转写、章节/知识点/片段切分、文章草稿与人工发布；真实 MiniMax 与内容 LLM 待注入密钥验收。学员侧契约不受影响。
 
 ## 2. 通用约定
 
@@ -389,11 +390,141 @@ Content-Type: application/json
 | 未配置 `ASR_API_KEY`（local） | `503` |
 | 日志抽查 | 无 base64、无转写正文、无完整 deviceId |
 
+### 3.9 视频→课程管线（M1）
+
+全部接口位于 `/v1/admin/content/*`，要求 operator/admin 后台会话（`Authorization: Bearer <session token>`，不带 `x-device-id`）。
+
+```http
+GET   /v1/admin/content/media-assets
+POST  /v1/admin/content/media-assets
+PATCH /v1/admin/content/media-assets/{assetId}
+PUT   /v1/admin/content/media-assets/{assetId}/source
+POST  /v1/admin/content/media-assets/{assetId}/ingest
+GET   /v1/admin/content/media-assets/{assetId}/transcript
+POST  /v1/admin/content/media-assets/{assetId}/generations
+GET   /v1/admin/content/pipeline/jobs
+GET   /v1/admin/content/pipeline/jobs/{jobId}
+POST  /v1/admin/content/pipeline/jobs/{jobId}/retry
+POST  /v1/admin/content/pipeline/jobs/{jobId}/cancel
+GET   /v1/admin/content/generations/{generationId}
+POST  /v1/admin/content/generations/{generationId}/apply
+POST  /v1/admin/content/generations/{generationId}/discard
+POST  /v1/admin/content/courses/{courseId}/publish
+```
+
+请求/响应：
+
+```jsonc
+// GET /v1/admin/content/media-assets?courseId=&status=&offset=0&limit=50
+{ "assets": [{ "assetId": "asset-...", "courseId": "TC-101", "title": "...",
+               "status": "awaiting_upload|uploaded|processing|ready|failed|archived",
+               "durationMs": 0, "errorCode": null, "hlsReady": false,
+               "transcriptStatus": null, "sourceSizeBytes": 0,
+               "createdAt": 1760000000000, "updatedAt": 1760000000000 }],
+  "total": 1, "offset": 0, "limit": 50 }
+
+// POST /v1/admin/content/media-assets
+{ "courseId": "TC-101", "title": "趋势反转第一课" }
+// 201 → { "asset": { ... } }；课程必须为 draft
+
+// PATCH /v1/admin/content/media-assets/{assetId}
+{ "title": "可选", "status": "archived" }   // 仅允许归档
+// 200 → { "asset": { ... } }
+
+// PUT /v1/admin/content/media-assets/{assetId}/source
+// Content-Type: application/octet-stream；body 为源视频流
+// 可选 header: x-file-sha256: <64 位小写 hex>
+// 200 → { "asset": { "assetId": "...", "status": "uploaded", "sourceSizeBytes": 0, ... } }
+
+// POST /v1/admin/content/media-assets/{assetId}/ingest
+{ "language": "auto|zh|en" }   // 可选，默认 auto
+// 202 → { "job": { ... } }
+
+// GET /v1/admin/content/media-assets/{assetId}/transcript?offset=0&limit=100
+{ "transcript": { "transcriptId": "tr_...", "assetId": "...",
+                  "status": "pending|processing|ready|failed", "language": "zh",
+                  "model": "asr-1.0", "durationMs": 0, "chunkCount": 2,
+                  "segmentCount": 40, "errorCode": null },
+  "segments": [{ "idx": 0, "startMs": 0, "endMs": 30000, "text": "..." }],
+  "total": 40, "offset": 0, "limit": 100 }
+
+// POST /v1/admin/content/media-assets/{assetId}/generations
+// 202 → { "job": { ... } }；要求转写 ready
+
+// GET /v1/admin/content/pipeline/jobs?status=&kind=&courseId=&assetId=&offset=0&limit=50
+{ "jobs": [{ "jobId": "job_...", "assetId": "...", "courseId": "...",
+             "kind": "ingest|generate", "status": "queued|running|succeeded|failed|canceled",
+             "stage": "queued|probe|transcode|transcribe|structure|generate|finalize|done",
+             "progress": 0, "attempts": 0, "maxAttempts": 3, "errorCode": null,
+             "createdAt": 0, "updatedAt": 0, "startedAt": null, "finishedAt": null }],
+  "total": 1, "offset": 0, "limit": 50 }
+
+// GET /v1/admin/content/pipeline/jobs/{jobId}
+{ "job": { ... }, "result": { "transcriptId": "tr_... | null", "generationId": "gen_... | null" } }
+
+// POST /v1/admin/content/pipeline/jobs/{jobId}/retry   → 202 { "job": { ... } }
+// POST /v1/admin/content/pipeline/jobs/{jobId}/cancel  → 200 { "job": { ... } }
+
+// GET /v1/admin/content/generations/{generationId}
+{ "generation": { "generationId": "gen_...", "assetId": "...", "courseId": "...",
+                  "status": "draft|applied|discarded|failed", "promptVersion": "m1-v1",
+                  "model": "...", "counts": { "chapters": 3, "knowledgePoints": 12,
+                  "segments": 30, "needsReview": 2 },
+                  "createdAt": 0, "appliedAt": null },
+  "chapters": [{ "key": "ch01", "title": "...", "position": 0 }],
+  "knowledgePoints": [{ "key": "kp01", "chapterKey": "ch01", "title": "...",
+                        "position": 0, "confidence": 0.82, "needsReview": false,
+                        "reviewReasons": [], "hasArticle": true,
+                        "startMs": 0, "endMs": 120000 }],
+  "segments": [{ "key": "sg0001", "pointKey": "kp01", "title": "...",
+                 "startMs": 120000, "endMs": 245000 }] }
+
+// POST /v1/admin/content/generations/{generationId}/apply
+{ "generationId": "gen_...", "alreadyApplied": false, "courseId": "TC-101",
+  "chapters": [{ "chapterId": "ch_...", "key": "ch01" }],
+  "knowledgePoints": [{ "knowledgePointId": "kp_...", "key": "kp01" }],
+  "segments": [{ "segmentId": "seg-...", "key": "sg0001" }],
+  "articles": 12 }
+
+// POST /v1/admin/content/generations/{generationId}/discard → { "discarded": true }
+
+// POST /v1/admin/content/courses/{courseId}/publish
+{ "courseId": "TC-101", "published": true, "indexed": true, "embedded": 30,
+  "counts": { "chapters": 3, "knowledgePoints": 12, "segments": 30, "articles": 12 } }
+```
+
+- `assetId` 形如 `asset-[A-Za-z0-9._-]{1,58}`；`jobId/generationId/transcriptId` 为服务端生成的不透明 ID；`chapterId/knowledgePointId/segmentId` 在 apply 时确定性生成。
+- 上传：路由级 `bodyLimit=PIPELINE_MAX_UPLOAD_BYTES`（默认 2GiB）；只接受 `application/octet-stream`，否则 `415`；超限 `413`；`x-file-sha256` 不符 `400` 并清理半成品；鉴权与限流先于 body 消费。
+- 媒体：ffprobe 必须同时有视频与音频流，时长 ≤`PIPELINE_MAX_SOURCE_SECONDS`；非法 `422`。`sourceRelPath`、`hlsPath`、SHA、URL 永不出现在响应。
+- 任务：同一素材同类型同时最多一个 `queued/running`，重复 ingest/generate `409`；retry 仅 `failed/canceled` 且源文件存在；cancel 仅 `queued/running`；`errorCode` ≤64 且为稳定枚举。
+- 素材状态：`awaiting_upload → uploaded → processing → ready|failed`；`archived` 仅手动；不物理删除。重新上传未归档素材会重置转写与生成。
+- 转写：`GET .../transcript` 是唯一返回正文的管线接口；`segments` 按 `startMs` 升序、互不重叠，单段 1–4000 字符；未就绪时 `segments=[]`。
+- 生成：只有 `draft` generation 可 apply/discard；apply 要求课程 `draft` 且无章节/知识点/片段，否则 `409`；已 applied 再次 apply 返回原映射与 `alreadyApplied:true`。
+- 发布：课程必须存在且非 `archived`、至少 1 个片段；配置 embedding 时先 `reindex`，失败 `503` 且不翻状态；无 provider 时允许发布且 `indexed=false`。发布幂等，只把 `draft` 文章/片段/课程置 `published`。
+- 管线未启用（`PIPELINE_ENABLED=false`）时素材/上传/ingest/生成/任务接口 `503`；ASR 或 LLM 未配置时对应阶段/接口 `503`，不影响其它接口。
+- 限流：`RATE_LIMIT_PIPELINE_PER_MINUTE`（默认 30，按后台账号）；上传按字节流不做请求级缓冲。
+- 日志与指标不记转写正文、源路径、provider 响应、完整 SHA；发布与索引失败只记类别。
+
+**验收用例**
+
+| 用例 | 期望 |
+|---|---|
+| 创建 draft 课程 → 素材 → 上传 → ingest | `201/200/202`；job 依次 `probe/transcode/transcribe/finalize`，转写 `ready` 且时间戳单调 |
+| 上传无音轨、超时长、SHA 不符、非 octet-stream、超 2GiB | `422/400/415/413`，半成品清理 |
+| 重复 ingest / 重复 generate | `409`；同素材同类型无重复 active job |
+| 生成 → 预览 | 章节/知识点/片段/文章草稿；待审原因与置信度可见；预览不含文章与片段正文 |
+| apply → 课程树 | 全部 `draft`，学员 catalog/检索/播放不可见；再次 apply 幂等 |
+| 发布 | 先索引（配置时）；catalog/检索/播放可见；索引失败 `503` 且课程仍 `draft` |
+| 取消 / 重试 / 心跳超时 | 终态正确；重试从阶段续跑且成功块不重复请求 |
+| 学员令牌 / 未登录 / 运营与 admin | 学员 `403`；未登录 `401`；operator/admin 可用 |
+| 管线未启用或 ASR/LLM 未配置 | 对应接口 `503`；服务健康 |
+| 响应与日志 | 无源路径、HLS 路径、SHA、转写正文（转写接口除外）、provider 响应 |
+
 ## 4. 数据与内容前置
 
-- 需要 M1 内容管线产出：带时间戳转写、章节/知识点切分、`segmentId` 分配、课程/章节/知识点标题。
+- M1 内容管线可产出带时间戳转写、章节/知识点切分、片段与文章草稿，经人工审核发布；仍需准备真实样片与内容 LLM/ASR 密钥用于验收。
 - 需要至少一门真实课程与加密 HLS 样片（含 key 与分片）用于联调；建议提供 2 门课程、10+ 片段的最小数据集。
-- 视频加密方案需确认（云点播私有加密 / AES-128）并与 hls.js 解密配置对齐。
+- 视频加密方案需确认（云点播私有加密 / AES-128）并与 hls.js 解密配置对齐；M1 产出未加密 HLS，靠签名 URL 保护。
 - 检索质量以本产品自建评估集把关，不复用 ai-invest 的库或评估结果。
 
 ## 5. 安全与合规
@@ -444,17 +575,24 @@ Content-Type: application/json
 | 语音 | 非法音频 / 超长 / 空文本 | `400` / `413` / `422` |
 | 语音 | 上游 429 / 5xx / 超时 | `429` / `503`，不自动重试 |
 | 语音 | 未配置 ASR（local） | `503`；staging/production 启动失败 |
+| 管线 | 素材上传 → ingest → 转写 | `202`；job 阶段推进；转写时间戳单调、可查询 |
+| 管线 | 非法媒体 / SHA 不符 / 上传超限 | `422` / `400` / `413`，清理半成品 |
+| 管线 | 生成 → 预览 → apply | 结果均为 `draft`；待审原因可见；重复 apply 幂等 |
+| 管线 | 发布 | 先索引；学员可见；索引失败 `503` 且不翻状态 |
+| 管线 | 取消 / 重试 / 心跳恢复 | 终态正确；无重复 active job；成功转写块复用 |
+| 管线 | 学员令牌访问管线接口 | `403`；未登录 `401` |
+| 管线 | 管线/ASR/LLM 未配置 | 对应接口 `503`，服务可启动 |
 
 ## 7. 交付物
 
 1. 服务骨架与部署说明（staging / production），有效 TLS 证书。
 2. OpenAPI 3 文档，字段与本文一致；契约变更先改 PRD §6 与架构 §6。
-3. 数据库 schema 与迁移（课程、章节、知识点、片段、文章、进度、账号/会话/邀请码、用户/设备、令牌、事件）。
-4. 学员接口（设备码、检索、片段、播放会话、体系/进度、事件、语音转写）与后台接口（账号、内容管理）。
-5. 鉴权中间件（Bearer + `x-device-id`）、限流（含 ASR 按设备限流）、错误码映射、日志脱敏。
-6. 签名 HLS 下发与 CORS/Range 配置。
-7. 最小联调数据集（真实课程 + 加密样片）与测试账号。
-8. 契约测试与 CI：覆盖第 6 节全部用例；至少一个与插件 mock 对齐的响应夹具。
+3. 数据库 schema 与迁移（课程、章节、知识点、片段、文章、进度、账号/会话/邀请码、用户/设备、令牌、事件、管线任务/转写/生成）。
+4. 学员接口（设备码、检索、片段、播放会话、体系/进度、事件、语音转写）与后台接口（账号、内容管理、视频管线）。
+5. 鉴权中间件（Bearer + `x-device-id`）、限流（含 ASR 与管线按账号限流）、错误码映射、日志脱敏。
+6. 签名 HLS 下发与 CORS/Range 配置；管线 HLS 目录与媒体根一致。
+7. 最小联调数据集（真实课程 + 加密样片 + 2–5 分钟建课样片）与测试账号。
+8. 契约测试与 CI：覆盖第 6 节全部用例；至少一个与插件 mock 对齐的响应夹具；管线假 provider E2E 与可选真实 ffmpeg 用例。
 9. 指标看板与告警：检索 P95、错误分桶、429/5xx、带宽与并发。
 
 ## 8. 待冻结事项
@@ -469,3 +607,7 @@ Content-Type: application/json
 | 相邻知识点阈值 | 空召回或最高分低于阈值（待定数值） | F1.4 召回质量 |
 | ASR 供应商与模型 | MiniMax `asr-1.0`；provider 接口保留 | 供应商抖动与成本 |
 | 语音成本上限 | 单次 ≤60s、每设备 20 次/分钟；不自动重试 | 滥用与账单 |
+| 内容 LLM 供应商与模型 | OpenAI 兼容 `/chat/completions`；模型由 `CONTENT_LLM_MODEL` 配置 | 生成质量与成本 |
+| 长音频切块与重试 | ≤480s/块、3 次重试、30s 分组；真实时间戳字段待联调 | 计费与对齐精度 |
+| 源视频与转写留存 | 默认保留，不自动清理；按版权授权人工归档 | 存储与合规 |
+| 多码率与对象存储 | 本期单码率本地存储；`MediaStore` 预留 | 带宽与扩容 |
