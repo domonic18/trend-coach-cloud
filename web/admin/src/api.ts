@@ -8,6 +8,7 @@ import type {
   CourseSummary,
   CourseTree,
   LlmModelConfig,
+  LlmProtocol,
   LlmPurpose,
   ModelTestResult,
   GenerationApplyResult,
@@ -431,6 +432,7 @@ export async function publishCourse(courseId: string): Promise<CoursePublishResu
 export interface LlmConfigInput {
   name: string
   provider: string
+  protocol?: LlmProtocol
   baseUrl: string
   model: string
   purpose: LlmPurpose

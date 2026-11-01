@@ -232,6 +232,7 @@ export interface CoursePublishResult {
 }
 
 export type LlmPurpose = 'content' | 'embedding'
+export type LlmProtocol = 'openai' | 'anthropic'
 export type AsrProtocol = 'minimax' | 'openai'
 export type ModelTestStatus = 'success' | 'failed'
 
@@ -239,7 +240,7 @@ export interface LlmModelConfig {
   configId: string
   name: string
   provider: string
-  protocol: 'openai'
+  protocol: LlmProtocol
   baseUrl: string
   model: string
   purpose: LlmPurpose

@@ -11,13 +11,20 @@ import {
   testLlmConfig,
   type LlmConfigInput,
 } from './api'
-import type { AsrModelConfig, AsrProtocol, LlmModelConfig, LlmPurpose } from './types'
+import type {
+  AsrModelConfig,
+  AsrProtocol,
+  LlmModelConfig,
+  LlmProtocol,
+  LlmPurpose,
+} from './types'
 import { Field, formatTime, Notice } from './ui'
 
 interface LlmForm {
   configId: string | null
   name: string
   provider: string
+  protocol: LlmProtocol
   baseUrl: string
   model: string
   purpose: LlmPurpose
@@ -30,6 +37,7 @@ const EMPTY_FORM: LlmForm = {
   configId: null,
   name: '',
   provider: 'openai',
+  protocol: 'openai',
   baseUrl: '',
   model: '',
   purpose: 'content',
@@ -83,7 +91,7 @@ export function ModelConfigPanel({ onUnauthorized }: { onUnauthorized: () => voi
           <div>
             <h2>模型配置</h2>
             <p className="hint">
-              key 加密存库、只回显掩码；保存后立即生效。content 用于章节/知识点/文章生成，embedding 用于检索与发布建索引（必须 1024 维）。
+              key 加密存库、只回显掩码；保存后立即生效。content 支持 openai 兼容与 anthropic Messages 协议，embedding 只能走 openai 兼容（必须 1024 维）。
             </p>
           </div>
           <button onClick={() => setForm(form === null ? { ...EMPTY_FORM } : null)}>
@@ -129,6 +137,7 @@ export function ModelConfigPanel({ onUnauthorized }: { onUnauthorized: () => voi
                   configId: config.configId,
                   name: config.name,
                   provider: config.provider,
+                  protocol: config.protocol,
                   baseUrl: config.baseUrl,
                   model: config.model,
                   purpose: config.purpose,
@@ -171,6 +180,7 @@ function LlmFormCard({
       const input: LlmConfigInput = {
         name: form.name.trim(),
         provider: form.provider.trim(),
+        protocol: form.protocol,
         baseUrl: form.baseUrl.trim(),
         model: form.model.trim(),
         purpose: form.purpose,
@@ -214,6 +224,15 @@ function LlmFormCard({
         </Field>
         <Field label="供应商">
           <input value={form.provider} onChange={event => onChange({ ...form, provider: event.target.value })} />
+        </Field>
+        <Field label="协议">
+          <select
+            value={form.protocol}
+            onChange={event => onChange({ ...form, protocol: event.target.value as LlmProtocol })}
+          >
+            <option value="openai">openai（/chat/completions）</option>
+            <option value="anthropic">anthropic（/v1/messages）</option>
+          </select>
         </Field>
       </div>
       <div className="row">
@@ -319,7 +338,7 @@ function LlmRow({
       <td>{config.purpose === 'content' ? '内容生成' : '检索索引'}</td>
       <td>
         <div>{config.model}</div>
-        <div className="muted">{config.baseUrl}</div>
+        <div className="muted">{config.protocol} · {config.baseUrl}</div>
       </td>
       <td className="muted">{config.apiKeyMasked ?? '未配置'}</td>
       <td>
