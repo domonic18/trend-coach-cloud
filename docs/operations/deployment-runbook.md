@@ -238,7 +238,7 @@ curl -fsS -H "Authorization: Bearer $SESSION_TOKEN" \
 - 任务状态在 `pipeline_jobs`；心跳超 120s 的 running 任务会被自动回收。频繁回收通常是 ffmpeg 超时、磁盘满或进程被 OOM kill。
 - 失败任务先看 `errorCode`；ffmpeg stderr 与 provider 响应只在内部日志（已脱敏），不返回客户端。
 
-**真实密钥验收（待环境具备）**
+**真实密钥验收**
 
 1. 以 admin 登录后台「模型配置」：录入 ASR（启用）与 content LLM，按需录入 embedding；先点「测试连接」确认成功（保存即生效，无需重启）。
 2. 上传 2–5 分钟中文样片，确认转写 `ready` 且时间戳单调；核对 `transcript_segments` 条数与音频时长。
@@ -246,6 +246,26 @@ curl -fsS -H "Authorization: Bearer $SESSION_TOKEN" \
 4. 发布后确认 catalog、检索与签名播放可见；检查 `embedded` 与索引状态。
 5. 再用 30–60 分钟样本验证静音切块、块级缓存与 ASR 请求数（成功块重试不应重复计费）。
 6. 抽查日志：无 token、完整 deviceId、完整 query、转写正文、源路径、完整媒体 URL、provider 响应体。
+
+**实测记录（2026-11-01，本地 127.0.0.1:3939）**
+
+样片为 33 分 09 秒中文课程视频（210 MB，H.264/AAC），ASR 为 MiniMax，content LLM 为 `MiniMax-M3.1-Flash`（anthropic 协议）。
+
+| 环节 | 结果 |
+|---|---|
+| 上传 + 探测 | 流式 PUT 成功，ffprobe 时长 1,988,926ms |
+| ingest | 161s，5 个静音切块，49 条 `transcript_segments`，时间戳单调 |
+| generate | ~297s，21 章节 / 30 知识点 / 30 片段，`needsReview=0` |
+| apply | 写入 draft 章节/知识点/文章/片段，映射数一致 |
+| publish | 30 篇文章 + 30 个片段置 published，`indexed=false`（未配置 embedding） |
+| 学员侧 | 设备码授权后 catalog 可见该课程（21 章节 / 30 知识点），知识点文章正文可读 |
+| 检索 | 词法召回 4 条，`顺势者赢逆势者损` 片段 score 1.0 |
+| 播放 | `POST /v1/playback/sessions` 返回带 token 的 playlist，拉取 200、223 个分片、含 `#EXT-X-ENDLIST` |
+
+遗留问题：
+
+- 未配置 1024 维 embedding，发布 `indexed=false`，向量召回与混合排序未在真实链路验证；补齐 embedding 后需重跑 publish 确认 `embedded>0`。
+- 33 分钟样本生成 21 个章节偏碎，且存在 0 知识点的章节（`m1-v1` 提示词未约束章节粒度），需在提示词层收敛后再评估。
 
 **容量与清理**
 
