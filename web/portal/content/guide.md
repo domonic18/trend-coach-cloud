@@ -1,42 +1,80 @@
-## 常见安装问题
+## Windows 安装卡点
 
-### `dsh: command not found`
+### 提示「node 不是内部或外部命令」
 
-说明 dsh 没有安装到当前终端可访问的位置。可以直接用 `npx` 启动，不需要全局安装：
+说明 Node.js 没有装好，或者装完后没有重新打开命令窗口。
 
-```bash
-npx --yes @deepseek-ai/dsh@0.2.1-rc.5 --profile trend-coach --port 3939 --no-open
-```
+1. 回到安装向导第 2 步，重新运行 Node.js 安装包，全部保持默认选项。
+2. 安装完成后重启电脑。
+3. 重新打开命令提示符（Windows 键 + R，输入 `cmd` 回车），再执行 `node -v`。
 
-如果希望后续命令更短，再按官方文档把 dsh 安装到全局。
+如果电脑是 Windows 7 或 Windows 8，新版 Node.js 无法安装，请联系管理员。
+
+### 浏览器提示「不常下载的文件」
+
+点击提示旁的「保留」即可。下载完成后文件应保存在「下载」文件夹，文件名以 `.tgz` 结尾。
+
+如果打开「下载」文件夹找不到文件，可以按 Windows 键 + E 打开文件资源管理器，点击左侧的「下载」。
+
+### 下载后变成了文件夹或压缩包
+
+说明文件被浏览器自动解压了。请不要使用解压后的文件夹，改用 Chrome 或 Edge 重新下载，并直接使用 `.tgz` 原文件。
+
+### 命令窗口出现「Ok to proceed? (y)」
+
+这是第一次运行时的正常提示。输入字母 `y`，按回车继续。
+
+### 命令执行很慢或看起来卡住
+
+第一次安装需要联网下载组件，通常 1～3 分钟。网络较慢时请耐心等待，不要关闭窗口。超过 5 分钟仍无反应，可以按 Ctrl + C 停止，再重新粘贴命令执行。
+
+### 关闭黑色窗口后客户端打不开
+
+黑色窗口就是客户端本身。关闭它等于退出客户端，下次使用需要重新打开命令提示符并执行启动命令。使用期间最小化即可。
+
+### 提示端口被占用
+
+把启动命令里的 `--port 3939` 换成 `--port 4040`，然后浏览器改用 `http://localhost:4040` 访问。
+
+## macOS 安装卡点
+
+### 终端提示 command not found
+
+说明 Node.js 没有装好。回到安装向导第 2 步重新安装，然后关闭终端窗口，重新打开一个终端再执行 `node -v`。
+
+### Safari 下载后自动解压
+
+Safari 可能把 `.tgz` 自动解压成文件夹。请改用 Chrome 或 Edge 下载，确保使用的是以 `.tgz` 结尾的原文件。
+
+### 启动后浏览器没有自动打开
+
+手动在浏览器地址栏输入 `http://localhost:3939` 打开即可。
+
+## 通用问题
 
 ### 插件安装时报 peer 版本不匹配
 
-插件要求 dsh **精确为 0.2.1-rc.5**。升级或降级 dsh 后重新安装插件：
+插件要求 dsh **精确为 0.2.1-rc.5**。升级或降级 dsh 后，用同样的安装命令重新安装插件：
 
 ```bash
 npx --yes @deepseek-ai/dsh@0.2.1-rc.5 --profile trend-coach --port 3939 --no-open
-dsh plugin --profile trend-coach add -w ./dsh-plugin-trend-coach-0.1.0.tgz
+npx --yes @deepseek-ai/dsh@0.2.1-rc.5 plugin --profile trend-coach add -w <安装包完整路径>
 ```
 
 ### 提示 profile 不存在
 
-先用目标 profile 启动一次 dsh，让它创建配置目录，再安装插件：
+先用目标 profile 启动一次 dsh，让它创建配置目录。看到启动成功的提示后按 Ctrl + C 停止，再安装插件：
 
 ```bash
 npx --yes @deepseek-ai/dsh@0.2.1-rc.5 --profile trend-coach --port 3939 --no-open
 ```
 
-### 端口被占用
-
-把 `--port 3939` 换成其他未占用端口，例如 `--port 4040`，并同步修改访问地址。
-
 ### 安装后侧边栏没有出现「趋势伴学」
 
 - 确认安装的插件版本与当前 dsh 版本匹配。
-- 重启 dsh 客户端，而不是只刷新浏览器。
-- 检查 `dsh plugin --profile trend-coach list` 是否能看到插件。
-- 查看 dsh 启动日志中是否有插件激活失败的提示。
+- 关闭黑色窗口或终端，重新执行启动命令，而不是只刷新浏览器。
+- 检查 `npx --yes @deepseek-ai/dsh@0.2.1-rc.5 plugin --profile trend-coach list` 是否能看到插件。
+- 查看启动日志中是否有插件激活失败的提示。
 
 ### 设备授权页面打不开或提示设备码无效
 
@@ -50,10 +88,10 @@ npx --yes @deepseek-ai/dsh@0.2.1-rc.5 --profile trend-coach --port 3939 --no-ope
 Web UI 需要额外安装：
 
 ```bash
-dsh plugin --profile trend-coach add @deepseek-ai/dsh-web-app
+npx --yes @deepseek-ai/dsh@0.2.1-rc.5 plugin --profile trend-coach add @deepseek-ai/dsh-web-app
 ```
 
-安装后重启 dsh，再按启动日志中的地址访问。
+安装后回到黑色窗口或终端，按 Ctrl + C 停止，再重新执行启动命令。
 
 ### 视频无法播放
 
@@ -65,7 +103,7 @@ dsh plugin --profile trend-coach add @deepseek-ai/dsh-web-app
 
 记录以下信息再联系管理员，可以显著缩短排查时间：
 
-1. 操作系统与 Node.js 版本（`node -v`）。
+1. 操作系统与 Node.js 版本（Windows 用命令提示符、macOS 用终端执行 `node -v`）。
 2. dsh 与插件版本。
-3. 出错的完整命令与提示文字。
+3. 出错的完整命令与提示文字（可以截图黑色窗口或终端）。
 4. 问题发生在安装、授权、检索还是播放阶段。

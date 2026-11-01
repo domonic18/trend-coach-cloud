@@ -654,7 +654,59 @@ a:hover {
 .guide-step p {
   margin: 10px 0 4px;
   color: var(--portal-muted);
+  font-size: 15.5px;
+  line-height: 1.85;
+}
+
+.guide-os-switch {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 24px;
+}
+
+.guide-helper-list {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+
+.guide-helper-list li {
+  margin: 6px 0;
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.guide-step-link {
+  margin: 6px 0 4px;
+  font-size: 15.5px;
+}
+
+.guide-step-link a {
+  font-weight: 600;
+}
+
+.guide-step-expect {
+  margin: 10px 0 0;
+  padding: 10px 14px;
+  border-left: 4px solid #52c41a;
+  border-radius: 8px;
+  background: #f6ffed;
+  color: #3f6600;
+  font-size: 15px;
+}
+
+.guide-step-tip {
+  margin: 10px 0 0;
+  padding: 10px 14px;
+  border-left: 4px solid #faad14;
+  border-radius: 8px;
+  background: #fffbe6;
+  color: #7a5a00;
   font-size: 14.5px;
+}
+
+.guide-step-expect strong,
+.guide-step-tip strong {
+  margin-right: 2px;
 }
 
 /* ---- 下载 ---- */

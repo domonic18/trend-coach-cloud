@@ -23,6 +23,14 @@ export function DownloadsPage() {
       </PageHero>
 
       <section className="content-section">
+        <Alert
+          type="info"
+          showIcon
+          className="guide-alert"
+          message="Windows 用户请注意"
+          description="下载后文件应保存在「下载」文件夹，并以 .tgz 结尾。浏览器提示「不常下载」时点「保留」；不要解压、不要改名。下载完成后回到安装向导，从第 5 步继续。"
+        />
+
         {releases.isPending && (
           <div className="portal-loading">
             <Spin />
