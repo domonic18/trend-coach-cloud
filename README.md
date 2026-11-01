@@ -128,7 +128,7 @@ npm test                       # 单元 + 契约测试（自动重置测试库�
 
 运行期持久化数据（数据库、管线、证书、媒体、备份）统一放在仓库根 `workspace/`，该目录已 gitignore，可整体迁移或备份。
 
-视频建课管线默认 `PIPELINE_ENABLED=false`。启用需本机安装 `ffmpeg`/`ffprobe`，并设置 `PIPELINE_STORAGE_DIR` 与 `PIPELINE_HLS_DIR`（默认 `workspace/pipeline/{storage,hls}`；两目录同卷，设置 `MEDIA_LOCAL_DIR` 时必须与其相同）。真实转写与文章生成还需 `ASR_API_KEY` 与 `CONTENT_LLM_BASE_URL/MODEL/API_KEY`；缺失时对应阶段返回 `503`，不影响服务启动。管理端「视频建课」页按“上传 → 处理 → 转写 → 生成 → 应用 → 发布”操作，生成内容始终先落 `draft`。
+视频建课管线默认 `PIPELINE_ENABLED=false`。启用需本机安装 `ffmpeg`/`ffprobe`，并设置 `PIPELINE_STORAGE_DIR` 与 `PIPELINE_HLS_DIR`（默认 `workspace/pipeline/{storage,hls}`；两目录同卷，设置 `MEDIA_LOCAL_DIR` 时必须与其相同）。ASR、内容 LLM 与 embedding 的连接信息和密钥在管理端「模型配置」页维护：密钥以 AES-256-GCM 加密落库（`CREDENTIAL_ENCRYPTION_KEY` 为加密盐）、只回显掩码、保存后立即生效；未配置时对应阶段返回 `503`，不影响服务启动。管理端「视频建课」页按“上传 → 处理 → 转写 → 生成 → 应用 → 发布”操作，生成内容始终先落 `draft`。
 
 ## 部署
 
@@ -157,4 +157,4 @@ deploy/         # Caddy 与可选监控模板（不随 Compose 启动）
 scripts/        # migrate/seed 与备份恢复入口
 ```
 
-当前为 M1 实现阶段：M2 业务接口、设备码授权、签名 HLS、事件接收已落地；M3.1 账号与后台登录、M3.2 内容管理 API 与 React 控制台、M3.3 体系与进度接口已落地；M4.2 语音转写已落地（真实 MiniMax 待 `ASR_API_KEY`）；M1 视频→课程管线已落地（上传、单码率 HLS、长音频转写、切分、文章草稿、人工发布；真实 ASR/LLM 待密钥验收），多码率 HLS 与召回评估后置。
+当前为 M1 实现阶段：M2 业务接口、设备码授权、签名 HLS、事件接收已落地；M3.1 账号与后台登录、M3.2 内容管理 API 与 React 控制台、M3.3 体系与进度接口已落地；M4.2 语音转写已落地（真实 MiniMax 待后台录入密钥）；M4.3 模型配置页已落地（LLM/ASR 条目、密钥加密、连通性测试）；M1 视频→课程管线已落地（上传、单码率 HLS、长音频转写、切分、文章草稿、人工发布；真实 ASR/LLM 待后台录入密钥验收），多码率 HLS 与召回评估后置。

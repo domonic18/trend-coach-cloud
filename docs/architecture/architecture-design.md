@@ -20,7 +20,7 @@
 
 **不耦合 `ai-invest`**：独立仓库、独立数据库、独立鉴权与用户体系；不复制其代码、数据或评估集，只借鉴 PostgreSQL `halfvec` + `pg_trgm` + RRF 的技术选型（PRD D2）。
 
-**模型能力边界**：云端只允许 ASR、查询 embedding 与管理端内容生产 LLM。前两者在请求生命周期内调用；内容 LLM 仅由 `operator/admin` 触发，产物只落 `draft`，必须人工审核并显式发布。密钥只存环境变量，不进入浏览器、插件、日志或响应。
+**模型能力边界**：云端只允许 ASR、查询 embedding 与管理端内容生产 LLM。前两者在请求生命周期内调用；内容 LLM 仅由 `operator/admin` 触发，产物只落 `draft`，必须人工审核并显式发布。连接信息与密钥存数据库（AES-256-GCM 加密），仅 `admin` 在后台维护；明文密钥不进入浏览器、插件、日志或响应。
 
 ## 2. 设计原则与约束
 
@@ -103,7 +103,7 @@ API Gateway ── 鉴权（Bearer + x-device-id）── 限流 ── 请求�
    ├── kb     : search / segments/:id
    ├── playback: sessions（签名 playlistUrl）
    ├── asr     : POST /v1/asr/transcribe → MiniMax speech_to_text（M4.2）
-   ├── admin   : /v1/auth/session + /v1/admin/*（后台账号、内容管理、索引重建、视频管线，M3/M1）
+   ├── admin   : /v1/auth/session + /v1/admin/*（后台账号、内容管理、索引重建、视频管线、模型配置，M3/M1/M4.3）
    └── events : GET/PUT /v1/events/consent + POST /v1/events（白名单）
    │
 PostgreSQL ── 课程 / 章节 / 知识点 / 片段 / 文章 / 向量 / 用户 / 设备 / 令牌 / 事件 / 后台会话 / 管线任务与转写
@@ -124,7 +124,7 @@ PostgreSQL ── 课程 / 章节 / 知识点 / 片段 / 文章 / 向量 / 用�
 | local | 开发与 mock 对齐 | Docker Compose：PostgreSQL + 服务；ffmpeg 可选 |
 
 - 两个环境严格隔离数据库、媒体存储、令牌密钥与 CDN 配置。
-- 签名密钥、数据库口令、CDN 密钥、ASR/LLM 密钥通过环境变量/密钥管理注入，不入库、不入镜像。
+- 签名密钥、数据库口令、CDN 密钥通过环境变量/密钥管理注入，不入库、不入镜像；ASR/LLM/embedding 密钥存数据库（后台录入、加密落库），环境只提供 `CREDENTIAL_ENCRYPTION_KEY`。
 - 镜像内置 ffmpeg/ffprobe；`PIPELINE_STORAGE_DIR`（源文件与工作区）与 `PIPELINE_HLS_DIR`（对外 HLS）位于同一挂载点（宿主 `workspace/pipeline` 挂到 `/data`），保证 HLS 原子 rename。所有运行期持久化数据按 ai-invest 约定放在仓库根 `workspace/`，整体 gitignore。
 
 ## 5. 数据模型
@@ -172,6 +172,8 @@ erDiagram
 | `transcript_chunks`（M1） | `transcript_id`、`idx`、`start_ms/end_ms`、`status`、`sentences jsonb`、`attempt` | 块内时间戳为局部毫秒偏移；`(transcript_id, idx)` 唯一；成功块不重复请求 |
 | `transcript_segments`（M1） | `transcript_id`、`idx`、`start_ms/end_ms`、`text` | 全局毫秒时间戳、≤30s 分组、1–4000 字符；按 `start_ms` 排序 |
 | `content_generations`（M1） | `generation_id`、`asset_id`、`transcript_id`、`course_id`、`job_id`、`status`、`prompt_version`、`model`、计数、`payload jsonb`、`applied_content jsonb` | 每素材仅一个 `draft`；只存预览与待审原因；`apply` 后保留映射；不自动发布 |
+| `llm_configs`（M4.3） | `config_id`、`name`、`provider`、`protocol`、`base_url`、`model`、`api_key_encrypted`、`purpose(content/embedding)`、`is_default`、`is_active`、测试状态 | 每个用途最多一个启用默认项（部分唯一索引）；密钥只存密文；embedding 必须 1024 维 |
+| `asr_config`（M4.3） | 单行 `id=1`、`provider`、`protocol(minimax/openai)`、`base_url`、`model`、`api_key_encrypted`、`enabled`、测试状态 | 全局唯一渠道；`enabled` 且密钥可解密时才参与转写 |
 
 建库插件：`pgvector`（`halfvec`）、`pg_trgm`；检索索引与向量索引分离于业务表，可在线重建（M3 后台触发）。
 
@@ -420,13 +422,24 @@ POST /v1/asr/transcribe
 
 **配置**
 
+ASR / 内容 LLM / embedding 的连接信息不再读环境变量，统一存数据库并由后台「模型配置」维护（见 §7.1）；环境变量只保留 `CREDENTIAL_ENCRYPTION_KEY`（密钥加密盐）与调参：
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `ASR_BASE_URL` | `https://api.minimaxi.com` | MiniMax 基址；显式设置但缺 `ASR_API_KEY` 时启动失败 |
-| `ASR_API_KEY` | 无 | 仅云端环境变量；staging/production 缺失时启动失败 |
-| `ASR_MODEL` | `asr-1.0` | 上游模型名 |
-| `ASR_TIMEOUT_MS` | `30000` | 上游超时；应小于插件 `voiceTimeoutMs`（40s） |
+| `CREDENTIAL_ENCRYPTION_KEY` | local 固定值 | 模型密钥 AES-256-GCM 加密盐（≥32 字符）；staging/production 必填 |
+| `ASR_TIMEOUT_MS` | `30000` | 短语音上游超时；应小于插件 `voiceTimeoutMs`（40s） |
+| `ASR_LONG_TIMEOUT_MS` | `600000` | 长音频单块转写超时 |
 | `RATE_LIMIT_ASR_PER_MINUTE` | `20` | 按设备限流 |
+| `RATE_LIMIT_MODEL_CONFIG_PER_MINUTE` | `30` | 后台模型配置接口限流 |
+
+### 7.1 模型配置（数据库）
+
+- `llm_configs`：多条目，`purpose=content|embedding`；部分唯一索引保证每个用途最多一个 `is_default AND is_active`；`embedding` 必须返回 1024 维。
+- `asr_config`：单行（`id=1`），`protocol=minimax|openai`，`enabled` 控制是否可用于转写。
+- `api_key_encrypted` 形如 `v1:<iv>:<tag>:<ciphertext>`（AES-256-GCM，base64url）；解密失败按未配置处理，DTO 只回 `apiKeyMasked`（前 4 + `*` + 后 4）或「无法解密，请重新录入」；明文密钥永不落库、日志与响应。
+- API `/v1/admin/model-configs/*` 仅 `admin`；`PATCH apiKey=""` 保留原密钥；`baseUrl` 自动剥离常见端点后缀。
+- 运行时按操作解析：ingest 开始时取 ASR、generate 开始时取 content LLM、检索/发布建索引时取 embedding；管理员保存后下一次操作即生效，无需重启。
+- 发布时无可用 embedding 仍允许发布，仅 `indexed=false`；ASR/LLM 缺失时对应阶段 `503`，不影响服务启动与其他接口。
 
 **隐私**：音频只在请求生命周期内存在，转发 MiniMax 后丢弃；不落盘、不落数据库、不写对象存储、不进入指标；转写文本只回传插件，不持久化。
 
@@ -513,7 +526,7 @@ POST /v1/asr/transcribe
 | 单元/集成 | 入参校验、RRF 融合、阈值回退、签名 URL 构造与校验、令牌轮换 |
 | 检索质量 | 自建评估集 ≥100 条，Top-5 ≥90% |
 | 媒体 | 加密 HLS 可解密、seek、Range 206、CORS、token 过期提示 |
-| 语音 | WAV 校验边界、provider 成功/业务错误/429/5xx/非 JSON/超时、空文本 422、鉴权与限流、日志脱敏；真实 MiniMax 待 `ASR_API_KEY` |
+| 语音 | WAV 校验边界、provider 成功/业务错误/429/5xx/非 JSON/超时、空文本 422、鉴权与限流、日志脱敏；真实 MiniMax 待后台录入 ASR 密钥 |
 | 管线 | 纯算法（静音切块、转写合并、文本锚定、ID）、假 provider ingest→生成→apply→发布 E2E、取消/重试/心跳恢复、上传边界、OpenAPI 双向一致；`RUN_FFMPEG_TESTS=1` 跑真实 ffmpeg 合成视频 |
 | 安全 | 越权/设备不匹配/过期令牌、日志脱敏抽查、限流 |
 | 压测 | 检索 P95 与并发目标；播放会话签发与 CDN 并发 |
@@ -527,7 +540,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 | M1 | 视频上传/转码、带时间戳转写、章节/知识点切分、课程文章生成、片段映射、人工发布与索引 | 1 门课程结构化上线，可检索 | 已落地；真实 ASR/LLM 待密钥验收，多码率与对象存储后置 |
 | M2 | 核心业务接口、设备码授权、签名 HLS、事件接口与同意管理、契约测试 | 对接清单验收通过，插件联调完成 | 已落地；限流为单实例内存实现 |
 | M3 | 后台管理、账号体系、学习进度、索引重建/召回测试 | 内容可运营、用户可管理 | 核心已落地（M3.1/M3.2/M3.3）；召回测试、媒体上传、运营看板、插件版本与灰度后置 |
-| M4.2 | 语音转写：`/v1/asr/transcribe`、MiniMax provider、配置与限流 | 契约测试通过；真实 MiniMax 需 `ASR_API_KEY` | 已落地；真实上游待 `ASR_API_KEY` |
+| M4.2 | 语音转写：`/v1/asr/transcribe`、MiniMax provider、配置与限流 | 契约测试通过；真实 MiniMax 需后台录入 ASR 密钥 | 已落地；真实上游待后台录入 ASR 密钥 |
 | M6 | 限流、压测、备份、合规加固 | 公测放行 | 已落地加固项；账号注销/数据删除与真实密钥验收待完成 |
 
 **实现状态（2026-11-01）**
@@ -536,7 +549,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 - **M3.1 已落地**：管理员创建账号、邀请码、后台会话、角色（`student/operator/admin`）、设备批准绑定。
 - **M3.2 已落地**：`/v1/admin/content/*` 与 React 控制台覆盖课程、章节、知识点、文章、片段的创建/修改/发布/归档；文章保存版本递增，片段正文变更清空向量，`POST /v1/admin/content/reindex` 手工重建 embedding。媒体上传、召回评估看板、插件版本与灰度未实现。
 - **M3.3 已落地**：课程列表、课程树、知识点详情、学习进度上报。
-- **M4.2 已落地**：`/v1/asr/transcribe` + MiniMax provider + 按设备限流；2026-11-01 单元/契约测试通过（WAV 与时长校验、base URL 归一化、本地 stub 覆盖成功/`base_resp` 业务错误/429/500/非 JSON/超时，以及鉴权、设备不匹配、非法音频、413、空结果 422、上游错误映射、fake provider 成功与限流 429）；真实上游待 `ASR_API_KEY`。
+- **M4.2 已落地**：`/v1/asr/transcribe` + MiniMax provider + 按设备限流；2026-11-01 单元/契约测试通过（WAV 与时长校验、base URL 归一化、本地 stub 覆盖成功/`base_resp` 业务错误/429/500/非 JSON/超时，以及鉴权、设备不匹配、非法音频、413、空结果 422、上游错误映射、fake provider 成功与限流 429）；真实上游待后台录入 ASR 密钥。
 - **M1 已落地**：媒体素材创建与流式上传、ffprobe 校验、单码率 HLS、16kHz WAV 抽取、静音切块、MiniMax 长音频转写（块级缓存）、章节/知识点/片段/文章草稿生成、生成预览/apply/discard、课程发布与按需 `reindex`、DB 任务队列（认领/心跳/重试/取消/恢复）与管理端「视频建课」页。测试使用假 MediaProcessor/ASR/LLM；真实 MiniMax 与内容 LLM 待密钥验收。
 - **M6 已落地加固项**：限流补齐设备轮询、刷新、体系/片段读取与后台内容接口，`429` 带 `Retry-After`，内存键数设上限；新增零依赖压测脚本 `scripts/load-test.mjs`（P95/错误率阈值）、非破坏性恢复演练 `scripts/restore-drill.sh` 与合规清单 `docs/operations/compliance.md`。账号注销/数据删除、指标与播放会话定期清理、源视频保留期仍未实现，见合规清单 §9。
 - **其他**：TTL 与并发上限仍为临时默认值；生产媒体走 CDN 尚未接入，本地 staging 由 `src/media/routes.ts`、生产管线由 `PIPELINE_HLS_DIR` 提供签名文件服务。
@@ -586,7 +599,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 5. 相邻知识点阈值：空召回或最高分低于阈值的具体数值待评估集定标。
 6. 引用 host：`trend-coach.local` 是否长期保留；真实域名需插件同步支持。
 7. 部署区域与 CDN 供应商：影响签名算法、CORS 配置与延迟预算。
-8. 真实 MiniMax ASR 联调需 `ASR_API_KEY`；当前以 fake provider 与本地 stub 验证，真实链路作为待验项。
+8. 真实 MiniMax ASR 联调需在后台「模型配置」录入密钥；当前以 fake provider 与本地 stub 验证，真实链路作为待验项。
 9. 多供应商 ASR 切换本期不做；provider 接口保留。
 10. 内容 LLM 的供应商/模型与提示词版本需在真实课程上验收；当前默认 `m1-v1` 与 OpenAI 兼容接口。
 11. MiniMax `verbose_json` 真实时间戳字段需联调确认；解析器已兼容多种键，无时间戳时退化为整块。

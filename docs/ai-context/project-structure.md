@@ -1,8 +1,8 @@
 # 项目结构
 
-版本：v0.8（2026-11-01）
+版本：v0.9（2026-11-01）
 
-本仓库已进入 M1 实现阶段：单进程模块化单体（Fastify + PostgreSQL/pgvector），业务接口、鉴权、媒体签名、体系与进度、账号与后台登录、内容管理与 React 管理端、语音转写、视频→课程管线与契约测试已落地。管线覆盖流式上传、ffmpeg HLS、长音频转写、切分、文章草稿与人工发布；真实 ASR/LLM 待密钥验收。本文件描述现状与已确定的目标结构，避免后续实现随意扩散。
+本仓库已进入 M1 实现阶段：单进程模块化单体（Fastify + PostgreSQL/pgvector），业务接口、鉴权、媒体签名、体系与进度、账号与后台登录、内容管理与 React 管理端、语音转写、视频→课程管线、模型配置（数据库）与契约测试已落地。管线覆盖流式上传、ffmpeg HLS、长音频转写、切分、文章草稿与人工发布；模型连接与密钥由后台「模型配置」录入并加密存库，不再走环境变量（真实 provider 待密钥验收）。本文件描述现状与已确定的目标结构，避免后续实现随意扩散。
 
 ## 1. 当前结构
 
@@ -18,7 +18,8 @@ trend-coach-cloud/
 │   ├── 001_init.sql                           # 表、约束、trgm/HNSW 索引
 │   ├── 002_catalog_progress.sql               # 文章、学习进度
 │   ├── 003_accounts.sql                       # 账号、后台会话、邀请码
-│   └── 004_pipeline.sql                       # 素材状态、任务、转写、生成
+│   ├── 004_pipeline.sql                       # 素材状态、任务、转写、生成
+│   └── 005_model_config.sql                   # LLM 多渠道配置、ASR 单行配置
 ├── data/
 │   └── seed.json                              # 本地/CI 种子数据（不含真实版权内容）
 ├── workspace/                                 # 运行期持久化数据（已 gitignore，不入库）
@@ -58,17 +59,21 @@ trend-coach-cloud/
 │   │   ├── generation.ts / prompts.ts         # 窗口切分、锚定、片段/文章草稿
 │   │   ├── service.ts / routes.ts / runtime.ts# DTO、管理端路由、依赖装配
 │   │   └── {types,ids,text,silence,chunks,transcript,constants}.ts
+│   ├── model-config/                          # 模型配置：DB 存储、AES-256-GCM、连通性测试
+│   │   ├── crypto.ts                          # 密钥派生、密文加解密、掩码
+│   │   ├── service.ts                         # LLM 多渠道/ASR 单行 CRUD 与运行时解析
+│   │   └── routes.ts                          # /v1/admin/model-configs/*（仅 admin）
 │   └── events/                                # 事件鉴权、白名单、同意、幂等
 ├── web/
-│   └── admin/                                 # React + Vite 管理端；含「视频建课」页
+│   └── admin/                                 # React + Vite 管理端；含「视频建课」「模型配置」页
 ├── test/
-│   ├── unit.test.ts                           # 配置、校验、RRF、Range、签名、事件白名单
-│   ├── migration.test.ts                      # 管线表/列/约束/索引
+│   ├── unit.test.ts                           # 配置、校验、RRF、Range、签名、事件白名单、密钥加解密
+│   ├── migration.test.ts                      # 管线与模型配置表/列/约束/索引
 │   ├── pipeline-unit.test.ts                  # 切块、时间戳合并、锚定、ID
 │   ├── pipeline-provider.test.ts              # 长音频 ASR 与 LLM 假上游
 │   ├── pipeline-ffmpeg.test.ts                # RUN_FFMPEG_TESTS=1 时跑真实 ffmpeg
 │   ├── pipeline-e2e.test.ts                   # 假处理器 ingest→生成→apply→发布
-│   └── contract.test.ts                       # 逐接口契约 + OpenAPI 一致性
+│   └── contract.test.ts                       # 逐接口契约 + OpenAPI 一致性（含模型配置）
 └── docs/                                      # 本文档体系
 ```
 
@@ -99,6 +104,7 @@ deploy/           # staging/production 部署与密钥注入说明（不含密�
 | 检索排序/阈值参数 | `src/config.ts` 配置项，可调；默认值写进架构文档 |
 | 媒体签名逻辑 | `src/playback/`，与 CDN 配置分离 |
 | 管线任务与生成 | `src/pipeline/`；任务表见 `004_pipeline.sql`，不把业务状态塞进 `options` |
+| 模型连接与密钥 | `src/model-config/`；表见 `005_model_config.sql`；密钥只存 AES-256-GCM 密文，不读环境变量、不回显明文 |
 | 源视频与 HLS | `workspace/pipeline/{storage,hls}`（已 gitignore）；容器内由 `/data` 单挂载点提供，两目录必须同卷 |
 | 契约测试夹具 | `data/seed.json`，与插件 `spike/fixtures.json` 的响应形状对齐 |
 | 文档 | `docs/<类别>/`，索引见 `docs/ai-context/docs-overview.md` |
@@ -112,6 +118,8 @@ deploy/           # staging/production 部署与密钥注入说明（不含密�
 - 管线接口全部位于 `/v1/admin/content/*` 的公开路由内，只接受 operator/admin 会话；学员令牌不可访问。
 - 生成内容只写 `draft`；`publish` 是唯一进入学员可见性的入口，配置 embedding 时必须先成功 `reindex`。
 - 源路径、HLS 路径、SHA、转写正文、provider 响应不进管理端列表/预览响应与日志。
+- 模型配置接口只在 `/v1/admin/model-configs/*`，仅 admin；响应只含掩码，密文与明文都不进日志。
+- ASR/内容 LLM/embedding 在每次使用时按用途从数据库解析，后台保存后立即生效，无需重启。
 - 任何新增接口先改文档与 OpenAPI，再写实现与契约测试。
 
 ## 5. 与插件仓库的关系

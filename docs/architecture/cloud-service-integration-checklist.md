@@ -372,7 +372,7 @@ Content-Type: application/json
 - 音频：RIFF/WAVE、PCM（format=1）、单声道、16000Hz、16bit；解码后 ≤1,920,044B；`durationMs` 整数 1–60,000；`data` 字节换算时长与 `durationMs` 误差 ≤1s。
 - 文本：去控制字符、折叠空白、trim 后 1–2000 字符；空结果 `422`。
 - 上游：MiniMax `POST {base}/v1/speech_to_text`（Bearer；multipart `file=audio/wav` + `model` + `response_format=json`）；`base_resp.status_code != 0` 视为协议错误。
-- 未配置 `ASR_API_KEY`：local 鉴权后 `503`；staging/production 启动失败。
+- 未配置或未启用 ASR：鉴权后 `503`；ASR 连接信息由后台「模型配置」维护（见 §3.10），缺失不阻止服务启动。
 - 限流：按设备 `RATE_LIMIT_ASR_PER_MINUTE`（默认 20）；不自动重试上游。
 - 错误：`400` 入参/音频非法；`401/403` 鉴权；`413` 过大；`422` 未识别；`429` 限流；`502` 上游协议异常；`503` 上游不可用/未配置。
 
@@ -387,7 +387,7 @@ Content-Type: application/json
 | 上游返回空文本 / `base_resp.status_code != 0` | `422` / `502` |
 | 上游 429 / 5xx / 超时 | `429` / `503`，插件提示重试，云端不自动重试 |
 | 超过按设备限流 | `429` |
-| 未配置 `ASR_API_KEY`（local） | `503` |
+| 未配置或未启用 ASR | `503` |
 | 日志抽查 | 无 base64、无转写正文、无完整 deviceId |
 
 ### 3.9 视频→课程管线（M1）
@@ -520,6 +520,37 @@ POST  /v1/admin/content/courses/{courseId}/publish
 | 管线未启用或 ASR/LLM 未配置 | 对应接口 `503`；服务健康 |
 | 响应与日志 | 无源路径、HLS 路径、SHA、转写正文（转写接口除外）、provider 响应 |
 
+### 3.10 模型配置（M4.3）
+
+全部接口位于 `/v1/admin/model-configs/*`，**仅 `admin` 后台会话**可用（operator 与学员 `403`，未登录 `401`）；按账号限流 `RATE_LIMIT_MODEL_CONFIG_PER_MINUTE`（默认 30）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET/POST | `/llm` | 列出/新增 LLM 条目（`purpose=content\|embedding`） |
+| GET/PATCH/DELETE | `/llm/{configId}` | 详情/修改/删除（删除默认项时自动提升同用途最早启用项） |
+| POST | `/llm/{configId}/set-default` | 切换同用途默认（按用途唯一） |
+| POST | `/llm/{configId}/test` | 连通性测试（content `max_tokens:1`；embedding 校验 1024 维） |
+| GET/PATCH | `/asr` | 单行 ASR 渠道配置（`protocol=minimax\|openai`、`enabled`） |
+| POST | `/asr/test` | 用 1 秒 440Hz WAV 测试上游 |
+
+- 响应字段：`apiKeyConfigured`、`apiKeyMasked`（前 4 + `*` + 后 4；短密钥整体打码）；**从不返回明文密钥**，请求日志与响应中不得出现 key。
+- `PATCH` 中 `apiKey: ""` 表示保留原密钥；新增时空串/缺省表示不配置密钥。
+- `baseUrl` 仅接受 http(s) 绝对地址；粘贴完整端点（`/chat/completions`、`/embeddings`、`/audio/transcriptions`、`/v1/speech_to_text`）时自动归一化到 base。
+- 保存后运行时在下一次任务/检索/发布时解析最新默认配置，无需重启；删除密钥或不可解密时按未配置处理。
+- 错误：`400` 入参/ID；`401/403` 鉴权与角色；`404` 不存在；`409` 停用项不可设默认；`429` 限流。
+
+**验收用例**
+
+| 用例 | 期望 |
+|---|---|
+| 匿名 / 学员设备令牌 / operator / admin | `401` / `401` / `403` / `200` |
+| 新增带密钥的 LLM 条目 | 落库为 `v1:` 密文；响应仅有掩码；明文不出现在响应/日志 |
+| 同用途两个默认项 | 后者新增/设默认后前者自动取消，数据库仅一个 `is_default` |
+| `PATCH apiKey: ""` | 保留原密钥，掩码不变 |
+| embedding 用途测试非 1024 维 | `success=false`，detail 说明维度 |
+| ASR 未启用/无 key | 转写阶段 `503`；其他管线阶段正常 |
+| 更换 `CREDENTIAL_ENCRYPTION_KEY` 后读取 | 掩码显示「无法解密，请重新录入」，不泄露密文 |
+
 ## 4. 数据与内容前置
 
 - M1 内容管线可产出带时间戳转写、章节/知识点切分、片段与文章草稿，经人工审核发布；仍需准备真实样片与内容 LLM/ASR 密钥用于验收。
@@ -607,7 +638,7 @@ POST  /v1/admin/content/courses/{courseId}/publish
 | 相邻知识点阈值 | 空召回或最高分低于阈值（待定数值） | F1.4 召回质量 |
 | ASR 供应商与模型 | MiniMax `asr-1.0`；provider 接口保留 | 供应商抖动与成本 |
 | 语音成本上限 | 单次 ≤60s、每设备 20 次/分钟；不自动重试 | 滥用与账单 |
-| 内容 LLM 供应商与模型 | OpenAI 兼容 `/chat/completions`；模型由 `CONTENT_LLM_MODEL` 配置 | 生成质量与成本 |
+| 内容 LLM 供应商与模型 | OpenAI 兼容 `/chat/completions`；模型在后台「模型配置」维护 | 生成质量与成本 |
 | 长音频切块与重试 | ≤480s/块、3 次重试、30s 分组；真实时间戳字段待联调 | 计费与对齐精度 |
 | 源视频与转写留存 | 默认保留，不自动清理；按版权授权人工归档 | 存储与合规 |
 | 多码率与对象存储 | 本期单码率本地存储；`MediaStore` 预留 | 带宽与扩容 |

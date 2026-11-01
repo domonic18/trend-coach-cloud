@@ -32,12 +32,13 @@ cp .env.prod.example .env.prod
 chmod 600 .env.prod
 ```
 
-至少填写：`APP_ENV`、`PUBLIC_BASE_URL`、`MEDIA_BASE_URL`、`DOMAIN`、`POSTGRES_USER/PASSWORD/DB`、`METRICS_TOKEN`、`MEDIA_SIGNING_SECRET`；首次部署另填 `BOOTSTRAP_ADMIN_USERNAME` 与 `BOOTSTRAP_ADMIN_PASSWORD`。启用管线还需 `PIPELINE_ENABLED=true`、`PIPELINE_STORAGE_DIR`、`PIPELINE_HLS_DIR`；真实转写与文章生成另配 `ASR_API_KEY` 与 `CONTENT_LLM_BASE_URL/MODEL/API_KEY`。
+至少填写：`APP_ENV`、`PUBLIC_BASE_URL`、`MEDIA_BASE_URL`、`DOMAIN`、`POSTGRES_USER/PASSWORD/DB`、`METRICS_TOKEN`、`MEDIA_SIGNING_SECRET`、`CREDENTIAL_ENCRYPTION_KEY`；首次部署另填 `BOOTSTRAP_ADMIN_USERNAME` 与 `BOOTSTRAP_ADMIN_PASSWORD`。启用管线还需 `PIPELINE_ENABLED=true`、`PIPELINE_STORAGE_DIR`、`PIPELINE_HLS_DIR`。ASR/内容 LLM/embedding 的连接与密钥在管理端「模型配置」页录入，不需要写环境变量。
 
 ```bash
 openssl rand -hex 32   # METRICS_TOKEN
 openssl rand -hex 32   # MEDIA_SIGNING_SECRET
 openssl rand -hex 24   # POSTGRES_PASSWORD
+openssl rand -hex 32   # CREDENTIAL_ENCRYPTION_KEY
 ```
 
 规则由 `src/config.ts` 强制，配置错误会阻止启动：
@@ -47,7 +48,8 @@ openssl rand -hex 24   # POSTGRES_PASSWORD
 - `BOOTSTRAP_ADMIN_USERNAME` 与 `BOOTSTRAP_ADMIN_PASSWORD` 必须成对配置；用户名匹配 `[a-z][a-z0-9._-]{2,31}`，密码至少 12 字符。首个管理员只在库中无 active admin 时创建，创建成功后应移除这两个变量并重启。
 - `POSTGRES_PASSWORD` 含 `:/@?#[]%` 等字符时，`DATABASE_URL` 需要 URL 编码；建议直接用字母数字。
 - 管线启用时必须能写 `PIPELINE_STORAGE_DIR` 与 `PIPELINE_HLS_DIR`，两目录解析后不同且同卷；设置 `MEDIA_LOCAL_DIR` 时 `PIPELINE_HLS_DIR` 必须与其相同，否则启动失败。启动会用 `ffmpeg -version` / `ffprobe -version` 探活，失败则启动失败。
-- `CONTENT_LLM_BASE_URL` 与 `CONTENT_LLM_MODEL` 必须成对配置；非 local 必须 HTTPS，非本机 base 必须提供 `CONTENT_LLM_API_KEY`。ASR/LLM 缺失不阻止服务启动，但对应阶段返回 `503`。
+- `CREDENTIAL_ENCRYPTION_KEY` 至少 32 字符，非 local 必填且不得使用本地默认值；更换后已存模型密钥无法解密，需在后台重新录入，旧值应保留在密钥管理以便回滚。
+- ASR/内容 LLM/embedding 由后台「模型配置」维护；未配置或未启用不阻止服务启动，但对应阶段返回 `503`。
 
 ## 3. 首次部署
 
@@ -238,7 +240,7 @@ curl -fsS -H "Authorization: Bearer $SESSION_TOKEN" \
 
 **真实密钥验收（待环境具备）**
 
-1. 配置 `ASR_API_KEY` 与 `CONTENT_LLM_BASE_URL/MODEL/API_KEY`，重启 app。
+1. 以 admin 登录后台「模型配置」：录入 ASR（启用）与 content LLM，按需录入 embedding；先点「测试连接」确认成功（保存即生效，无需重启）。
 2. 上传 2–5 分钟中文样片，确认转写 `ready` 且时间戳单调；核对 `transcript_segments` 条数与音频时长。
 3. 生成草稿，检查章节/知识点/待审原因与文章 Markdown；apply 后课程树为 draft。
 4. 发布后确认 catalog、检索与签名播放可见；检查 `embedded` 与索引状态。

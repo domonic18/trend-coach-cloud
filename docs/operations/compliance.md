@@ -66,9 +66,9 @@
 
 ## 6. 密钥与凭据
 
-- `METRICS_TOKEN`、`MEDIA_SIGNING_SECRET`、`POSTGRES_PASSWORD`、`ASR_API_KEY`、`CONTENT_LLM_API_KEY`、embedding key 只放 `.env.prod`（600 权限）或密钥管理服务。
+- `METRICS_TOKEN`、`MEDIA_SIGNING_SECRET`、`POSTGRES_PASSWORD`、`CREDENTIAL_ENCRYPTION_KEY` 只放 `.env.prod`（600 权限）或密钥管理服务；ASR/LLM/embedding key 由 admin 在后台录入，以 AES-256-GCM 密文存库，接口与日志只出现掩码。
 - 非 local 强制 HTTPS；生产拒绝本机地址；本地默认密钥在非 local 启动即失败。
-- 轮换：媒体签名与指标令牌可直接替换后滚动重启；ASR/LLM key 在供应商侧轮换后更新环境变量；数据库密码变更需同步 `DATABASE_URL` 并重启。
+- 轮换：媒体签名与指标令牌可直接替换后滚动重启；ASR/LLM key 在供应商侧轮换后在后台「模型配置」直接更新，无需重启；数据库密码变更需同步 `DATABASE_URL` 并重启；轮换 `CREDENTIAL_ENCRYPTION_KEY` 会使既有密文不可解密，必须先在后台重新录入全部模型密钥。
 - 不提交 `.env`、证书、密钥、样片大文件；仓库只保留 `.example`。
 
 ## 7. 内容版权与人工审核
