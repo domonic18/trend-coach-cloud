@@ -3,11 +3,12 @@ import { AccountsPanel } from './AccountsPanel'
 import { changePassword, clearToken, currentUser, hasToken, logout } from './api'
 import { ContentPanel } from './ContentPanel'
 import { Login } from './Login'
+import { PipelinePanel } from './PipelinePanel'
 import { SegmentsPanel } from './SegmentsPanel'
 import type { SessionUser } from './types'
 import { Field, Notice } from './ui'
 
-type Tab = 'content' | 'segments' | 'accounts'
+type Tab = 'content' | 'segments' | 'pipeline' | 'accounts'
 
 export function App() {
   const [user, setUser] = useState<SessionUser | null>(null)
@@ -67,6 +68,7 @@ export function App() {
       <nav className="tabs">
         <button className={tab === 'content' ? 'active' : ''} onClick={() => setTab('content')}>课程内容</button>
         <button className={tab === 'segments' ? 'active' : ''} onClick={() => setTab('segments')}>片段</button>
+        <button className={tab === 'pipeline' ? 'active' : ''} onClick={() => setTab('pipeline')}>视频建课</button>
         {user.role === 'admin' ? (
           <button className={tab === 'accounts' ? 'active' : ''} onClick={() => setTab('accounts')}>账号</button>
         ) : null}
@@ -77,6 +79,9 @@ export function App() {
       <main className="content">
         {tab === 'content' ? <ContentPanel onUnauthorized={unauthorized} /> : null}
         {tab === 'segments' ? <SegmentsPanel onUnauthorized={unauthorized} /> : null}
+        {tab === 'pipeline' ? (
+          <PipelinePanel onUnauthorized={unauthorized} onOpenContent={() => setTab('content')} />
+        ) : null}
         {tab === 'accounts' && user.role === 'admin' ? <AccountsPanel onUnauthorized={unauthorized} /> : null}
       </main>
     </div>

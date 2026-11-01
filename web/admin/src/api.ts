@@ -2,12 +2,25 @@ import type {
   Article,
   ContentStatus,
   Course,
+  CoursePublishResult,
   CourseSummary,
   CourseTree,
+  GenerationApplyResult,
+  GenerationPreview,
+  GenerationSummary,
+  MediaAsset,
+  MediaAssetList,
+  MediaAssetStatus,
+  PipelineJob,
+  PipelineJobDetail,
+  PipelineJobKind,
+  PipelineJobList,
+  PipelineJobStatus,
   Segment,
   SegmentList,
   SessionResponse,
   SessionUser,
+  TranscriptPage,
   User,
   UserList,
   UserRole,
@@ -248,4 +261,164 @@ export async function resetUser(
   password?: string,
 ): Promise<{ updated: boolean; inviteCode?: string; inviteExpiresAt?: number }> {
   return request('POST', `/v1/admin/users/${encodeURIComponent(userId)}/reset`, password === undefined ? {} : { password })
+}
+
+export async function listMediaAssets(filters: {
+  courseId?: string
+  status?: MediaAssetStatus
+  offset?: number
+  limit?: number
+}): Promise<MediaAssetList> {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== '') params.set(key, String(value))
+  }
+  const query = params.toString()
+  return request<MediaAssetList>('GET', `/v1/admin/content/media-assets${query === '' ? '' : `?${query}`}`)
+}
+
+export async function createMediaAsset(input: { courseId: string; title: string }): Promise<MediaAsset> {
+  return (await request<{ asset: MediaAsset }>('POST', '/v1/admin/content/media-assets', input)).asset
+}
+
+export async function patchMediaAsset(
+  assetId: string,
+  input: { title?: string; status?: 'archived' },
+): Promise<MediaAsset> {
+  return (await request<{ asset: MediaAsset }>(
+    'PATCH',
+    `/v1/admin/content/media-assets/${encodeURIComponent(assetId)}`,
+    input,
+  )).asset
+}
+
+/** 大文件走 XHR 才能拿上传进度；令牌放请求头，不进 URL。 */
+export function uploadMediaSource(
+  assetId: string,
+  file: File,
+  onProgress?: (ratio: number) => void,
+): Promise<MediaAsset> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('PUT', `/v1/admin/content/media-assets/${encodeURIComponent(assetId)}/source`)
+    xhr.setRequestHeader('content-type', 'application/octet-stream')
+    if (token !== null) xhr.setRequestHeader('authorization', `Bearer ${token}`)
+    xhr.upload.onprogress = event => {
+      if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
+    }
+    xhr.onerror = () => reject(new ApiError(0, '上传失败，请检查网络'))
+    xhr.onload = () => {
+      let payload: unknown
+      try {
+        payload = JSON.parse(xhr.responseText)
+      } catch {
+        payload = undefined
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve((payload as { asset: MediaAsset }).asset)
+        return
+      }
+      if (xhr.status === 401) clearToken()
+      const message = typeof payload === 'object' && payload !== null
+        && typeof (payload as { error?: unknown }).error === 'string'
+        ? (payload as { error: string }).error
+        : `上传失败（${xhr.status}）`
+      reject(new ApiError(xhr.status, message))
+    }
+    xhr.send(file)
+  })
+}
+
+export async function enqueueIngest(assetId: string, language: 'zh' | 'en' | 'auto'): Promise<PipelineJob> {
+  return (await request<{ job: PipelineJob }>(
+    'POST',
+    `/v1/admin/content/media-assets/${encodeURIComponent(assetId)}/ingest`,
+    { language },
+  )).job
+}
+
+export async function getTranscript(
+  assetId: string,
+  page: { offset?: number; limit?: number } = {},
+): Promise<TranscriptPage> {
+  const params = new URLSearchParams()
+  if (page.offset !== undefined) params.set('offset', String(page.offset))
+  if (page.limit !== undefined) params.set('limit', String(page.limit))
+  const query = params.toString()
+  return request<TranscriptPage>(
+    'GET',
+    `/v1/admin/content/media-assets/${encodeURIComponent(assetId)}/transcript${query === '' ? '' : `?${query}`}`,
+  )
+}
+
+export async function listPipelineJobs(filters: {
+  status?: PipelineJobStatus
+  kind?: PipelineJobKind
+  courseId?: string
+  assetId?: string
+  offset?: number
+  limit?: number
+}): Promise<PipelineJobList> {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== '') params.set(key, String(value))
+  }
+  const query = params.toString()
+  return request<PipelineJobList>('GET', `/v1/admin/content/pipeline/jobs${query === '' ? '' : `?${query}`}`)
+}
+
+export async function getPipelineJob(jobId: string): Promise<PipelineJobDetail> {
+  return (await request<{ job: PipelineJobDetail }>(
+    'GET',
+    `/v1/admin/content/pipeline/jobs/${encodeURIComponent(jobId)}`,
+  )).job
+}
+
+export async function retryPipelineJob(jobId: string): Promise<PipelineJob> {
+  return (await request<{ job: PipelineJob }>(
+    'POST',
+    `/v1/admin/content/pipeline/jobs/${encodeURIComponent(jobId)}/retry`,
+  )).job
+}
+
+export async function cancelPipelineJob(jobId: string): Promise<PipelineJob> {
+  return (await request<{ job: PipelineJob }>(
+    'POST',
+    `/v1/admin/content/pipeline/jobs/${encodeURIComponent(jobId)}/cancel`,
+  )).job
+}
+
+export async function enqueueGeneration(assetId: string): Promise<PipelineJob> {
+  return (await request<{ job: PipelineJob }>(
+    'POST',
+    `/v1/admin/content/media-assets/${encodeURIComponent(assetId)}/generations`,
+  )).job
+}
+
+export async function getGeneration(generationId: string): Promise<GenerationPreview> {
+  return request<GenerationPreview>(
+    'GET',
+    `/v1/admin/content/generations/${encodeURIComponent(generationId)}`,
+  )
+}
+
+export async function applyGeneration(generationId: string): Promise<GenerationApplyResult> {
+  return request<GenerationApplyResult>(
+    'POST',
+    `/v1/admin/content/generations/${encodeURIComponent(generationId)}/apply`,
+  )
+}
+
+export async function discardGeneration(generationId: string): Promise<GenerationSummary> {
+  return (await request<{ generation: GenerationSummary }>(
+    'POST',
+    `/v1/admin/content/generations/${encodeURIComponent(generationId)}/discard`,
+  )).generation
+}
+
+export async function publishCourse(courseId: string): Promise<CoursePublishResult> {
+  return request<CoursePublishResult>(
+    'POST',
+    `/v1/admin/content/courses/${encodeURIComponent(courseId)}/publish`,
+  )
 }

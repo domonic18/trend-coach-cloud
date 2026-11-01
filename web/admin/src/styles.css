@@ -256,3 +256,60 @@ tr.selected {
   padding: 6px 10px;
   border-radius: 6px;
 }
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.progress {
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.progress span {
+  display: block;
+  height: 100%;
+  background: #2563eb;
+  transition: width 0.2s ease;
+}
+
+.asset-awaiting_upload,
+.asset-uploaded,
+.job-queued {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.asset-processing,
+.job-running {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.asset-ready,
+.job-succeeded {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.asset-failed,
+.job-failed {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.asset-archived,
+.job-canceled {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.badge.needs-review {
+  background: #fef3c7;
+  color: #b45309;
+}

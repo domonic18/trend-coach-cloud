@@ -95,3 +95,138 @@ export interface UserList {
   offset: number
   limit: number
 }
+
+export type MediaAssetStatus =
+  | 'awaiting_upload'
+  | 'uploaded'
+  | 'processing'
+  | 'ready'
+  | 'failed'
+  | 'archived'
+
+export interface MediaAsset {
+  assetId: string
+  courseId: string
+  title: string | null
+  status: MediaAssetStatus
+  durationMs: number | null
+  sourceSizeBytes: number | null
+  errorCode: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface MediaAssetList {
+  assets: MediaAsset[]
+  total: number
+  offset: number
+  limit: number
+}
+
+export type PipelineJobKind = 'ingest' | 'generate'
+export type PipelineJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
+
+export interface PipelineJob {
+  jobId: string
+  assetId: string
+  courseId: string
+  kind: PipelineJobKind
+  status: PipelineJobStatus
+  stage: string
+  progress: number
+  attempts: number
+  maxAttempts: number
+  cancelRequested: boolean
+  errorCode: string | null
+  createdAt: number
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+export interface PipelineJobDetail extends PipelineJob {
+  result: {
+    transcriptId: string | null
+    generationId: string | null
+  }
+}
+
+export interface PipelineJobList {
+  jobs: PipelineJob[]
+  total: number
+  offset: number
+  limit: number
+}
+
+export interface TranscriptMeta {
+  transcriptId: string
+  assetId: string
+  status: string
+  language: string
+  durationMs: number | null
+  chunkCount: number
+  segmentCount: number
+  errorCode: string | null
+}
+
+export interface TranscriptPage {
+  transcript: TranscriptMeta
+  segments: { idx: number; startMs: number; endMs: number; text: string }[]
+  total: number
+  offset: number
+  limit: number
+}
+
+export type GenerationStatus = 'draft' | 'applied' | 'discarded' | 'failed'
+
+export interface GenerationSummary {
+  generationId: string
+  assetId: string
+  courseId: string
+  status: GenerationStatus
+  promptVersion: string
+  model: string
+  chapters: number
+  knowledgePoints: number
+  segments: number
+  needsReview: number
+  createdAt: number
+  updatedAt: number
+  appliedAt: number | null
+}
+
+export interface GenerationPreview {
+  generation: GenerationSummary
+  chapters: { key: string; title: string; position: number }[]
+  knowledgePoints: {
+    key: string
+    chapterKey: string
+    title: string
+    position: number
+    confidence: number
+    needsReview: boolean
+    reviewReasons: string[]
+    hasArticle: boolean
+  }[]
+  segments: { key: string; pointKey: string; title: string; startMs: number; endMs: number }[]
+}
+
+export interface AppliedContent {
+  chapters: Record<string, string>
+  knowledgePoints: Record<string, string>
+  segments: Record<string, string>
+}
+
+export interface GenerationApplyResult {
+  generation: GenerationSummary
+  applied: AppliedContent
+  alreadyApplied: boolean
+}
+
+export interface CoursePublishResult {
+  courseId: string
+  status: 'published'
+  articlesPublished: number
+  segmentsPublished: number
+  indexed: boolean
+  embedded: number
+}
