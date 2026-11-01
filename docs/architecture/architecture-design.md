@@ -434,7 +434,7 @@ ASR / 内容 LLM / embedding 的连接信息不再读环境变量，统一存数
 
 ### 7.1 模型配置（数据库）
 
-- `llm_configs`：多条目，`purpose=content|embedding`；`protocol=openai|anthropic`（content 两者均可，embedding 只能 `openai`）；部分唯一索引保证每个用途最多一个 `is_default AND is_active`；`embedding` 必须返回 1024 维。
+- `llm_configs`：多条目，`purpose=content|embedding`；`protocol=openai|anthropic`（content 两者均可，embedding 只能 `openai`）；部分唯一索引保证每个用途最多一个 `is_default AND is_active`；`embedding` 必须返回 1024 维：请求显式带 `dimensions: 1024`（如智谱 `embedding-3` 默认 2048），模型不支持该参数返回 4xx 时自动重试一次不带 `dimensions`，最终仍按 1024 校验。
 - `asr_config`：单行（`id=1`），`protocol=minimax|openai`，`enabled` 控制是否可用于转写。
 - 内容 LLM 调用：`openai` 走 `{baseUrl}/chat/completions`（`response_format=json_object`）；`anthropic` 走 `{baseUrl}/v1/messages`（`x-api-key` + `anthropic-version: 2023-06-01`，拼接 `content[].text`，`stop_reason=max_tokens` 视为截断）。连通性测试与正式调用使用同一协议分支。
 - `api_key_encrypted` 形如 `v1:<iv>:<tag>:<ciphertext>`（AES-256-GCM，base64url）；解密失败按未配置处理，DTO 只回 `apiKeyMasked`（前 4 + `*` + 后 4）或「无法解密，请重新录入」；明文密钥永不落库、日志与响应。
@@ -604,7 +604,7 @@ CI 必跑：类型检查、单元测试、契约测试（对 staging 或本地 c
 9. 多供应商 ASR 切换本期不做；provider 接口保留。
 10. 内容 LLM 已用 `MiniMax-M3.1-Flash`（anthropic 协议）跑通生成→审核→apply→发布；`m1-v1` 的章节粒度偏碎（33 分钟出 21 章、存在 0 知识点章节），需收敛提示词后再评估。
 11. MiniMax `verbose_json` 真实时间戳字段已确认可用；解析器仍兼容多种键，无时间戳时退化为整块。
-12. 真实 embedding 未验收：当前无 1024 维配置，发布为 `indexed=false`，仅词法检索；补齐后需重跑 publish 确认 `embedded>0` 与混合召回。
+12. 真实 embedding 已验收（2026-11-01，智谱 `embedding-3` + `dimensions: 1024`）：测试连通正常，已有课程重发布 `indexed=true`、`embedded=30`，检索为词法 + 向量混合召回。
 13. 源视频与转写留存期限、版权授权与归档策略待运营确认；未冻结前不自动清理。
 14. 多码率 ABR、对象存储与断点续传后置；`MediaStore` 接口已预留。
 

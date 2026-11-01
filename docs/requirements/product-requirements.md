@@ -186,7 +186,7 @@
 | 管线 | 响应与日志检查 | 无源路径、HLS 路径、SHA、provider 响应；转写正文仅管理端转写接口返回 |
 | 管线 | 管线或 LLM/ASR 未配置 | 对应接口 `503`，服务仍可启动（`PIPELINE_ENABLED=false`） |
 
-质量门槛：召回评估集 Top-5 ≥90%；接口契约测试覆盖上表全部用例；压测满足 P95 与并发目标。真实 MiniMax ASR 与 content LLM（`MiniMax-M3.1-Flash`，anthropic 协议）已完成链路验证（2026-11-01，33 分钟中文样片，详见运维手册 §11）；真实 embedding 尚无密钥，向量召回与混合排序仍为待验项，补齐前发布 `indexed=false`。
+质量门槛：召回评估集 Top-5 ≥90%；接口契约测试覆盖上表全部用例；压测满足 P95 与并发目标。真实 MiniMax ASR、content LLM（`MiniMax-M3.1-Flash`，anthropic 协议）与 embedding（智谱 `embedding-3`，1024 维）均已完成链路验证（2026-11-01，33 分钟中文样片，详见运维手册 §11），发布 `indexed=true` 且检索为词法 + 向量混合召回。
 
 ## 7. 指标与告警
 

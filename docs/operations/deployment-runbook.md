@@ -249,7 +249,7 @@ curl -fsS -H "Authorization: Bearer $SESSION_TOKEN" \
 
 **实测记录（2026-11-01，本地 127.0.0.1:3939）**
 
-样片为 33 分 09 秒中文课程视频（210 MB，H.264/AAC），ASR 为 MiniMax，content LLM 为 `MiniMax-M3.1-Flash`（anthropic 协议）。
+样片为 33 分 09 秒中文课程视频（210 MB，H.264/AAC），ASR 为 MiniMax，content LLM 为 `MiniMax-M3.1-Flash`（anthropic 协议），embedding 为智谱 `embedding-3`（`dimensions: 1024`）。
 
 | 环节 | 结果 |
 |---|---|
@@ -257,14 +257,14 @@ curl -fsS -H "Authorization: Bearer $SESSION_TOKEN" \
 | ingest | 161s，5 个静音切块，49 条 `transcript_segments`，时间戳单调 |
 | generate | ~297s，21 章节 / 30 知识点 / 30 片段，`needsReview=0` |
 | apply | 写入 draft 章节/知识点/文章/片段，映射数一致 |
-| publish | 30 篇文章 + 30 个片段置 published，`indexed=false`（未配置 embedding） |
+| publish | 首次发布 `indexed=false`（未配置 embedding）；录入 embedding 后重发布 `indexed=true`、`embedded=30` |
 | 学员侧 | 设备码授权后 catalog 可见该课程（21 章节 / 30 知识点），知识点文章正文可读 |
-| 检索 | 词法召回 4 条，`顺势者赢逆势者损` 片段 score 1.0 |
+| 检索 | 混合召回 5 条，语义查询（如「行情一旦形成会持续多久」）命中趋势方向/能量片段 |
 | 播放 | `POST /v1/playback/sessions` 返回带 token 的 playlist，拉取 200、223 个分片、含 `#EXT-X-ENDLIST` |
 
 遗留问题：
 
-- 未配置 1024 维 embedding，发布 `indexed=false`，向量召回与混合排序未在真实链路验证；补齐 embedding 后需重跑 publish 确认 `embedded>0`。
+- 智谱 `embedding-2` 返回 429「余额不足或无可用资源包」，`embedding-3` 可用；换供应商时先点「测试连接」确认 1024 维。
 - 33 分钟样本生成 21 个章节偏碎，且存在 0 知识点的章节（`m1-v1` 提示词未约束章节粒度），需在提示词层收敛后再评估。
 
 **容量与清理**

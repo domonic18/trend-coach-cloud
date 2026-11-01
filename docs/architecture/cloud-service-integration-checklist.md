@@ -537,6 +537,7 @@ POST  /v1/admin/content/courses/{courseId}/publish
 - `PATCH` 中 `apiKey: ""` 表示保留原密钥；新增时空串/缺省表示不配置密钥。
 - `baseUrl` 仅接受 http(s) 绝对地址；粘贴完整端点（`/chat/completions`、`/embeddings`、`/audio/transcriptions`、`/v1/speech_to_text`、`/v1/messages`）时自动归一化到 base。
 - 内容 LLM `protocol=openai|anthropic`：`openai` 走 `/chat/completions` + `response_format=json_object`；`anthropic` 走 `/v1/messages` + `x-api-key` + `anthropic-version: 2023-06-01`。`purpose=embedding` 只允许 `openai`（Anthropic 无 embeddings 端点），否则 `400`。
+- embedding 请求显式带 `dimensions: 1024`（智谱 `embedding-3` 默认 2048）；模型以 4xx 拒绝该参数时重试一次不带 `dimensions`，最终仍要求返回 1024 维。
 - 保存后运行时在下一次任务/检索/发布时解析最新默认配置，无需重启；删除密钥或不可解密时按未配置处理。
 - 错误：`400` 入参/ID；`401/403` 鉴权与角色；`404` 不存在；`409` 停用项不可设默认；`429` 限流。
 
