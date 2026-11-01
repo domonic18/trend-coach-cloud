@@ -8,7 +8,7 @@ export const ASSET_STATUSES = [
 ] as const
 export type AssetStatus = (typeof ASSET_STATUSES)[number]
 
-export const JOB_KINDS = ['ingest', 'generate'] as const
+export const JOB_KINDS = ['ingest', 'generate', 'illustrate'] as const
 export type JobKind = (typeof JOB_KINDS)[number]
 
 export const JOB_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'canceled'] as const
@@ -21,6 +21,8 @@ export const JOB_STAGES = [
   'transcribe',
   'structure',
   'generate',
+  'figure_plan',
+  'figure_render',
   'finalize',
   'done',
 ] as const
@@ -66,7 +68,27 @@ export interface KnowledgePointDraft {
   confidence: number
   needsReview: boolean
   reviewReasons: string[]
-  articleMarkdown: string | null
+}
+
+export interface ChapterArticleDraft {
+  chapterKey: string
+  markdown: string | null
+  needsReview: boolean
+  reviewReasons: string[]
+}
+
+export type FigureKind = 'keyframe' | 'generated'
+
+export interface FigureDraft {
+  key: string
+  chapterKey: string
+  kind: FigureKind
+  caption: string
+  prompt: string | null
+  /** 关键帧的来源时间点（毫秒），文字生图时为 null。 */
+  sourceMs: number | null
+  needsReview: boolean
+  reviewReasons: string[]
 }
 
 export interface SegmentDraft {
@@ -82,10 +104,13 @@ export interface GenerationPayload {
   chapters: ChapterDraft[]
   knowledgePoints: KnowledgePointDraft[]
   segments: SegmentDraft[]
+  chapterArticles: ChapterArticleDraft[]
+  figures: FigureDraft[]
 }
 
 export interface AppliedContent {
   chapters: Record<string, string>
   knowledgePoints: Record<string, string>
   segments: Record<string, string>
+  figures: Record<string, string>
 }

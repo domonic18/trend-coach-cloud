@@ -34,6 +34,9 @@ export interface GenerationHook {
   ): Promise<void>
 }
 
+/** 图示任务与生成任务签名一致：按课程批量渲染已规划的图示。 */
+export type IllustrationHook = GenerationHook
+
 /** 每个 ingest 任务开始时解析当前后台配置；未配置时返回 undefined。 */
 export interface ResolvedLongFormAsr {
   asr: LongFormAsr
@@ -49,6 +52,7 @@ export interface WorkerDeps {
   resolveAsr?: () => Promise<ResolvedLongFormAsr | undefined>
   asrLongTimeoutMs: number
   generator?: GenerationHook
+  illustrator?: IllustrationHook
   log: WorkerLogger
   metrics?: Metrics
   /** 生产环境下 ASR 按分块记用量；测试未注入时跳过。 */
@@ -233,6 +237,11 @@ export class PipelineWorker {
       await onProgress(job.stage, job.progress)
       if (job.kind === 'ingest') {
         await this.runIngest(job, controller.signal, onProgress)
+      } else if (job.kind === 'illustrate') {
+        if (this.deps.illustrator === undefined) {
+          throw new PipelineFailure(PIPELINE_ERRORS.imageUnavailable, false)
+        }
+        await this.deps.illustrator(job, controller.signal, onProgress)
       } else {
         if (this.deps.generator === undefined) {
           throw new PipelineFailure(PIPELINE_ERRORS.generationFailed, false)
@@ -250,7 +259,9 @@ export class PipelineWorker {
         || controller.signal.aborted)
       if (canceled) {
         await this.deps.jobs.markCanceled(job.jobId, this.workerId)
-        if (job.kind === 'ingest') await this.markAssetFailed(job.assetId, PIPELINE_ERRORS.canceled)
+        if (job.kind === 'ingest' && job.assetId !== null) {
+          await this.markAssetFailed(job.assetId, PIPELINE_ERRORS.canceled)
+        }
         this.deps.metrics?.pipelineJobs.inc({ kind: job.kind, status: 'canceled' })
         this.deps.log.info({ jobId: job.jobId, kind: job.kind }, 'pipeline job canceled')
       } else {
@@ -258,7 +269,7 @@ export class PipelineWorker {
           ? error
           : new PipelineFailure(PIPELINE_ERRORS.internal, true)
         const outcome = await this.deps.jobs.fail(job.jobId, this.workerId, failure.code, failure.retryable)
-        if (outcome === 'failed' && job.kind === 'ingest') {
+        if (outcome === 'failed' && job.kind === 'ingest' && job.assetId !== null) {
           await this.markAssetFailed(job.assetId, failure.code)
         }
         this.deps.metrics?.pipelineJobs.inc({
@@ -287,7 +298,9 @@ export class PipelineWorker {
     onProgress: (stage: JobStage, value: number) => Promise<void>,
   ): Promise<void> {
     const { config, pool, processor, store } = this.deps
-    const asset = await this.fetchAsset(job.assetId)
+    if (job.assetId === null) throw new PipelineFailure(PIPELINE_ERRORS.sourceInvalid, false)
+    const assetId = job.assetId
+    const asset = await this.fetchAsset(assetId)
     if (asset === null) throw new PipelineFailure(PIPELINE_ERRORS.sourceInvalid, false)
     if (asset.source_size_bytes === null) throw new PipelineFailure(PIPELINE_ERRORS.sourceMissing, false)
 
@@ -297,7 +310,7 @@ export class PipelineWorker {
       await onProgress('probe', 2)
       let probe: SourceProbe
       try {
-        probe = await processor.probe(job.assetId, { timeoutMs: config.audioTimeoutMs, signal })
+        probe = await processor.probe(assetId, { timeoutMs: config.audioTimeoutMs, signal })
       } catch (error) {
         throw mapMediaError(error)
       }
@@ -305,7 +318,7 @@ export class PipelineWorker {
       await pool.query(
         `UPDATE media_assets SET duration_ms = $2, status = 'processing', updated_at = now()
          WHERE asset_id = $1`,
-        [job.assetId, durationMs],
+        [assetId, durationMs],
       )
     }
     await onProgress('probe', 5)
@@ -313,16 +326,16 @@ export class PipelineWorker {
 
     await pool.query(
       `UPDATE media_assets SET status = 'processing', updated_at = now() WHERE asset_id = $1`,
-      [job.assetId],
+      [assetId],
     )
 
     const hlsReady = asset.hls_path !== null
-      && await access(join(store.hlsOutputDir(job.assetId), 'index.m3u8')).then(() => true, () => false)
+      && await access(join(store.hlsOutputDir(assetId), 'index.m3u8')).then(() => true, () => false)
     if (!hlsReady) {
       await onProgress('transcode', 5)
       let lastUpdate = 0
       try {
-        await processor.transcode(job.assetId, {
+        await processor.transcode(assetId, {
           timeoutMs: config.ffmpegTimeoutMs,
           signal,
           onProgress: outMs => {
@@ -334,14 +347,14 @@ export class PipelineWorker {
           },
         })
         assertNotCanceled(signal)
-        await processor.publish(job.assetId)
+        await processor.publish(assetId)
       } catch (error) {
         if (error instanceof PipelineFailure || error instanceof JobCanceledError) throw error
         throw mapMediaError(error)
       }
       await pool.query(
         `UPDATE media_assets SET hls_path = $2, updated_at = now() WHERE asset_id = $1`,
-        [job.assetId, store.hlsRelPath(job.assetId)],
+        [assetId, store.hlsRelPath(assetId)],
       )
     }
 
@@ -354,11 +367,11 @@ export class PipelineWorker {
     const { asr } = resolved
     const language = languageOf(job)
 
-    const audioPath = join(store.workDir(job.assetId), 'audio.wav')
+    const audioPath = join(store.workDir(assetId), 'audio.wav')
     const audioReady = await access(audioPath).then(() => true, () => false)
     if (!audioReady) {
       try {
-        await processor.extractAudio(job.assetId, { timeoutMs: config.audioTimeoutMs, signal })
+        await processor.extractAudio(assetId, { timeoutMs: config.audioTimeoutMs, signal })
       } catch (error) {
         throw mapMediaError(error)
       }
@@ -366,7 +379,7 @@ export class PipelineWorker {
 
     let silences: SilenceInterval[]
     try {
-      silences = await processor.detectSilences(job.assetId, {
+      silences = await processor.detectSilences(assetId, {
         timeoutMs: config.audioTimeoutMs,
         signal,
       })
@@ -394,7 +407,7 @@ export class PipelineWorker {
         if (row === undefined) return
         try {
           assertNotCanceled(signal)
-          await this.transcribeChunk(row, job, language, signal, asr, resolved.model)
+          await this.transcribeChunk(row, assetId, language, signal, asr, resolved.model)
           completed += 1
           await onProgress('transcribe', 60 + Math.round((completed / total) * 35))
         } catch (error) {
@@ -409,14 +422,14 @@ export class PipelineWorker {
 
     await onProgress('finalize', 95)
     // 转写只更新数据库；重读一次才能拿到新写入的 sentences 与 done 状态。
-    await this.finalizeTranscript(job, transcriptId, await this.loadChunks(transcriptId))
-    await store.removeWork(job.assetId).catch(() => undefined)
+    await this.finalizeTranscript(assetId, transcriptId, await this.loadChunks(transcriptId))
+    await store.removeWork(assetId).catch(() => undefined)
     await onProgress('finalize', 100)
   }
 
   private async transcribeChunk(
     row: ChunkRow,
-    job: PipelineJob,
+    assetId: string,
     language: Language,
     signal: AbortSignal,
     asr: LongFormAsr,
@@ -434,7 +447,7 @@ export class PipelineWorker {
     )
     try {
       const wavPath = await processor.cutChunk(
-        job.assetId,
+        assetId,
         row.idx,
         { startMs, endMs },
         { timeoutMs: config.audioTimeoutMs, signal },
@@ -532,7 +545,7 @@ export class PipelineWorker {
   }
 
   private async finalizeTranscript(
-    job: PipelineJob,
+    assetId: string,
     transcriptId: string,
     rows: ChunkRow[],
   ): Promise<void> {
@@ -547,7 +560,7 @@ export class PipelineWorker {
     const segments = groupTranscriptSegments(sentences, this.deps.config.transcriptSegmentMaxSec)
     if (segments.length === 0) throw new PipelineFailure(PIPELINE_ERRORS.transcribeFailed, true)
 
-    const durationMs = await this.assetDuration(job.assetId)
+    const durationMs = await this.assetDuration(assetId)
     const client = await this.deps.pool.connect()
     try {
       await client.query('BEGIN')
@@ -570,7 +583,7 @@ export class PipelineWorker {
         `UPDATE media_assets
          SET status = 'ready', error_code = NULL, duration_ms = $2, updated_at = now()
          WHERE asset_id = $1`,
-        [job.assetId, durationMs],
+        [assetId, durationMs],
       )
       await client.query('COMMIT')
     } catch (error) {

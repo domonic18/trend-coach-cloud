@@ -22,3 +22,12 @@ export function knowledgePointIdFor(generationId: string, key: string): string {
 export function draftSegmentIdFor(generationId: string, key: string): string {
   return `seg-${generationSalt(generationId)}-${key}`
 }
+
+/** 图示 ID 跨 apply/发布保持不变，正文里的 figure:<id> 才能在重放后仍可解析。 */
+export function figureIdFor(generationId: string, key: string): string {
+  return `fig_${generationSalt(generationId)}_${key}`
+}
+
+export function candidateIdFor(): string {
+  return `cand_${randomBytes(8).toString('hex')}`
+}

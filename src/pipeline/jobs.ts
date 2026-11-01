@@ -11,7 +11,7 @@ export class ActiveJobError extends Error {
 
 export interface PipelineJob {
   jobId: string
-  assetId: string
+  assetId: string | null
   courseId: string
   kind: JobKind
   status: JobStatus
@@ -30,7 +30,7 @@ export interface PipelineJob {
 
 interface JobRow {
   job_id: string
-  asset_id: string
+  asset_id: string | null
   course_id: string
   kind: JobKind
   status: JobStatus
@@ -85,7 +85,7 @@ export class JobQueue {
   ) {}
 
   async create(input: {
-    assetId: string
+    assetId: string | null
     courseId: string
     kind: JobKind
     options?: Record<string, unknown>
@@ -112,7 +112,11 @@ export class JobQueue {
     const { rows } = await this.pool.query<JobRow>(
       `UPDATE pipeline_jobs
        SET status = 'running',
-           stage = CASE WHEN kind = 'ingest' THEN 'probe' ELSE 'structure' END,
+           stage = CASE
+             WHEN kind = 'ingest' THEN 'probe'
+             WHEN kind = 'illustrate' THEN 'figure_plan'
+             ELSE 'structure'
+           END,
            progress = 0,
            attempts = attempts + 1,
            locked_at = now(),

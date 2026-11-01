@@ -1,10 +1,18 @@
 import { randomBytes } from 'node:crypto'
 import type { Pool } from 'pg'
 import type { PipelineConfig } from '../config.js'
-import { parseContentId } from '../content/service.js'
-import { badRequest, conflict, HttpError, notFound, serviceUnavailable } from '../errors.js'
+import { MAX_ARTICLE, parseContentId } from '../content/service.js'
+import { assertImageBudget } from '../illustration/budget.js'
+import {
+  badRequest,
+  codedConflict,
+  conflict,
+  HttpError,
+  notFound,
+  serviceUnavailable,
+} from '../errors.js'
 import { codePointLength, stringField } from '../http/validation.js'
-import { chapterIdFor, draftSegmentIdFor, knowledgePointIdFor } from './ids.js'
+import { chapterIdFor, draftSegmentIdFor, figureIdFor, knowledgePointIdFor } from './ids.js'
 import { ActiveJobError, type JobQueue, type PipelineJob } from './jobs.js'
 import { SourceChecksumError, SourceTooLargeError, type MediaStore } from './media-store.js'
 import {
@@ -21,6 +29,9 @@ import {
 const ID = /^[A-Za-z0-9._-]{1,64}$/
 const JOB_ID = /^job_[0-9a-f]{16}$/
 const GENERATION_ID = /^gen_[0-9a-f]{16}$/
+const FIGURE_ID = /^fig_[A-Za-z0-9._-]{1,60}$/
+const CANDIDATE_ID = /^cand_[A-Za-z0-9._-]{1,59}$/
+const FIGURE_REF = /!\[[^\]\n]*\]\(figure:([A-Za-z0-9._-]{1,64})\)/g
 const SHA256 = /^[0-9a-f]{64}$/
 const MAX_SECONDS = 86_400
 const LANGUAGES = ['zh', 'en', 'auto'] as const
@@ -32,6 +43,8 @@ export interface PipelineServiceOptions {
   reindex?: (courseId: string) => Promise<{ embedded: number }>
   /** 未配置 embedding 时发布仍可用，只是不建向量索引。 */
   embeddingAvailable?: () => Promise<boolean>
+  /** 图示入队时解析图片模型；未配置返回 undefined（503）。 */
+  image?: () => Promise<{ priceMicros: number } | undefined>
 }
 
 export interface AssetDto {
@@ -48,7 +61,7 @@ export interface AssetDto {
 
 export interface JobDto {
   jobId: string
-  assetId: string
+  assetId: string | null
   courseId: string
   kind: JobKind
   status: JobStatus
@@ -87,6 +100,15 @@ export interface TranscriptPage {
   limit: number
 }
 
+export interface GenerationCounts {
+  chapters: number
+  knowledgePoints: number
+  chapterArticles: number
+  figures: number
+  segments: number
+  needsReview: number
+}
+
 export interface GenerationSummary {
   generationId: string
   assetId: string
@@ -94,18 +116,21 @@ export interface GenerationSummary {
   status: GenerationStatus
   promptVersion: string
   model: string
-  chapters: number
-  knowledgePoints: number
-  segments: number
-  needsReview: number
+  counts: GenerationCounts
   createdAt: number
-  updatedAt: number
   appliedAt: number | null
 }
 
 export interface GenerationPreview {
   generation: GenerationSummary
-  chapters: { key: string; title: string; position: number }[]
+  chapters: {
+    key: string
+    title: string
+    position: number
+    articleLength: number
+    hasArticle: boolean
+    figureCount: number
+  }[]
   knowledgePoints: {
     key: string
     chapterKey: string
@@ -114,7 +139,14 @@ export interface GenerationPreview {
     confidence: number
     needsReview: boolean
     reviewReasons: string[]
-    hasArticle: boolean
+  }[]
+  figures: {
+    key: string
+    chapterKey: string
+    kind: string
+    caption: string
+    candidateCount: number
+    needsReview: boolean
   }[]
   segments: { key: string; pointKey: string; title: string; startMs: number; endMs: number }[]
 }
@@ -123,21 +155,67 @@ export interface AppliedContent {
   chapters: Record<string, string>
   knowledgePoints: Record<string, string>
   segments: Record<string, string>
+  figures: Record<string, string>
 }
 
 export interface ApplyResult {
-  generation: GenerationSummary
-  applied: AppliedContent
+  generationId: string
   alreadyApplied: boolean
+  courseId: string
+  chapters: { chapterId: string; key: string }[]
+  knowledgePoints: { knowledgePointId: string; key: string }[]
+  figures: { figureId: string; key: string }[]
+  segments: { segmentId: string; key: string }[]
+  chapterArticles: number
+  figuresApplied: number
+}
+
+export type FigureStatus = 'planned' | 'rendering' | 'ready' | 'failed' | 'published'
+
+export interface FigureCandidateDto {
+  candidateId: string
+  status: 'rendering' | 'ready' | 'failed'
+  width: number | null
+  height: number | null
+  bytes: number | null
+  sourceSec: number | null
+  errorCode: string | null
+  previewUrl: string | null
+}
+
+export interface FigureDto {
+  figureId: string
+  chapterId: string
+  kind: 'keyframe' | 'generated'
+  caption: string
+  status: FigureStatus
+  selectedCandidateId: string | null
+  prompt: string | null
+  model: string | null
+  seed: number | null
+  reviewReasons: string[]
+  candidates: FigureCandidateDto[]
+}
+
+export interface FigureFilters {
+  courseId?: string
+  chapterId?: string
+  offset: number
+  limit: number
 }
 
 export interface PublishResult {
   courseId: string
-  status: 'published'
-  articlesPublished: number
-  segmentsPublished: number
+  published: true
   indexed: boolean
   embedded: number
+  counts: {
+    chapters: number
+    knowledgePoints: number
+    chapterArticles: number
+    figures: number
+    segments: number
+  }
 }
 
 export interface AssetFilters {
@@ -170,7 +248,19 @@ export interface PipelineApi {
   enqueueGeneration(assetId: string): Promise<JobDto>
   getGeneration(generationId: string): Promise<GenerationPreview>
   applyGeneration(generationId: string): Promise<ApplyResult>
-  discardGeneration(generationId: string): Promise<GenerationSummary>
+  discardGeneration(generationId: string): Promise<{ discarded: true }>
+  enqueueIllustrate(courseId: string, chapterIds?: string[]): Promise<JobDto>
+  listFigures(filters: FigureFilters): Promise<{
+    figures: FigureDto[]
+    total: number
+    offset: number
+    limit: number
+  }>
+  selectFigure(figureId: string, candidateId: string): Promise<FigureDto>
+  regenerateFigure(figureId: string): Promise<FigureDto>
+  deleteFigure(figureId: string): Promise<void>
+  /** 后台候选预览：只返回相对路径，文件由路由按会话鉴权后读出。 */
+  candidateFile(candidateId: string): Promise<{ relPath: string }>
   publishCourse(courseId: string): Promise<PublishResult>
   listJobs(filters: JobFilters): Promise<{ jobs: JobDto[]; total: number; offset: number; limit: number }>
   getJob(jobId: string): Promise<JobDetail>
@@ -210,6 +300,8 @@ interface GenerationRow {
   model: string
   chapters: number
   knowledge_points: number
+  chapter_articles: number
+  figures: number
   segments: number
   needs_review: number
   payload: unknown
@@ -219,9 +311,37 @@ interface GenerationRow {
   applied_at: Date | null
 }
 
+interface FigureRow {
+  figure_id: string
+  course_id: string
+  chapter_id: string
+  kind: 'keyframe' | 'generated'
+  caption: string
+  prompt: string | null
+  model: string | null
+  seed: string | number | null
+  selected_candidate_id: string | null
+  status: FigureStatus
+  review_reasons: unknown
+}
+
+interface CandidateRow {
+  candidate_id: string
+  figure_id: string
+  rel_path: string
+  width: number
+  height: number
+  bytes: string | number
+  source_sec: number | null
+  status: 'rendering' | 'ready' | 'failed'
+  error_code: string | null
+}
+
 const GENERATION_COLUMNS = `generation_id, asset_id, course_id, status, prompt_version, model,
-  chapters, knowledge_points, segments, needs_review, payload, applied_content,
-  created_at, updated_at, applied_at`
+  chapters, knowledge_points, chapter_articles, figures, segments, needs_review, payload,
+  applied_content, created_at, updated_at, applied_at`
+const FIGURE_COLUMNS = `figure_id, course_id, chapter_id, kind, caption, prompt, model, seed,
+  selected_candidate_id, status, review_reasons`
 
 function milliseconds(value: string | number | null): number | null {
   if (value === null) return null
@@ -273,6 +393,14 @@ export function parseGenerationId(raw: string): string {
   return stringField({ generationId: raw }, 'generationId', { max: 20, pattern: GENERATION_ID })
 }
 
+export function parseFigureId(raw: string): string {
+  return stringField({ figureId: raw }, 'figureId', { max: 64, pattern: FIGURE_ID })
+}
+
+export function parseCandidateId(raw: string): string {
+  return stringField({ candidateId: raw }, 'candidateId', { max: 64, pattern: CANDIDATE_ID })
+}
+
 export function toGeneration(row: GenerationRow): GenerationSummary {
   return {
     generationId: row.generation_id,
@@ -281,13 +409,64 @@ export function toGeneration(row: GenerationRow): GenerationSummary {
     status: row.status,
     promptVersion: row.prompt_version,
     model: row.model,
-    chapters: row.chapters,
-    knowledgePoints: row.knowledge_points,
-    segments: row.segments,
-    needsReview: row.needs_review,
+    counts: {
+      chapters: row.chapters,
+      knowledgePoints: row.knowledge_points,
+      chapterArticles: row.chapter_articles,
+      figures: row.figures,
+      segments: row.segments,
+      needsReview: row.needs_review,
+    },
     createdAt: row.created_at.getTime(),
-    updatedAt: row.updated_at.getTime(),
     appliedAt: row.applied_at?.getTime() ?? null,
+  }
+}
+
+function reviewReasonsOf(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === 'string')
+}
+
+function toFigure(row: FigureRow, candidates: CandidateRow[]): FigureDto {
+  return {
+    figureId: row.figure_id,
+    chapterId: row.chapter_id,
+    kind: row.kind,
+    caption: row.caption,
+    status: row.status,
+    selectedCandidateId: row.selected_candidate_id,
+    prompt: row.prompt,
+    model: row.model,
+    seed: row.seed === null ? null : Number(row.seed),
+    reviewReasons: reviewReasonsOf(row.review_reasons),
+    candidates: candidates.map(candidate => ({
+      candidateId: candidate.candidate_id,
+      status: candidate.status,
+      width: candidate.width,
+      height: candidate.height,
+      bytes: Number(candidate.bytes),
+      sourceSec: candidate.source_sec,
+      errorCode: candidate.error_code,
+      previewUrl: candidate.status === 'ready'
+        ? `/v1/admin/content/figure-candidates/${candidate.candidate_id}`
+        : null,
+    })),
+  }
+}
+
+function appliedResult(row: GenerationRow, alreadyApplied: boolean): ApplyResult {
+  const applied = readApplied(row.applied_content)
+  return {
+    generationId: row.generation_id,
+    alreadyApplied,
+    courseId: row.course_id,
+    chapters: Object.entries(applied.chapters).map(([key, chapterId]) => ({ chapterId, key })),
+    knowledgePoints: Object.entries(applied.knowledgePoints)
+      .map(([key, knowledgePointId]) => ({ knowledgePointId, key })),
+    figures: Object.entries(applied.figures).map(([key, figureId]) => ({ figureId, key })),
+    segments: Object.entries(applied.segments).map(([key, segmentId]) => ({ segmentId, key })),
+    chapterArticles: row.chapter_articles,
+    figuresApplied: row.figures,
   }
 }
 
@@ -299,7 +478,12 @@ function readPayload(value: unknown): GenerationPayload {
   if (!Array.isArray(root.chapters) || !Array.isArray(root.knowledgePoints) || !Array.isArray(root.segments)) {
     throw new HttpError(500, 'generation payload invalid')
   }
-  return value as GenerationPayload
+  const payload = value as GenerationPayload
+  return {
+    ...payload,
+    chapterArticles: Array.isArray(root.chapterArticles) ? payload.chapterArticles : [],
+    figures: Array.isArray(root.figures) ? payload.figures : [],
+  }
 }
 
 function readApplied(value: unknown): AppliedContent {
@@ -317,10 +501,12 @@ function readApplied(value: unknown): AppliedContent {
   ) {
     throw new HttpError(500, 'generation applied content invalid')
   }
+  const figures = typeof root.figures === 'object' && root.figures !== null ? root.figures : {}
   return {
     chapters: chapters as Record<string, string>,
     knowledgePoints: knowledgePoints as Record<string, string>,
     segments: segments as Record<string, string>,
+    figures: figures as Record<string, string>,
   }
 }
 
@@ -609,13 +795,25 @@ export class PipelineService implements PipelineApi {
   async getGeneration(generationId: string): Promise<GenerationPreview> {
     const row = await this.requireGeneration(generationId)
     const payload = readPayload(row.payload)
+    const articleByChapter = new Map(payload.chapterArticles.map(article => [article.chapterKey, article]))
+    const figureCounts = new Map<string, number>()
+    for (const figure of payload.figures) {
+      figureCounts.set(figure.chapterKey, (figureCounts.get(figure.chapterKey) ?? 0) + 1)
+    }
     return {
       generation: toGeneration(row),
-      chapters: payload.chapters.map(chapter => ({
-        key: chapter.key,
-        title: chapter.title,
-        position: chapter.position,
-      })),
+      chapters: payload.chapters.map(chapter => {
+        const article = articleByChapter.get(chapter.key)
+        const markdown = article?.markdown ?? null
+        return {
+          key: chapter.key,
+          title: chapter.title,
+          position: chapter.position,
+          articleLength: markdown === null ? 0 : codePointLength(markdown),
+          hasArticle: markdown !== null,
+          figureCount: figureCounts.get(chapter.key) ?? 0,
+        }
+      }),
       knowledgePoints: payload.knowledgePoints.map(point => ({
         key: point.key,
         chapterKey: point.chapterKey,
@@ -624,7 +822,14 @@ export class PipelineService implements PipelineApi {
         confidence: point.confidence,
         needsReview: point.needsReview,
         reviewReasons: point.reviewReasons,
-        hasArticle: point.articleMarkdown !== null,
+      })),
+      figures: payload.figures.map(figure => ({
+        key: figure.key,
+        chapterKey: figure.chapterKey,
+        kind: figure.kind,
+        caption: figure.caption,
+        candidateCount: 2,
+        needsReview: figure.needsReview,
       })),
       segments: payload.segments.map(segment => ({
         key: segment.key,
@@ -638,13 +843,7 @@ export class PipelineService implements PipelineApi {
 
   async applyGeneration(generationId: string): Promise<ApplyResult> {
     const row = await this.requireGeneration(generationId)
-    if (row.status === 'applied') {
-      return {
-        generation: toGeneration(row),
-        applied: readApplied(row.applied_content),
-        alreadyApplied: true,
-      }
-    }
+    if (row.status === 'applied') return appliedResult(row, true)
     if (row.status !== 'draft') throw conflict('generation is not a draft')
     const payload = readPayload(row.payload)
 
@@ -660,11 +859,7 @@ export class PipelineService implements PipelineApi {
       if (locked.status === 'applied') {
         await client.query('COMMIT')
         const appliedRow = await this.requireGeneration(generationId)
-        return {
-          generation: toGeneration(appliedRow),
-          applied: readApplied(appliedRow.applied_content),
-          alreadyApplied: true,
-        }
+        return appliedResult(appliedRow, true)
       }
       if (locked.status !== 'draft') throw conflict('generation is not a draft')
 
@@ -680,15 +875,22 @@ export class PipelineService implements PipelineApi {
         chapters: number
         points: number
         segments: number
+        figures: number
       }>(
         `SELECT
            (SELECT count(*)::int FROM chapters WHERE course_id = $1) AS chapters,
            (SELECT count(*)::int FROM knowledge_points WHERE course_id = $1) AS points,
-           (SELECT count(*)::int FROM segments WHERE course_id = $1) AS segments`,
+           (SELECT count(*)::int FROM segments WHERE course_id = $1) AS segments,
+           (SELECT count(*)::int FROM figures WHERE course_id = $1) AS figures`,
         [row.course_id],
       )
       const counts = countRows[0]
-      if ((counts?.chapters ?? 0) > 0 || (counts?.points ?? 0) > 0 || (counts?.segments ?? 0) > 0) {
+      if (
+        (counts?.chapters ?? 0) > 0
+        || (counts?.points ?? 0) > 0
+        || (counts?.segments ?? 0) > 0
+        || (counts?.figures ?? 0) > 0
+      ) {
         throw conflict('course already has content')
       }
 
@@ -719,13 +921,67 @@ export class PipelineService implements PipelineApi {
         )
         pointIds.set(point.key, knowledgePointId)
         pointChapters.set(point.key, chapterId)
-        if (point.articleMarkdown !== null) {
-          await client.query(
-            `INSERT INTO articles (knowledge_point_id, markdown, version, status, published_at, updated_at)
-             VALUES ($1, $2, 1, 'draft', NULL, now())`,
-            [knowledgePointId, point.articleMarkdown],
-          )
+      }
+
+      // 正文引用在这里从生成期 key 固化成 figureId，后续再保存也不会漂移。
+      const figureRefs = new Map<string, { figureId: string; chapterId: string }>()
+      for (const figure of payload.figures) {
+        const chapterId = chapterIds.get(figure.chapterKey)
+        if (chapterId === undefined) throw new HttpError(500, 'generation payload invalid')
+        if (figure.caption.length < 1 || figure.caption.length > 200) {
+          throw new HttpError(500, 'generation payload invalid')
         }
+        const figureId = figureIdFor(generationId, figure.key)
+        figureRefs.set(figure.key, { figureId, chapterId })
+        const sourceSec = figure.sourceMs === null
+          ? null
+          : Math.max(0, Math.round(figure.sourceMs / 1000))
+        await client.query(
+          `INSERT INTO figures
+             (figure_id, course_id, chapter_id, asset_id, kind, caption, prompt, source_sec,
+              status, review_reasons)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'planned', $9::jsonb)`,
+          [
+            figureId,
+            row.course_id,
+            chapterId,
+            row.asset_id,
+            figure.kind,
+            figure.caption,
+            figure.prompt,
+            sourceSec,
+            JSON.stringify(figure.reviewReasons),
+          ],
+        )
+      }
+
+      let chapterArticles = 0
+      for (const article of payload.chapterArticles) {
+        if (article.markdown === null) continue
+        const chapterId = chapterIds.get(article.chapterKey)
+        if (chapterId === undefined) throw new HttpError(500, 'generation payload invalid')
+        const markdown = article.markdown.replace(
+          FIGURE_REF,
+          (match: string, key: string) => {
+            const ref = figureRefs.get(key)
+            if (ref === undefined || ref.chapterId !== chapterId) {
+              throw new HttpError(500, 'generation payload invalid')
+            }
+            // 说明文字原样保留，只把生成期 key 换成固化后的 figureId。
+            const alt = match.slice(2, match.indexOf(']'))
+            return `![${alt}](figure:${ref.figureId})`
+          },
+        )
+        if (codePointLength(markdown) > MAX_ARTICLE) {
+          throw new HttpError(500, 'generation payload invalid')
+        }
+        await client.query(
+          `INSERT INTO chapter_articles
+             (course_id, chapter_id, markdown, version, status, published_at, updated_at)
+           VALUES ($1, $2, $3, 1, 'draft', NULL, now())`,
+          [row.course_id, chapterId, markdown],
+        )
+        chapterArticles += 1
       }
 
       const segmentIds = new Map<string, string>()
@@ -763,17 +1019,19 @@ export class PipelineService implements PipelineApi {
         chapters: Object.fromEntries(chapterIds),
         knowledgePoints: Object.fromEntries(pointIds),
         segments: Object.fromEntries(segmentIds),
+        figures: Object.fromEntries([...figureRefs].map(([key, ref]) => [key, ref.figureId])),
       }
       await client.query(
         `UPDATE content_generations
-         SET status = 'applied', applied_content = $2::jsonb, applied_at = now(), updated_at = now()
+         SET status = 'applied', applied_content = $2::jsonb,
+             chapter_articles = $3, figures = $4, applied_at = now(), updated_at = now()
          WHERE generation_id = $1`,
-        [generationId, JSON.stringify(applied)],
+        [generationId, JSON.stringify(applied), chapterArticles, payload.figures.length],
       )
       await client.query('COMMIT')
 
       const updated = await this.requireGeneration(generationId)
-      return { generation: toGeneration(updated), applied, alreadyApplied: false }
+      return appliedResult(updated, false)
     } catch (error) {
       await client.query('ROLLBACK')
       throw error
@@ -782,16 +1040,14 @@ export class PipelineService implements PipelineApi {
     }
   }
 
-  async discardGeneration(generationId: string): Promise<GenerationSummary> {
-    const { rows } = await this.pool.query<GenerationRow>(
+  async discardGeneration(generationId: string): Promise<{ discarded: true }> {
+    const { rowCount } = await this.pool.query(
       `UPDATE content_generations
        SET status = 'discarded', updated_at = now()
-       WHERE generation_id = $1 AND status = 'draft'
-       RETURNING ${GENERATION_COLUMNS}`,
+       WHERE generation_id = $1 AND status = 'draft'`,
       [generationId],
     )
-    const row = rows[0]
-    if (row !== undefined) return toGeneration(row)
+    if ((rowCount ?? 0) === 1) return { discarded: true }
     await this.requireGeneration(generationId)
     throw conflict('generation is not a draft')
   }
@@ -812,6 +1068,8 @@ export class PipelineService implements PipelineApi {
     )
     if ((countRows[0]?.count ?? 0) < 1) throw conflict('course has no segments')
 
+    await this.requireResolvedFigures(courseId)
+
     const reindex = this.options.reindex
     const embeddingReady = reindex !== undefined
       && (this.options.embeddingAvailable === undefined || await this.options.embeddingAvailable())
@@ -827,16 +1085,19 @@ export class PipelineService implements PipelineApi {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
-      const articles = await client.query(
-        `UPDATE articles a
+      await client.query(
+        `UPDATE chapter_articles
          SET status = 'published', published_at = now(), updated_at = now()
-         FROM knowledge_points kp
-         WHERE a.knowledge_point_id = kp.knowledge_point_id
-           AND kp.course_id = $1
-           AND a.status = 'draft'`,
+         WHERE course_id = $1 AND status = 'draft'`,
         [courseId],
       )
-      const segments = await client.query(
+      const figures = await client.query(
+        `UPDATE figures
+         SET status = 'published', published_at = now(), updated_at = now()
+         WHERE course_id = $1 AND status = 'ready' AND selected_candidate_id IS NOT NULL`,
+        [courseId],
+      )
+      await client.query(
         `UPDATE segments
          SET status = 'published', updated_at = now()
          WHERE course_id = $1 AND status = 'draft'`,
@@ -846,14 +1107,35 @@ export class PipelineService implements PipelineApi {
         `UPDATE courses SET status = 'published' WHERE course_id = $1`,
         [courseId],
       )
+      const { rows: totals } = await client.query<{
+        chapters: number
+        points: number
+        articles: number
+        segments: number
+      }>(
+        `SELECT
+           (SELECT count(*)::int FROM chapters WHERE course_id = $1) AS chapters,
+           (SELECT count(*)::int FROM knowledge_points WHERE course_id = $1) AS points,
+           (SELECT count(*)::int FROM chapter_articles
+             WHERE course_id = $1 AND status = 'published') AS articles,
+           (SELECT count(*)::int FROM segments
+             WHERE course_id = $1 AND status = 'published') AS segments`,
+        [courseId],
+      )
       await client.query('COMMIT')
+      const row = totals[0]
       return {
         courseId,
-        status: 'published',
-        articlesPublished: articles.rowCount ?? 0,
-        segmentsPublished: segments.rowCount ?? 0,
+        published: true,
         indexed: embeddingReady,
         embedded,
+        counts: {
+          chapters: row?.chapters ?? 0,
+          knowledgePoints: row?.points ?? 0,
+          chapterArticles: row?.articles ?? 0,
+          figures: figures.rowCount ?? 0,
+          segments: row?.segments ?? 0,
+        },
       }
     } catch (error) {
       await client.query('ROLLBACK')
@@ -861,6 +1143,230 @@ export class PipelineService implements PipelineApi {
     } finally {
       client.release()
     }
+  }
+
+  /** 发布前闸门：正文里的每个 figureId 必须是本章已选且候选就绪的图示。 */
+  private async requireResolvedFigures(courseId: string): Promise<void> {
+    const { rows: articleRows } = await this.pool.query<{ chapter_id: string; markdown: string }>(
+      `SELECT chapter_id, markdown FROM chapter_articles
+       WHERE course_id = $1 AND status IN ('draft', 'published')`,
+      [courseId],
+    )
+    const refs = new Map<string, string>()
+    for (const article of articleRows) {
+      for (const match of article.markdown.matchAll(FIGURE_REF)) {
+        const figureId = match[1]
+        if (figureId !== undefined) refs.set(figureId, article.chapter_id)
+      }
+    }
+    if (refs.size === 0) return
+
+    const { rows } = await this.pool.query<{
+      figure_id: string
+      chapter_id: string
+      selected_candidate_id: string | null
+      candidate_status: string | null
+    }>(
+      `SELECT f.figure_id, f.chapter_id, f.selected_candidate_id, c.status AS candidate_status
+       FROM figures f
+       LEFT JOIN figure_candidates c ON c.candidate_id = f.selected_candidate_id
+       WHERE f.course_id = $1 AND f.figure_id = ANY($2::text[])`,
+      [courseId, [...refs.keys()]],
+    )
+    const ready = new Set<string>()
+    for (const row of rows) {
+      if (
+        row.selected_candidate_id !== null
+        && row.candidate_status === 'ready'
+        && row.chapter_id === refs.get(row.figure_id)
+      ) {
+        ready.add(row.figure_id)
+      }
+    }
+    const unresolved = [...refs.keys()].filter(figureId => !ready.has(figureId))
+    if (unresolved.length > 0) {
+      throw codedConflict('figure_unresolved', 'chapter article references unresolved figures', {
+        figureIds: unresolved,
+      })
+    }
+  }
+
+  async enqueueIllustrate(rawCourseId: string, rawChapterIds?: string[]): Promise<JobDto> {
+    const courseId = parseContentId(rawCourseId, 'courseId')
+    const { rows: courseRows } = await this.pool.query<{ status: string }>(
+      'SELECT status FROM courses WHERE course_id = $1',
+      [courseId],
+    )
+    const course = courseRows[0]
+    if (course === undefined) throw notFound('course not found')
+    if (course.status !== 'draft') throw conflict('course must be draft')
+
+    const { rows: articleRows } = await this.pool.query<{ chapter_id: string }>(
+      `SELECT chapter_id FROM chapter_articles
+       WHERE course_id = $1 AND status IN ('draft', 'published')`,
+      [courseId],
+    )
+    if (articleRows.length === 0) throw conflict('chapter articles are not applied')
+    const appliedChapters = new Set(articleRows.map(row => row.chapter_id))
+
+    let chapterIds: string[] | undefined
+    if (rawChapterIds !== undefined) {
+      if (rawChapterIds.length === 0) throw badRequest('chapterIds must not be empty')
+      const parsed = rawChapterIds.map(id => parseContentId(id, 'chapterId'))
+      for (const id of parsed) {
+        if (!appliedChapters.has(id)) throw badRequest('chapter has no applied article')
+      }
+      chapterIds = [...new Set(parsed)]
+    }
+    const targets = chapterIds ?? [...appliedChapters]
+
+    const { rows: figureRows } = await this.pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM figures
+       WHERE course_id = $1 AND status IN ('planned', 'failed') AND chapter_id = ANY($2::text[])`,
+      [courseId, targets],
+    )
+    if ((figureRows[0]?.count ?? 0) < 1) throw conflict('no figures to illustrate')
+
+    const image = await this.options.image?.()
+    if (image === undefined) throw serviceUnavailable('image model unavailable')
+    await assertImageBudget(this.pool, courseId, image.priceMicros)
+
+    let job: PipelineJob
+    try {
+      job = await this.jobs.create({
+        assetId: null,
+        courseId,
+        kind: 'illustrate',
+        options: chapterIds === undefined ? {} : { chapterIds },
+      })
+    } catch (error) {
+      if (error instanceof ActiveJobError) throw conflict('job already active')
+      throw error
+    }
+    return toJob(job)
+  }
+
+  async listFigures(filters: FigureFilters): Promise<{
+    figures: FigureDto[]
+    total: number
+    offset: number
+    limit: number
+  }> {
+    const conditions: string[] = []
+    const values: unknown[] = []
+    const add = (condition: (index: number) => string, value: unknown): void => {
+      values.push(value)
+      conditions.push(condition(values.length))
+    }
+    if (filters.courseId !== undefined) add(index => `course_id = $${index}`, filters.courseId)
+    if (filters.chapterId !== undefined) add(index => `chapter_id = $${index}`, filters.chapterId)
+    const where = conditions.length === 0 ? '' : `WHERE ${conditions.join(' AND ')}`
+
+    const { rows: countRows } = await this.pool.query<{ total: number }>(
+      `SELECT count(*)::int AS total FROM figures ${where}`,
+      values,
+    )
+    const { rows } = await this.pool.query<FigureRow>(
+      `SELECT ${FIGURE_COLUMNS} FROM figures ${where}
+       ORDER BY course_id, chapter_id, created_at, figure_id
+       OFFSET $${values.length + 1} LIMIT $${values.length + 2}`,
+      [...values, filters.offset, filters.limit],
+    )
+    const candidates = await this.candidatesFor(rows.map(row => row.figure_id))
+    return {
+      figures: rows.map(row => toFigure(row, candidates.get(row.figure_id) ?? [])),
+      total: countRows[0]?.total ?? 0,
+      offset: filters.offset,
+      limit: filters.limit,
+    }
+  }
+
+  async selectFigure(figureId: string, candidateId: string): Promise<FigureDto> {
+    const figure = await this.requireFigure(figureId)
+    if (figure.status === 'published') throw conflict('figure is published')
+    const { rows } = await this.pool.query<CandidateRow>(
+      `SELECT candidate_id, figure_id, rel_path, width, height, bytes, source_sec, status, error_code
+       FROM figure_candidates WHERE candidate_id = $1 AND figure_id = $2`,
+      [candidateId, figureId],
+    )
+    const candidate = rows[0]
+    if (candidate === undefined) throw notFound('candidate not found')
+    if (candidate.status !== 'ready') throw conflict('candidate is not ready')
+    await this.pool.query(
+      `UPDATE figures
+       SET selected_candidate_id = $2,
+           status = CASE WHEN status = 'failed' THEN 'ready' ELSE status END,
+           updated_at = now()
+       WHERE figure_id = $1`,
+      [figureId, candidateId],
+    )
+    return this.requireFigureDto(figureId)
+  }
+
+  async regenerateFigure(rawFigureId: string): Promise<FigureDto> {
+    const figureId = parseFigureId(rawFigureId)
+    const figure = await this.requireFigure(figureId)
+    if (figure.kind !== 'generated') throw conflict('only generated figures can be regenerated')
+
+    const { rows: courseRows } = await this.pool.query<{ status: string }>(
+      'SELECT status FROM courses WHERE course_id = $1',
+      [figure.course_id],
+    )
+    if (courseRows[0]?.status !== 'draft') throw conflict('course must be draft')
+
+    const image = await this.options.image?.()
+    if (image === undefined) throw serviceUnavailable('image model unavailable')
+    await assertImageBudget(this.pool, figure.course_id, image.priceMicros)
+
+    await this.pool.query('DELETE FROM figure_candidates WHERE figure_id = $1', [figureId])
+    await this.pool.query(
+      `UPDATE figures
+       SET status = 'planned', selected_candidate_id = NULL, updated_at = now()
+       WHERE figure_id = $1`,
+      [figureId],
+    )
+    try {
+      await this.jobs.create({
+        assetId: null,
+        courseId: figure.course_id,
+        kind: 'illustrate',
+        options: { chapterIds: [figure.chapter_id] },
+      })
+    } catch (error) {
+      if (error instanceof ActiveJobError) throw conflict('job already active')
+      throw error
+    }
+    return this.requireFigureDto(figureId)
+  }
+
+  async deleteFigure(rawFigureId: string): Promise<void> {
+    const figureId = parseFigureId(rawFigureId)
+    const figure = await this.requireFigure(figureId)
+    if (figure.status === 'published') {
+      throw codedConflict('figure_in_use', 'figure is published')
+    }
+    const { rowCount } = await this.pool.query(
+      `SELECT 1 FROM chapter_articles
+       WHERE course_id = $1 AND chapter_id = $2 AND strpos(markdown, 'figure:' || $3) > 0`,
+      [figure.course_id, figure.chapter_id, figureId],
+    )
+    if ((rowCount ?? 0) > 0) {
+      throw codedConflict('figure_in_use', 'figure is referenced by a chapter article', {
+        figureIds: [figureId],
+      })
+    }
+    await this.pool.query('DELETE FROM figures WHERE figure_id = $1', [figureId])
+  }
+
+  async candidateFile(rawCandidateId: string): Promise<{ relPath: string }> {
+    const candidateId = parseCandidateId(rawCandidateId)
+    const { rows } = await this.pool.query<{ rel_path: string }>(
+      'SELECT rel_path FROM figure_candidates WHERE candidate_id = $1',
+      [candidateId],
+    )
+    const row = rows[0]
+    if (row === undefined) throw notFound('candidate not found')
+    return { relPath: row.rel_path }
   }
 
   async listJobs(filters: JobFilters): Promise<{
@@ -932,6 +1438,40 @@ export class PipelineService implements PipelineApi {
       )
     }
     return toJob(job)
+  }
+
+  private async requireFigure(rawFigureId: string): Promise<FigureRow> {
+    const figureId = parseFigureId(rawFigureId)
+    const { rows } = await this.pool.query<FigureRow>(
+      `SELECT ${FIGURE_COLUMNS} FROM figures WHERE figure_id = $1`,
+      [figureId],
+    )
+    const row = rows[0]
+    if (row === undefined) throw notFound('figure not found')
+    return row
+  }
+
+  private async requireFigureDto(rawFigureId: string): Promise<FigureDto> {
+    const figure = await this.requireFigure(rawFigureId)
+    const candidates = await this.candidatesFor([figure.figure_id])
+    return toFigure(figure, candidates.get(figure.figure_id) ?? [])
+  }
+
+  private async candidatesFor(figureIds: string[]): Promise<Map<string, CandidateRow[]>> {
+    const result = new Map<string, CandidateRow[]>()
+    if (figureIds.length === 0) return result
+    const { rows } = await this.pool.query<CandidateRow>(
+      `SELECT candidate_id, figure_id, rel_path, width, height, bytes, source_sec, status, error_code
+       FROM figure_candidates WHERE figure_id = ANY($1::text[])
+       ORDER BY created_at, candidate_id`,
+      [figureIds],
+    )
+    for (const row of rows) {
+      const list = result.get(row.figure_id) ?? []
+      list.push(row)
+      result.set(row.figure_id, list)
+    }
+    return result
   }
 
   private async requireAsset(assetId: string): Promise<AssetRow> {

@@ -35,12 +35,22 @@ const POINT_SYSTEM = [
   '没有可提取内容时输出 {"knowledgePoints":[]}。不要输出解释或额外字段。',
 ].join('\n')
 
-const ARTICLE_SYSTEM = [
-  '你负责把一段课程转写整理成可发布的 Markdown 文章。',
+const CHAPTER_ARTICLE_SYSTEM = [
+  '你负责把一个章节的课程转写整理成可发布的 Markdown 教材。',
   '只输出 JSON 对象，格式为 {"markdown":"# 标题\\n\\n正文"}。',
-  '只依据给定转写写作，不补充转写中没有的事实；使用标题、段落、列表组织内容；',
-  '正文 200–800 字：先说明概念与判断依据，再结合转写中的例子展开，最后给出可执行的结论；',
-  '禁止 HTML、脚本、iframe 与 javascript: 链接。不要输出解释或额外字段。',
+  '只依据给定转写写作，不补充转写中没有的事实；用二级/三级标题、段落、列表组织多个知识点；',
+  '正文 1500–3000 字：先讲清概念与判断依据，再结合转写中的例子逐步展开，最后给出可执行的检查清单；',
+  '禁止 HTML、脚本、iframe、javascript: 链接与任何图片外链；不要输出解释或额外字段。',
+].join('\n')
+
+const FIGURE_PLAN_SYSTEM = [
+  '你负责为一个章节设计 0–3 张教学图示。',
+  '只输出 JSON 对象，格式为 {"figures":[{"kind":"keyframe","caption":"图示说明","sourceHint":"转写原文"},',
+  '{"kind":"generated","caption":"图示说明","prompt":"图像生成提示词"}]}。',
+  'keyframe 用于原视频中已有的图表画面：sourceHint 必须逐字摘录转写中的一句话，便于定位画面时间；',
+  'generated 用于补画示意图：prompt 用中文描述一张纯净的教学示意图（如趋势结构、均线排列、流程步骤），',
+  '禁止出现真实 K 线截图、具体收益数字、品牌与人物；不要生成包含文字标签的复杂图表；',
+  'caption 为 6–40 字的说明，不得重复；宁缺毋滥，没有合适的图就输出 {"figures":[]}。不要输出额外字段。',
 ].join('\n')
 
 export function outlinePrompt(digest: TranscriptSentence[], durationMs: number): PromptRequest {
@@ -62,10 +72,35 @@ export function pointPrompt(window: TranscriptSentence[], chapterTitles: string[
   }
 }
 
-export function articlePrompt(title: string, window: TranscriptSentence[]): PromptRequest {
+export function chapterArticlePrompt(
+  title: string,
+  points: { title: string }[],
+  segments: TranscriptSentence[],
+  figures: { key: string; caption: string }[],
+): PromptRequest {
+  const figureLines = figures.length === 0
+    ? []
+    : [
+        '可用图示（在正文合适位置单独一行插入 ![说明](figure:键)，每个键最多出现一次；没有必要时可以不用）：',
+        ...figures.map(figure => `${figure.key} ${figure.caption}`),
+        '',
+      ]
   return {
-    system: ARTICLE_SYSTEM,
-    user: `知识点标题：${title}\n\n相关转写：\n${formatTranscript(window)}`,
+    system: CHAPTER_ARTICLE_SYSTEM,
+    user: [
+      `章节标题：${title}`,
+      `本章知识点：${points.map(point => point.title).join('、')}`,
+      ...figureLines,
+      '本章转写：',
+      formatTranscript(segments),
+    ].join('\n'),
+  }
+}
+
+export function figurePlanPrompt(title: string, segments: TranscriptSentence[]): PromptRequest {
+  return {
+    system: FIGURE_PLAN_SYSTEM,
+    user: `章节标题：${title}\n\n本章转写：\n${formatTranscript(segments)}`,
   }
 }
 
@@ -136,9 +171,41 @@ export function parsePointResponse(value: unknown): KnowledgePointSuggestion[] {
   return points
 }
 
-export function parseArticleResponse(value: unknown): string {
+export function parseChapterArticleResponse(value: unknown): string {
   const root = record(value)
   const markdown = textValue(root?.markdown, MAX_ARTICLE_CHARS)
-  if (markdown === null) throw new Error('invalid article')
+  if (markdown === null) throw new Error('invalid chapter article')
   return markdown
+}
+
+export interface FigurePlanSuggestion {
+  kind: 'keyframe' | 'generated'
+  caption: string
+  prompt: string | null
+  sourceHint: string | null
+}
+
+export function parseFigurePlanResponse(value: unknown): FigurePlanSuggestion[] {
+  const root = record(value)
+  const list = root?.figures
+  if (!Array.isArray(list) || list.length > 3) throw new Error('invalid figure plan')
+  const figures: FigurePlanSuggestion[] = []
+  for (const item of list) {
+    const entry = record(item)
+    const kind = entry?.kind
+    const caption = textValue(entry?.caption, MAX_TITLE_CHARS)
+    if (caption === null) throw new Error('invalid figure caption')
+    if (kind === 'keyframe') {
+      const sourceHint = textValue(entry?.sourceHint, 2000)
+      if (sourceHint === null) throw new Error('invalid figure source hint')
+      figures.push({ kind, caption, prompt: null, sourceHint })
+    } else if (kind === 'generated') {
+      const prompt = textValue(entry?.prompt, 2000)
+      if (prompt === null) throw new Error('invalid figure prompt')
+      figures.push({ kind, caption, prompt, sourceHint: null })
+    } else {
+      throw new Error('invalid figure kind')
+    }
+  }
+  return figures
 }

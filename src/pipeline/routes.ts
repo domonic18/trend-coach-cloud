@@ -1,14 +1,18 @@
+import { readFile } from 'node:fs/promises'
+import { resolve, sep } from 'node:path'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type { AccountService } from '../accounts/service.js'
 import type { AppConfig } from '../config.js'
 import { parseContentId, titleField } from '../content/service.js'
-import { badRequest, HttpError, tooManyRequests } from '../errors.js'
+import { badRequest, HttpError, notFound, tooManyRequests } from '../errors.js'
 import { requireSession } from '../http/principal.js'
 import { asObject, optionalStringField } from '../http/validation.js'
 import { RateLimiter } from '../rate-limit.js'
 import {
   parseAssetId,
   parseAssetStatus,
+  parseCandidateId,
+  parseFigureId,
   parseGenerationId,
   parseJobId,
   parseJobKind,
@@ -160,7 +164,80 @@ export async function registerPipelineRoutes(app: FastifyInstance, deps: Pipelin
   app.post('/v1/admin/content/generations/:generationId/discard', async request => {
     await guard(request)
     const { generationId } = request.params as { generationId: string }
-    return { generation: await api.discardGeneration(parseGenerationId(generationId)) }
+    return api.discardGeneration(parseGenerationId(generationId))
+  })
+
+  app.post('/v1/admin/content/courses/:courseId/illustrate', async (request, reply) => {
+    await guard(request)
+    const { courseId } = request.params as { courseId: string }
+    const body = request.body === undefined ? {} : asObject(request.body)
+    let chapterIds: string[] | undefined
+    if (body.chapterIds !== undefined) {
+      if (!Array.isArray(body.chapterIds)) throw badRequest('chapterIds must be an array')
+      chapterIds = body.chapterIds.map(id => parseContentId(String(id), 'chapterId'))
+    }
+    const job = await api.enqueueIllustrate(parseContentId(courseId, 'courseId'), chapterIds)
+    return reply.code(202).send({ job })
+  })
+
+  app.get('/v1/admin/content/figures', async request => {
+    await guard(request)
+    const query = asObject(request.query)
+    const courseId = queryText(query, 'courseId')
+    const chapterId = queryText(query, 'chapterId')
+    return api.listFigures({
+      ...(courseId === undefined ? {} : { courseId: parseContentId(courseId, 'courseId') }),
+      ...(chapterId === undefined ? {} : { chapterId: parseContentId(chapterId, 'chapterId') }),
+      offset: queryInt(query, 'offset', 0, 0, 100_000),
+      limit: queryInt(query, 'limit', 50, 1, 100),
+    })
+  })
+
+  app.post('/v1/admin/content/figures/:figureId/select', async request => {
+    await guard(request)
+    const { figureId } = request.params as { figureId: string }
+    const body = asObject(request.body)
+    return {
+      figure: await api.selectFigure(
+        parseFigureId(figureId),
+        parseCandidateId(String(body.candidateId ?? '')),
+      ),
+    }
+  })
+
+  app.post('/v1/admin/content/figures/:figureId/regenerate', async (request, reply) => {
+    await guard(request)
+    const { figureId } = request.params as { figureId: string }
+    const figure = await api.regenerateFigure(parseFigureId(figureId))
+    return reply.code(202).send({ figure })
+  })
+
+  app.delete('/v1/admin/content/figures/:figureId', async (request, reply) => {
+    await guard(request)
+    const { figureId } = request.params as { figureId: string }
+    await api.deleteFigure(parseFigureId(figureId))
+    return reply.code(204).send()
+  })
+
+  app.get('/v1/admin/content/figure-candidates/:candidateId', async (request, reply) => {
+    await guard(request)
+    const { candidateId } = request.params as { candidateId: string }
+    const { relPath } = await api.candidateFile(parseCandidateId(candidateId))
+    const root = config.figureLocalDir
+    if (root === undefined) throw new HttpError(503, 'figure storage not configured')
+    const base = resolve(root)
+    const target = resolve(base, relPath)
+    if (target !== base && !target.startsWith(`${base}${sep}`)) {
+      throw new HttpError(500, 'candidate path invalid')
+    }
+    let bytes: Buffer
+    try {
+      bytes = await readFile(target)
+    } catch {
+      throw notFound('candidate image not found')
+    }
+    reply.header('cache-control', 'private, max-age=300')
+    return reply.type(target.endsWith('.png') ? 'image/png' : 'image/jpeg').send(bytes)
   })
 
   app.post('/v1/admin/content/courses/:courseId/publish', async request => {

@@ -7,7 +7,8 @@ import { assertSafeMarkdown, MAX_ARTICLE } from '../content/service.js'
 import { codePointLength } from '../http/validation.js'
 import {
   ARTICLE_CONTEXT_MS,
-  ARTICLE_MIN_CHARS,
+  CHAPTER_ARTICLE_MIN_CHARS,
+  MAX_FIGURES_PER_CHAPTER,
   MAX_TEXT_CHARS,
   MAX_TITLE_CHARS,
   PIPELINE_ERRORS,
@@ -20,17 +21,22 @@ import { randomId } from './ids.js'
 import type { PipelineJob } from './jobs.js'
 import { LlmError, type LlmClient } from './llm.js'
 import {
-  articlePrompt,
+  chapterArticlePrompt,
+  figurePlanPrompt,
   outlinePrompt,
-  parseArticleResponse,
+  parseChapterArticleResponse,
   parseChapterResponse,
+  parseFigurePlanResponse,
   parsePointResponse,
   pointPrompt,
+  type FigurePlanSuggestion,
   type PromptRequest,
 } from './prompts.js'
 import { joinText, locateExcerpt, normalizeForMatch, splitTextByChars, truncateText } from './text.js'
 import type {
+  ChapterArticleDraft,
   ChapterDraft,
+  FigureDraft,
   GenerationPayload,
   KnowledgePointDraft,
   SegmentDraft,
@@ -67,7 +73,6 @@ interface PointDraft {
   confidence: number
   needsReview: boolean
   reviewReasons: string[]
-  articleMarkdown: string | null
   startMs: number
   endMs: number
 }
@@ -291,12 +296,14 @@ async function writeGeneration(
   model: string,
 ): Promise<string> {
   const needsReview = payload.knowledgePoints.filter(point => point.needsReview).length
+    + payload.chapterArticles.filter(article => article.needsReview).length
+    + payload.figures.filter(figure => figure.needsReview).length
   const generationId = randomId('gen')
   const { rows } = await deps.pool.query<{ generation_id: string }>(
     `INSERT INTO content_generations
        (generation_id, asset_id, transcript_id, course_id, job_id, status, prompt_version, model,
-        chapters, knowledge_points, segments, needs_review, payload)
-     VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7, $8, $9, $10, $11, $12::jsonb)
+        chapters, knowledge_points, chapter_articles, figures, segments, needs_review, payload)
+     VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
      RETURNING generation_id`,
     [
       generationId,
@@ -308,6 +315,8 @@ async function writeGeneration(
       model,
       payload.chapters.length,
       payload.knowledgePoints.length,
+      payload.chapterArticles.filter(article => article.markdown !== null).length,
+      payload.figures.length,
       payload.segments.length,
       needsReview,
       JSON.stringify(payload),
@@ -481,7 +490,6 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
           confidence: suggestion.confidence,
           needsReview: reviewReasons.length > 0,
           reviewReasons,
-          articleMarkdown: null,
           startMs: range.startMs,
           endMs: range.endMs,
         })
@@ -522,53 +530,150 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
     if (segmentDrafts.length === 0) throw new PipelineFailure(PIPELINE_ERRORS.generationFailed, false)
     await progress('generate', 60)
 
-    let completed = 0
+    const pointsByChapter = new Map<string, PointDraft[]>()
+    for (const point of points) {
+      const list = pointsByChapter.get(point.chapterKey) ?? []
+      list.push(point)
+      pointsByChapter.set(point.chapterKey, list)
+    }
+    // 每章只取一次转写上下文，图示规划与教材写作共用，避免重复截取。
+    const chapterContext = new Map<string, TranscriptSegment[]>()
+    for (const chapter of chapterDrafts) {
+      const list = pointsByChapter.get(chapter.key) ?? []
+      if (list.length === 0) {
+        chapterContext.set(chapter.key, [])
+        continue
+      }
+      const startMs = Math.max(0, Math.min(...list.map(point => point.startMs)) - ARTICLE_CONTEXT_MS)
+      const endMs = Math.max(...list.map(point => point.endMs)) + ARTICLE_CONTEXT_MS
+      chapterContext.set(chapter.key, pointsInRange(segments, startMs, endMs))
+    }
+
     let generatedModel = model
-    await withRun('content.article', handle => mapLimit(
-      points,
+    await progress('figure_plan', 65)
+    const plans = await withRun('content.figure_plan', handle => mapLimit(
+      chapterDrafts,
       config.llmConcurrency,
       signal,
-      async point => {
-        const relevant = pointsInRange(
-          segments,
-          Math.max(0, point.startMs - ARTICLE_CONTEXT_MS),
-          point.endMs + ARTICLE_CONTEXT_MS,
-        )
-        const input = truncateText(relevant.map(segment => segment.text).join('\n'), ARTICLE_INPUT_MAX_CHARS)
+      async chapter => {
+        const context = chapterContext.get(chapter.key) ?? []
+        if (context.length === 0) return [] as FigurePlanSuggestion[]
+        try {
+          const result = await call(
+            'content.figure_plan',
+            figurePlanPrompt(chapter.title, context),
+            parseFigurePlanResponse,
+            handle,
+          )
+          generatedModel = result.model
+          return result.value
+        } catch (error) {
+          if (error instanceof JobCanceledError || signal.aborted) throw new JobCanceledError()
+          // 图示是增强项：规划失败只影响本章图示，不阻塞教材。
+          return [] as FigurePlanSuggestion[]
+        }
+      },
+    ))
+    await progress('figure_plan', 72)
+
+    const figures: FigureDraft[] = []
+    const figuresByChapter = new Map<string, FigureDraft[]>()
+    chapterDrafts.forEach((chapter, index) => {
+      const context = chapterContext.get(chapter.key) ?? []
+      const seenCaptions = new Set<string>()
+      for (const suggestion of (plans[index] ?? []).slice(0, MAX_FIGURES_PER_CHAPTER)) {
+        const caption = suggestion.caption.trim()
+        const normalizedCaption = normalizeForMatch(caption)
+        if (normalizedCaption === '' || seenCaptions.has(normalizedCaption)) continue
+        let sourceMs: number | null = null
+        if (suggestion.kind === 'keyframe') {
+          const hint = suggestion.sourceHint === null ? null : locateExcerpt(context, suggestion.sourceHint)
+          if (hint === null) continue
+          sourceMs = hint.startMs
+        }
+        seenCaptions.add(normalizedCaption)
+        const draft: FigureDraft = {
+          key: `fg${String(figures.length + 1).padStart(2, '0')}`,
+          chapterKey: chapter.key,
+          kind: suggestion.kind,
+          caption,
+          prompt: suggestion.kind === 'generated' ? suggestion.prompt : null,
+          sourceMs,
+          needsReview: false,
+          reviewReasons: [],
+        }
+        figures.push(draft)
+        const list = figuresByChapter.get(chapter.key) ?? []
+        list.push(draft)
+        figuresByChapter.set(chapter.key, list)
+      }
+    })
+
+    await progress('generate', 75)
+    let completed = 0
+    const articles = await withRun('content.chapter_article', handle => mapLimit(
+      chapterDrafts,
+      config.llmConcurrency,
+      signal,
+      async chapter => {
+        const context = chapterContext.get(chapter.key) ?? []
+        const chapterFigures = figuresByChapter.get(chapter.key) ?? []
+        const chapterPoints = pointsByChapter.get(chapter.key) ?? []
+        const input = truncateText(context.map(segment => segment.text).join('\n'), ARTICLE_INPUT_MAX_CHARS)
+        const window: TranscriptSegment[] = [{
+          startMs: context[0]?.startMs ?? 0,
+          endMs: context[context.length - 1]?.endMs ?? 0,
+          text: input,
+        }]
         let markdown: string | null = null
+        let used = new Set<string>()
         for (let attempt = 0; attempt < 2 && markdown === null; attempt += 1) {
           if (signal.aborted) throw new JobCanceledError()
           try {
             const result = await call(
-              'content.article',
-              articlePrompt(point.title, [{ startMs: point.startMs, endMs: point.endMs, text: input }]),
-              parseArticleResponse,
+              'content.chapter_article',
+              chapterArticlePrompt(
+                chapter.title,
+                chapterPoints.map(point => ({ title: point.title })),
+                window,
+                chapterFigures.map(figure => ({ key: figure.key, caption: figure.caption })),
+              ),
+              parseChapterArticleResponse,
               handle,
             )
             const candidate = result.value
-            if (codePointLength(candidate) > MAX_ARTICLE) throw new Error('article too long')
+            if (codePointLength(candidate) > MAX_ARTICLE) throw new Error('chapter article too long')
             assertSafeMarkdown(candidate)
-            markdown = candidate
+            const sanitized = sanitizeChapterMarkdown(candidate, chapterFigures)
+            if (sanitized.markdown === '') throw new Error('chapter article empty')
+            markdown = sanitized.markdown
+            used = sanitized.used
             generatedModel = result.model
           } catch (error) {
             if (error instanceof JobCanceledError || signal.aborted) throw new JobCanceledError()
           }
         }
-        if (markdown === null) {
-          point.articleMarkdown = null
-          point.needsReview = true
-          point.reviewReasons.push(REVIEW_REASONS.articleInvalid)
-        } else {
-          point.articleMarkdown = markdown
-          if (codePointLength(markdown) < ARTICLE_MIN_CHARS) {
-            point.needsReview = true
-            point.reviewReasons.push(REVIEW_REASONS.articleShort)
-          }
-        }
         completed += 1
-        await progress('generate', 60 + Math.round((completed / points.length) * 30))
+        await progress('generate', 75 + Math.round((completed / chapterDrafts.length) * 20))
+        const reviewReasons: string[] = []
+        if (markdown === null) {
+          reviewReasons.push(REVIEW_REASONS.chapterArticleInvalid)
+        } else if (codePointLength(markdown) < CHAPTER_ARTICLE_MIN_CHARS) {
+          reviewReasons.push(REVIEW_REASONS.chapterArticleShort)
+        }
+        const draft: ChapterArticleDraft = {
+          chapterKey: chapter.key,
+          markdown,
+          needsReview: reviewReasons.length > 0,
+          reviewReasons,
+        }
+        return { draft, used }
       },
     ))
+
+    // 正文没有引用的图不进入产物：避免 illustrate 为无用图付费。
+    const usedFigureKeys = new Set(articles.flatMap(item => [...item.used]))
+    const retainedFigures = figures.filter(figure => usedFigureKeys.has(figure.key))
 
     await progress('finalize', 95)
     if (signal.aborted) throw new JobCanceledError()
@@ -583,11 +688,40 @@ export function createGenerationHook(deps: GenerationDeps): GenerationHook {
         confidence: point.confidence,
         needsReview: point.needsReview,
         reviewReasons: point.reviewReasons,
-        articleMarkdown: point.articleMarkdown,
       })),
       segments: segmentDrafts,
+      chapterArticles: articles.map(item => item.draft),
+      figures: retainedFigures,
     }
     await writeGeneration(deps, job, transcript.transcript_id, payload, generatedModel)
     await progress('finalize', 100)
+  }
+}
+
+const INLINE_IMAGE = /!\[[^\]\n]*\]\([^)\n]*\)/g
+const FIGURE_LINE = /^!\[([^\]\n]*)\]\(figure:([A-Za-z0-9._-]{1,64})\)$/
+
+/** 只保留本章已有图示的独立引用行；外链图片、未知图示与内嵌图片整行丢弃。 */
+function sanitizeChapterMarkdown(
+  markdown: string,
+  figures: FigureDraft[],
+): { markdown: string; used: Set<string> } {
+  const valid = new Set(figures.map(figure => figure.key))
+  const used = new Set<string>()
+  const lines: string[] = []
+  for (const line of markdown.split('\n')) {
+    const trimmed = line.trim()
+    const match = FIGURE_LINE.exec(trimmed)
+    if (match !== null && valid.has(match[2]!)) {
+      lines.push(trimmed)
+      used.add(match[2]!)
+      continue
+    }
+    if (match !== null) continue
+    lines.push(line.replace(INLINE_IMAGE, ''))
+  }
+  return {
+    markdown: lines.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
+    used,
   }
 }
