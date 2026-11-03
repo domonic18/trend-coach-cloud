@@ -1,10 +1,10 @@
 # 云端服务对接清单
 
-本文用于启动**独立的云端服务仓库**，供 `dsh-plugin-trend-coach` 插件对接。接口口径以 PRD v0.5 §6 与架构 v0.6 §6、§7、§9、§10、§12 为准；冲突时先改那两份文档，再同步本文。v0.3 新增门户与 AI 运营接口（§3.11、§3.12）。
+本文用于启动**独立的云端服务仓库**，供 `dsh-plugin-trend-coach` 插件对接。接口口径以需求 v0.7 §6（C13）与架构 v0.7 §6.5 为准；冲突时先改那两份文档，再同步本文。v0.4 新增语料级生产与交互课件接口（§3.13，M9，生产 Agent 循环在外部 `dsh-plugin-trend-producer`，本文仅为云端契约）；v0.3 新增门户与 AI 运营接口（§3.11、§3.12）。
 
 ## 1. 边界
 
-云端只提供课程知识与内容服务，不承担推理（学员 BYOK）。
+云端只提供课程知识与内容服务，不承担推理（学员 BYOK）与生产 Agent 循环（M9 起由 dsh 生产插件承担）。
 
 | 提供 | 不提供 |
 |---|---|
@@ -14,13 +14,14 @@
 | 设备码授权与令牌轮换 | 学员侧内容写接口（一期只读） |
 | 鉴权指标事件接收（M2） | 第三方分析 SDK |
 | 语音转写（M4.2，MiniMax ASR，仅语音→文字） | 学员侧生成式推理 |
-| 视频→课程管线（M1/M8）：上传、转码、长音频转写、切分、章节教材与图示草稿、人工发布 | 多码率 ABR、对象存储、断点续传、自动发布 |
+| 视频→课程管线（M1/M8，M9 后为单素材兜底）：上传、转码、长音频转写、切分、章节教材与图示草稿、人工发布 | 多码率 ABR、对象存储、断点续传、自动发布 |
+| 语料级生产底座（M9）：关键帧轨道、source units 存储/检索、概念图谱、节与课件 spec 复检、生产溯源账本 | 生产 Agent 循环内嵌云端、LLM 生成课件代码、自动发布 |
 | 公开门户、自助注册/登录与个人中心（M7） | 邮件/短信验证、找回密码、客服工单 |
 | AI 用量、运行链路、任务级主备绑定与自动切换（M7） | 学员侧推理、第三方分析 SDK |
 
 **不耦合 ai-invest**：不进其库、不调其服务、不共享代码与数据；只借鉴 PostgreSQL halfvec + pg_trgm + RRF 的技术选型（PRD D2）。
 
-**内容生产管线现状（2026-11-01）**：M1 视频→课程管线已落地，覆盖素材上传、单码率 HLS、带时间戳长音频转写、章节/知识点/片段切分、文章草稿与人工发布；真实 MiniMax ASR、内容 LLM 与 1024 维 embedding 均已通过链路验收。M8 已落地：阅读层改为章节教材并新增图示（关键帧 + 文生图），学员体系契约升级到 `contractVersion=2`，插件已按新契约升级并通过 S12；真实 Ark 出图待图片模型 Key。旧课程直接作废重跑。
+**内容生产管线现状（2026-11-01）**：M1 视频→课程管线已落地，覆盖素材上传、单码率 HLS、带时间戳长音频转写、章节/知识点/片段切分、文章草稿与人工发布；真实 MiniMax ASR、内容 LLM 与 1024 维 embedding 均已通过链路验收。M8 已落地：阅读层改为章节教材并新增图示（关键帧 + 文生图），学员体系契约升级到 `contractVersion=2`，插件已按新契约升级并通过 S12；真实 Ark 出图待图片模型 Key。旧课程直接作废重跑。**M9（目标设计，见架构 v0.7 §6.5）**：语料级生产将多素材（约 69 集/10 卷/≈35h）建为一门课程，多模态理解与生产 Agent 循环在外部生产插件执行，云端提供帧轨道、理解产物存储/检索、节与课件 spec 复检、溯源账本，发布门禁不变。
 
 ## 2. 通用约定
 
@@ -802,12 +803,101 @@ GET    /v1/portal/stats                # 公开；已发布内容计数
 | 价格缺失 / 已配置 | `costMicros=null` / 按 token 单价或 `images × imagePriceMicros` 估算 |
 | 用量与运行一致性 | 每次尝试在 steps 中可见，并关联 `usageId` |
 
+### 3.13 语料级生产与交互课件（M9）
+
+> 本节为云端契约（草案，实现时同步 OpenAPI 与契约测试）。生产 Agent 循环、VLM 描述、三层校验的第 1/3 层均在生产插件侧执行；云端只做确定性存储、检索、schema/断言复检与溯源账本。全部接口位于 `/v1/admin/content/*`，使用后台会话 Bearer（无 `x-device-id`）；按账号限流 `RATE_LIMIT_CONTENT_PER_MINUTE`。门禁①（骨架批准）与门禁②（主编评审）在生产端 dsh 审批完成，云端不重复强制；云端只守 publish 硬门禁。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/media-assets/{assetId}/frames?from&to` | 关键帧轨道：短时签名帧 URL（默认 10 分钟），供生产端 VLM；仅管理端 |
+| POST | `/source-units` | 批量写入理解产物（≤100/批）；`(assetId, startMs)` 幂等 |
+| GET | `/source-units?assetId&q&conceptId&cursor&limit` | 混合检索（词法+向量，复用既有召回栈）；`limit` 1–50（默认 20） |
+| PUT | `/concepts`、`POST /concept-edges` | 术语归一与依赖边 |
+| GET/PUT | `/sections`、`PUT /sections/{sectionId}/article` | 节草稿与节教材（幂等 upsert，`version+1`） |
+| GET/POST | `/sections/{sectionId}/widgets` | 课件 spec 草稿；服务端复检 schema 与断言证明记录 |
+| GET | `/sections/{sectionId}/preview` | 管理台渲染预览（教材 + figures + widgets 试玩数据） |
+| POST | `/provenance` | 生产溯源上报，落 `ai_runs(source='producer')` 与 `ai_usage_events` |
+
+```jsonc
+// GET /v1/admin/content/media-assets/{assetId}/frames?from=0&to=600000
+{ "frames": [{ "sec": 12, "url": "https://.../keyframes/12.jpg?token=...",
+               "width": 1280, "height": 720 }],
+  "nextFrom": 600000 | null }
+
+// POST /v1/admin/content/source-units（units ≤100）
+{ "units": [{ "assetId": "as_...", "startMs": 0, "endMs": 420000,
+  "transcriptText": "...", "visual": { "description": "...", "chartType": "kline",
+                                       "keyframes": [{ "sec": 12 }] },
+  "summary": "...", "conceptRefs": ["cpt_..."],
+  "producedBy": { "taskKey": "content.chunk_summary", "model": "...", "provider": "..." } }] }
+→ 200 { "saved": [{ "unitId": "su_...", "assetId": "as_...", "startMs": 0, "deduped": false }] }
+
+// GET /v1/admin/content/source-units?assetId=as_...&q=起飞平台&limit=20
+{ "units": [{ "unitId": "su_...", "assetId": "as_...", "startMs": 0, "endMs": 420000,
+              "summary": "...", "score": 0.82 }],
+  "nextCursor": "..." | null }
+
+// PUT /v1/admin/content/concepts
+{ "courseId": "...", "name": "阻尼运动", "aliases": ["阻尼"],
+  "definition": "..." }
+→ 200 { "conceptId": "cpt_..." }   // 课程内 name 唯一，冲突 409
+
+// POST /v1/admin/content/concept-edges
+{ "courseId": "...", "fromConceptId": "cpt_a", "toConceptId": "cpt_b",
+  "kind": "prerequisite" }          // 自环 400；未知引用 404
+
+// PUT /v1/admin/content/sections/{sectionId}/article
+{ "markdown": "...", "citations": ["su_...", "su_..."] }
+→ 200 { "sectionId": "sec_...", "version": 3, "status": "draft" }
+// citations 指向不存在的 unitId：400；仅 draft 课程可写，否则 409
+
+// POST /v1/admin/content/sections/{sectionId}/widgets
+{ "type": "kline-annotator", "specVersion": 1,
+  "spec": { "data": { "source": "synthetic", "generator": "uptrend-platform", "seed": 42 },
+            "task": "画出上升趋势线", "solution": { "trendline": { } } },
+  "assertions": { "trendlineTouches": { "min": 3 }, "slopeRange": [10, 45],
+                  "noBreakBelow": true },
+  "citations": ["su_..."] }
+→ 200 { "widgetId": "wgt_...", "validation": { "trendlineTouches": "pass",
+             "slopeRange": "pass", "noBreakBelow": "pass" }, "status": "draft" }
+→ 409 { "error": "assertion_unproven" }   // 任一断言缺证明记录
+
+// POST /v1/admin/content/provenance（单条）
+{ "taskKey": "content.section_draft", "model": "...", "provider": "...",
+  "inputTokens": 1200, "outputTokens": 3000, "cachedTokens": 0,
+  "latencyMs": 45000, "status": "success",
+  "skillVersions": { "chapter-authoring": "1.2.0" }, "targetId": "sec_..." }
+→ 202 { "runId": "uuid", "usageId": "123" }
+```
+
+- **课件类型白名单**：`type` 仅 `kline-annotator | pattern-quiz | step-reveal | calc-trainer | mcq-quiz | flashcards | checklist | timeline-explorer`；白名单外 `400`；不支持的 `spec_version` `400`。spec 为纯 JSON 数据，无可执行代码字段；断言（`assertions`）由服务端确定性证明器验证，证明记录写入 `validation`，缺任一证明拒绝入库。
+- **溯源任务键**：仅 `vision.describe | content.chunk_summary | content.concept_map | content.curriculum | content.section_draft | content.section_edit | content.figure_spec | content.widget_spec`；其余 `400`。缺 `taskKey/model/status` 整体 `400`；token/latency 为非负整数。不收 prompt 与产物正文。
+- **幂等与恢复**：source units 重复 `(assetId, startMs)` 返回既有 `unitId` 且 `deduped=true`；全部草稿产物落 `draft`，生产中断按云 DB 缺失单元重入队。
+- **隐私**：帧 URL 短时签名按文件限定；响应与日志不含 spec 正文全文（仅长度/类型/状态）、不含 prompt、不含生产端模型密钥。
+
+**验收用例**
+
+| 用例 | 期望 |
+|---|---|
+| frames 签名与越权 | URL 短时签名可取帧；学员令牌 `403`；未知素材 `404` |
+| source units 幂等 | 重复 `(assetId, startMs)` 返回既有 `unitId`、`deduped=true`，不重复入库 |
+| source units 检索 | 词法+向量混合出结果；空结果 `units=[]`；`limit` 越界 `400` |
+| 概念归一 | 课程内重复 `name` `409`；自环边 `400`；未知概念引用 `404` |
+| 节教材 citations | 引用不存在 `unitId` `400`；保存 `version+1`；非 draft 课程 `409` |
+| 课件断言证明 | 全部断言有证明 `200`；缺任一证明 `409 assertion_unproven` |
+| 课件白名单 | `type=foo` `400`；不支持 `spec_version` `400` |
+| 课件数据可重放 | 同 `generator+seed` 请求复检结果一致（确定性生成器） |
+| 校验收敛 | 生产端 3 次失败进人工待办；云端无部分落库 |
+| 溯源上报 | 写入 `source='producer'` 运行与用量；缺字段 `400`；后台 AI 页可按 source 筛选 |
+| 发布门禁扩展 | 课件 `validation` 缺失 `409`；完整后照常 publish |
+
 ## 4. 数据与内容前置
 
 - M1 内容管线可产出带时间戳转写、章节/知识点切分、片段与文章草稿，经人工审核发布；真实样片与 ASR/内容 LLM/embedding 已完成验收。M8 起改为章节教材 + 图示，需另备至少 1 门样课验证章节教材与图片渲染。
+- M9 语料级生产 P0 需备至少一卷真实样片（建议"总论"卷，7 集 ≈3.5h）用于全链路验收；生产端 VLM 与内容模型密钥由 `dsh-plugin-trend-producer` 侧自配，不占用云端「模型配置」。
 - 需要至少一门真实课程与加密 HLS 样片（含 key 与分片）用于联调；建议提供 2 门课程、10+ 片段的最小数据集。
 - 视频加密方案需确认（云点播私有加密 / AES-128）并与 hls.js 解密配置对齐；M1 产出未加密 HLS，靠签名 URL 保护。
-- 检索质量以本产品自建评估集把关，不复用 ai-invest 的库或评估结果。
+- 检索质量以本产品自建评估集把关，不复用 ai-invest 的库或评估结果；M9 另建课件/教材 rubric 评估集（每卷抽 2–3 节金标准），skill 版本变更必跑回归。
 
 ## 5. 安全与合规
 
@@ -875,13 +965,19 @@ GET    /v1/portal/stats                # 公开；已发布内容计数
 | AI | 绑定与权限 | operator 只读；admin 可写；主备校验生效 |
 | AI | 主模型 429 | 切备用并冷却；冷却期直接走备用 |
 | AI | 成本 | 价格缺失 `null`；配置后按微美元估算 |
+| 语料 | frames / source units 写入与检索 | 帧签名 URL 可取；`(assetId,startMs)` 幂等；混合召回出结果；学员令牌 `403` |
+| 语料 | 概念归一与目录先验 | 重复 name `409`；自环边 `400`；目录外章节/节不被创建 |
+| 课件 | 断言证明与白名单 | 缺证明 `409 assertion_unproven`；`type`/`spec_version` 越界 `400`；同 seed 重放一致 |
+| 课件 | 三层校验收敛 | 失败回灌重写；3 次不过进人工待办；节教材 citations 非法 `400` |
+| 溯源 | provenance 入账本 | `source='producer'` 可筛选；缺字段 `400`；不含 prompt/正文 |
+| 发布 | `contractVersion=3` 与门禁扩展 | 目录含节、节响应含 widgets；`validation` 缺失 `409` |
 
 ## 7. 交付物
 
 1. 服务骨架与部署说明（staging / production），有效 TLS 证书。
 2. OpenAPI 3 文档，字段与本文一致；契约变更先改 PRD §6 与架构 §6。
-3. 数据库 schema 与迁移（课程、章节、知识点、片段、章节教材、图示与候选、进度、账号/会话/邀请码、用户/设备、令牌、事件、管线任务/转写/生成、AI 用量/运行/绑定/健康）。
-4. 学员接口（设备码、检索、片段、播放会话、体系/进度、事件、语音转写）、门户接口（注册/登录/个人中心/发布清单/统计）与后台接口（账号、内容管理、视频管线、模型配置、AI 运营）。
+3. 数据库 schema 与迁移（课程、章节、知识点、片段、章节教材、图示与候选、进度、账号/会话/邀请码、用户/设备、令牌、事件、管线任务/转写/生成、AI 用量/运行/绑定/健康；M9 增：sections/section_articles/source_units/concepts/concept_edges/widget_specs）。
+4. 学员接口（设备码、检索、片段、播放会话、体系/进度、事件、语音转写）、门户接口（注册/登录/个人中心/发布清单/统计）与后台接口（账号、内容管理、视频管线、模型配置、AI 运营；M9 增：语料生产与课件复检、溯源上报）。
 5. 鉴权中间件（Bearer + `x-device-id`、门户 `scope`、后台角色）、限流（含 ASR、门户、AI 与管线按账号限流）、错误码映射、日志脱敏。
 6. 签名 HLS 下发与 CORS/Range 配置；管线 HLS 目录与媒体根一致。
 7. 最小联调数据集（真实课程 + 加密样片 + 2–5 分钟建课样片）与测试账号。
@@ -915,4 +1011,10 @@ GET    /v1/portal/stats                # 公开；已发布内容计数
 | 图片预算上限 | 已定：¥10/课程、¥300/月；超限暂停 `illustrate` 并提示 | 账单保护 |
 | 图示 URL 策略 | 已定：短时签名（默认 10 分钟）；插件需验证 dsh-web-app CSP 是否允许外部图片域 | 插件渲染与回退方案 |
 | 旧课程处置 | 已定：直接 `archived` 并重跑，不迁移；保留 30 天后清理 | 学员进度与通知 |
-| 体系契约版本 | 已定：M8 起 `contractVersion=2`，插件低版本提示升级 | 插件发版节奏 |
+| 体系契约版本 | 已定：M8 起 `contractVersion=2`，插件低版本提示升级；M9 目标 `contractVersion=3`（目录含节、节响应含 widgets） | 插件发版节奏 |
+| 课件 spec 契约 | 白名单 8 类 schema 细节与 `spec_version` 演进规则待冻结；扩展组件需冻结新契约与渲染器版本 | 渲染器、插件与管理台版本门禁 |
+| 生产端 VLM 与采样率 | 1 帧/15s + 场景检测（35h 估 4000–6000 帧）；VLM 在生产插件侧配置 | 生产成本与理解质量 |
+| rubric 阈值与重试 | 主编评分阈值、回灌重试上限（默认 3）待 P0 试点标定 | 生产质量与成本 |
+| 生产插件运行时 | `dsh-plugin-trend-producer` 独立仓库（待建）；dsh rc 版 engines 锁版，关键路径只用稳定包 | 长任务稳定性与升级耦合 |
+| 节与卷导读 | `sections` 上线后 `chapter_articles` 是否保留卷级导读 | 契约字段与插件渲染 |
+| 生产溯源口径 | token 为生产端自报，按 `source='producer'` 区分，云端不核验 | 成本账本口径与信任边界 |
