@@ -432,6 +432,95 @@ queued ──claim──> running ──success──> succeeded
 | `429` | 管线接口限流 |
 | `503` | 管线未启用、ffmpeg 不可用、ASR/LLM/embedding/image 未配置（图片未配置时仅 `illustrate` 失败，不影响生成与发布） |
 
+### 6.5 语料级生产管线与交互课件（M9，目标架构）
+
+#### 6.5.1 角色分工
+
+| 环节 | 执行方 | 说明 |
+|---|---|---|
+| 媒体处理（上传/转码/抽帧/转写） | 云端 worker（现有 ingest 扩展关键帧轨道） | 确定性，无 LLM |
+| 理解摘要 / 概念综合 / 逐节写作 / 课件起草 / 主编评审 | **dsh 生产插件**（本机，模型自配+主备重试） | Agent 循环全部在外；Skill 工艺包热迭代 |
+| source units / 概念 / 节教材 / 课件 spec 的存储、检索与复检 | 云端 admin API | 服务端 schema 复检为确定性校验，无 LLM |
+| 溯源账本 | 云端（复用 `ai_runs`/`ai_usage_events`，`source='producer'`） | 运行时无关契约（ADR C27） |
+| 发布门禁 | 云端（`draft→publish` 硬闸门不变） | 生产插件无法发布 |
+
+新增 admin 接口（契约草案，需求 v0.7 与对接清单同步后生效）：
+
+| 方法与路径 | 用途 |
+|---|---|
+| `GET /v1/admin/content/media-assets/{assetId}/frames?from&to` | 关键帧轨道查询，返回短时签名帧 URL（供生产端 VLM） |
+| `POST /v1/admin/content/source-units` | 批量写入理解产物 |
+| `GET /v1/admin/content/source-units?assetId&q&conceptId` | 检索（词法+向量混合，复用既有召回栈） |
+| `PUT /v1/admin/content/concepts`、`POST /v1/admin/content/concept-edges` | 术语表与依赖边 |
+| `GET/PUT /v1/admin/content/sections`、`PUT /v1/admin/content/sections/{id}/article` | 节与节教材草稿 |
+| `GET/POST /v1/admin/content/sections/{id}/widgets` | 课件 spec 草稿；服务端复检 schema 与断言记录 |
+| `GET /v1/admin/content/sections/{id}/preview` | 管理台渲染预览（教材+图示+课件试玩） |
+| `POST /v1/admin/content/provenance` | 溯源上报（任务/模型/token/skill_versions，落 AI 账本） |
+
+#### 6.5.2 阶段1：多模态理解
+
+- **帧轨道**：ingest 时按场景检测 + 1 帧/15s 采样，去重后存 `work/<assetId>/keyframes/`；云端只做抽帧，不做视觉理解。
+- **理解 Agent（生产端）**：逐 chunk（5–10 分钟）取转写分组 + 采样帧，经多模态消息（帧图）产出 source unit：`{时间范围, 转写, 画面描述, 图表类型, 讲解要点, 关键帧引用}`。帧描述质量纳入 rubric 评估集。
+- 幂等：`(asset_id, start_ms)` 唯一，重跑按缺失 chunk 补齐；每 chunk 上报溯源。
+
+#### 6.5.3 阶段2：课程综合
+
+- **目录先验**：以人工目录（篇→卷→课时文件名）为骨架输入，架构师 Agent 输出 `chapters + sections` 映射与逐节 `source_asset_ids`；**不允许发明目录**（原则 11）。
+- **概念归一**：跨课时抽取概念 → 聚类合并（如"阻尼运动"多处出现归一为单一节点）→ `concepts`（含别名）与 `concept_edges`（`prerequisite` 标注教学依赖序）。
+- **术语表**：`concepts.name` 为正文与课件 spec 的术语校验基准，未收录术语在三层校验第 2 层被拒。
+- **门禁①**：骨架、概念图谱、术语表在 dsh 审批界面人工批准后，才允许进入阶段 3。
+
+#### 6.5.4 阶段3：逐节生产
+
+每节一个子代理并行生产，主编 Agent 批量评审：
+
+1. **研究**：检索该节钉住的 source units（混合召回），产出带引文与时间戳的研究简报。
+2. **节教材**：grounded 写作（概念→判断依据→实例→检查清单→常见误用结构，由 `chapter-authoring` skill 固化），1200–3000 字；每个事实性段落携带 `citations`（source unit 引用），无出处断言在三层校验第 2 层整段拒绝。
+3. **图示**：三路分工——`diagram`（程序化 SVG：LLM 出结构化 spec，服务端渲染器确定性出图，标注文字 100% 正确）、`keyframe`（按 source unit 时间戳取原始画面）、`generated`（文生图，仅装饰，禁止承载教学信息）。每节 ≤2、每章 ≤3，预算沿用 M8 限额。
+4. **课件 spec**：见 §6.5.5。
+5. **主编评审**：按 `quality-rubric` skill 输出结构化评分（概念覆盖度/讲解顺序符合依赖序/课件与正文对齐/难度梯度），低于阈值 reject 回灌重写（门禁②）。
+
+#### 6.5.5 交互课件：白名单组件与断言证明
+
+**组件白名单**（`widget_specs.type` 唯一合法值，扩展需冻结新契约）：
+
+| 组件 | 用途 | 关键断言（由校验器程序证明） |
+|---|---|---|
+| `kline-annotator` | K 线标注练习（画趋势线/标注） | 触点数下限、斜率区间、全程不跌破、形态标签与断言一致 |
+| `pattern-quiz` | 形态识别选择 | 正确答案唯一、干扰项与正确项可区分（判定器逐项验证） |
+| `step-reveal` | 分步解盘回放 | 每步结论可由该步图表状态推导 |
+| `calc-trainer` | 参数化计算训练 | 公式与参数声明固定，程序复算全部示例值 |
+| `mcq-quiz` / `flashcards` | 概念选择/术语卡 | 答案唯一；术语必须在 `concepts` 内 |
+| `checklist` | 交互清单 | 条项非空且与节概念对齐 |
+| `timeline-explorer` | 概念依赖浏览 | 边引用存在且无环（`prerequisite` 子图） |
+
+**断言证明机制（质量命门，ADR C24）**：
+
+- spec 必须携带 `assertions`（教学断言）与 `citations`（source unit 引用）。
+- 图表类数据不由模型生成数值，而由**确定性生成器**按 spec 声明合成（如 `generator=uptrend-platform, seed=42`），可重放。
+- 服务端**断言证明器**逐条验证断言在合成数据上成立，证明记录写入 `widget_specs.validation`；任一断言无证明记录即拒绝入库（`409 assertion_unproven`）。
+- 禁止 LLM 生成可执行代码；渲染由学员端/管理台确定性 React 渲染器按 `spec_version` 契约执行。
+
+#### 6.5.6 三层校验与收敛
+
+| 层 | 位置 | 内容 | 失败处理 |
+|---|---|---|---|
+| 1 schema | 生产端工具边界 + 云端复检 | zod：字段/长度/枚举/引用存在性 | 错误回灌模型重写 |
+| 2 语义 | 生产端 + 云端复检 | 断言证明（§6.5.5）、答案唯一性、术语∈`concepts`、citations 可回溯、`figure:` 引用存在 | 错误回灌重写；3 次不过标记人工待办 |
+| 3 教学质量 | 生产端主编 Agent | `quality-rubric` 结构化评分，阈值可配 | reject 回灌整节重写 |
+
+收敛失败不静默：带失败原因进入管理台人工待办，绝不部分落库后伪装成功。
+
+#### 6.5.7 溯源上报（运行时无关契约）
+
+- 生产端每完成一个产物（source unit/概念/节教材/图示/课件）调用 `POST /v1/admin/content/provenance`：`{taskKey, model, provider, tokens, skillVersions, targetId, status, latencyMs}`。
+- 云端写入 `ai_runs(source='producer')`/`ai_usage_events`/`ai_run_steps`，与云端自身任务同一账本、同一筛选界面；`task_key` 命名空间：`vision.describe`、`content.chunk_summary`、`content.concept_map`、`content.curriculum`、`content.section_draft`、`content.section_edit`、`content.figure_spec`、`content.widget_spec`。
+- 不上报 prompt 与产物正文，只记数字、模型标识与版本号（隐私口径与 §7.7 一致）。
+
+#### 6.5.8 门禁与发布演进
+
+- 门禁①（骨架）/门禁②（主编评审）在生产端 dsh 审批完成；**云端 publish 硬门禁不变**：预览页校验每处 `figure:` 引用与每个课件 `validation` 证明记录完整，缺失 `409`；未配置 embedding 可发布但 `indexed=false`。
+- 学员契约升级为 `contractVersion=3`：目录树含 `sections`，节响应含教材、`figures` 映射与 `widgets`（spec 列表）；插件低于最低版本提示升级，不静默降级。
 
 ## 7. 鉴权与会话
 
